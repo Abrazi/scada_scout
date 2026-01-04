@@ -1,0 +1,6 @@
+PySide6>=6.6.0
+PyQt6-Charts
+numpy
+flake8
+black
+pytest

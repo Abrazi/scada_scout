@@ -1,0 +1,60 @@
+from dataclasses import dataclass, field
+from enum import Enum, auto
+from typing import List, Optional, Dict, Any
+from datetime import datetime
+
+class DeviceType(Enum):
+    IEC104_RTU = "IEC 60870-5-104 RTU"
+    IEC61850_IED = "IEC 61850 IED"
+    UNKNOWN = "Unknown"
+
+class SignalType(Enum):
+    ANALOG = "Analog"
+    BINARY = "Binary"
+    DOUBLE_BINARY = "Double Binary"
+    COUNTER = "Counter"
+    COMMAND = "Command"
+
+class SignalQuality(Enum):
+    GOOD = "Good"
+    INVALID = "Invalid"
+    NOT_CONNECTED = "Not Connected"
+    BLOCKED = "Blocked"
+
+@dataclass
+class Signal:
+    """Represents a single data point (Telemetry)."""
+    name: str
+    address: str  # IOA for 104, ObjectRef for 61850
+    signal_type: SignalType
+    value: Any = None
+    quality: SignalQuality = SignalQuality.NOT_CONNECTED
+    timestamp: Optional[datetime] = None
+    description: str = ""
+
+@dataclass
+class Node:
+    """Represents a Logical Node or Grouping."""
+    name: str
+    description: str = ""
+    signals: List[Signal] = field(default_factory=list)
+    children: List['Node'] = field(default_factory=list)
+
+@dataclass
+class DeviceConfig:
+    """Configuration required to connect to a device."""
+    name: str
+    ip_address: str
+    port: int
+    device_type: DeviceType
+    scd_file_path: Optional[str] = None
+    # Protocol specific extras (e.g. Common Address for 104)
+    protocol_params: Dict[str, Any] = field(default_factory=dict)
+
+@dataclass
+class Device:
+    """Runtime representation of a connected Device."""
+    config: DeviceConfig
+    connected: bool = False
+    root_node: Optional[Node] = None
+    last_update: Optional[datetime] = None
