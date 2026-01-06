@@ -23,8 +23,15 @@ def main():
     device_manager = DeviceManager()
     controller = AppController(device_manager)
     
+    # No default devices added on startup
+    # User must add manually or import SCD
+    # Create Main Window
     window = MainWindow(device_manager)
+    window.show()
     
+    # Connect event logger to event log widget
+    controller.event_logger.event_logged.connect(window.event_log_widget.log_event)
+    controller.event_logger.info("Application", "SCADA Scout started successfully")
     # Start the controller
     controller.start_application()
     

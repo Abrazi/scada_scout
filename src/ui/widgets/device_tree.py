@@ -1,6 +1,7 @@
-from PySide6.QtWidgets import QTreeView, QWidget, QVBoxLayout, QHeaderView, QMenu
-from PySide6.QtGui import QAction, QStandardItemModel, QStandardItem
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QTreeView, QMenu, QHeaderView
+from PySide6.QtGui import QStandardItemModel, QStandardItem, QAction, QColor, QBrush
 from PySide6.QtCore import Qt, Signal as QtSignal
+from typing import Optional
 from src.ui.widgets.connection_dialog import ConnectionDialog
 
 class DeviceTreeWidget(QWidget):
@@ -13,9 +14,10 @@ class DeviceTreeWidget(QWidget):
     # For now, let's emit the Node object so the SignalsView can filter.
     selection_changed = QtSignal(object) # Node or Device or None
 
-    def __init__(self, device_manager, parent=None):
+    def __init__(self, device_manager, watch_list_manager=None, parent=None):
         super().__init__(parent)
         self.device_manager = device_manager
+        self.watch_list_manager = watch_list_manager
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(0, 0, 0, 0)
         
@@ -240,33 +242,126 @@ class DeviceTreeWidget(QWidget):
                 break
 
     def _on_context_menu(self, position):
-        """Shows context menu for device nodes."""
+        """Shows context menu for device nodes and signal nodes."""
         index = self.tree_view.indexAt(position)
         if not index.isValid():
             return
-            
-        # Check if we clicked on a Device Root Node
-        # Device nodes have UserRole data set to their name
-        item = self.model.itemFromIndex(index)
-        # Note: Columns other than 0 might not have the data, navigate to col 0
-        root_item = self.model.itemFromIndex(index.siblingAtColumn(0))
-        device_name = root_item.data(Qt.UserRole)
         
-        if device_name:
-            menu = QMenu()
-            edit_action = QAction("Edit Connection", self)
-            edit_action.triggered.connect(lambda: self._edit_device(device_name))
-            menu.addAction(edit_action)
+        # Get the item from column 0
+        root_item = self.model.itemFromIndex(index.siblingAtColumn(0))
+        data = root_item.data(Qt.UserRole)
+        
+        menu = QMenu()
+        
+        # Check if it's a device node (string) or signal node (Signal object)
+        from src.models.device_models import Signal
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        # logger.info(f"Context menu on item: {type(data)} - {data}")
+        
+        if isinstance(data, str):
+            # Device node
+            device_name = data
+            device = self.device_manager.get_device(device_name)
+            if device:
+                # Discovery mode toggle (existing functionality)
+                online_action = QAction("Use Online Discovery", self)
+                scd_action = QAction("Use SCD Discovery", self)
+                
+                scd_action.setCheckable(True)
+                online_action.setCheckable(True)
+                
+                if device.config.use_scd_discovery:
+                    scd_action.setChecked(True)
+                else:
+                    online_action.setChecked(True)
+                
+                online_action.triggered.connect(lambda: self.device_manager.set_discovery_mode(device_name, False))
+                scd_action.triggered.connect(lambda: self.device_manager.set_discovery_mode(device_name, True))
+                
+                menu.addAction(online_action)
+                menu.addAction(scd_action)
+                
+                # Connect/Disconnect
+                menu.addSeparator()
+                if device.connected:
+                    disc_action = QAction("Disconnect", self)
+                    disc_action.triggered.connect(lambda: self.device_manager.disconnect_device(device_name))
+                    menu.addAction(disc_action)
+                else:
+                    conn_action = QAction("Connect", self)
+                    conn_action.triggered.connect(lambda: self.device_manager.connect_device(device_name))
+                    menu.addAction(conn_action)
+                
+                # Edit and Remove
+                menu.addSeparator()
+                edit_action = QAction("Edit Connection", self)
+                edit_action.triggered.connect(lambda: self._edit_device(device_name))
+                menu.addAction(edit_action)
+                
+                remove_action = QAction("Remove Device", self)
+                remove_action.triggered.connect(lambda: self._confirm_remove_device(device_name))
+                menu.addAction(remove_action)
+        
+        elif isinstance(data, Signal) or (hasattr(data, 'name') and hasattr(data, 'address')):
+            # Signal node (strict check or duck typing)
+            signal = data
             
-            # Could add Connect/Disconnect here too
+            # Find the device name by traversing up the tree
+            device_name = self._find_device_for_item(root_item)
             
+            if device_name and self.watch_list_manager:
+                watch_action = QAction("Add to Watch List", self)
+                # Use closure to capture variables
+                def add_watch():
+                    self.watch_list_manager.add_signal(device_name, signal)
+                    
+                watch_action.triggered.connect(add_watch)
+                menu.addAction(watch_action)
+                
+                # Control option (placeholder for future SBO implementation)
+                menu.addSeparator()
+                control_action = QAction("Control... (Coming Soon)", self)
+                control_action.setEnabled(False)
+                menu.addAction(control_action)
+        
+        if menu.actions():
             menu.exec(self.tree_view.viewport().mapToGlobal(position))
+    
+    def _find_device_for_item(self, item: QStandardItem) -> Optional[str]:
+        """Find the device name by traversing up to the root."""
+        current = item
+        while current:
+            data = current.data(Qt.UserRole)
+            if isinstance(data, str):
+                # Found device name
+                return data
+            current = current.parent()
+        return None
+
+    def _confirm_remove_device(self, device_name):
+        """Asks user for confirmation before removing device."""
+        from PySide6.QtWidgets import QMessageBox
+        reply = QMessageBox.question(
+            self, 
+            "Remove Device",
+            f"Are you sure you want to remove device '{device_name}'?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            self.device_manager.remove_device(device_name)
 
     def _edit_device(self, device_name):
         """Opens dialog to edit device."""
         device = self.device_manager.get_device(device_name)
         if not device:
             return
+        
+        # We need to import ConnectionDialog here to avoid circular imports if any
+        # Assuming it's imported at top, but if not:
+        from src.ui.widgets.connection_dialog import ConnectionDialog
             
         dialog = ConnectionDialog(self)
         dialog.set_config(device.config)

@@ -26,11 +26,12 @@ class Signal:
     """Represents a single data point (Telemetry)."""
     name: str
     address: str  # IOA for 104, ObjectRef for 61850
-    signal_type: SignalType
+    signal_type: Any = None # Allow None/String during discovery
     value: Any = None
     quality: SignalQuality = SignalQuality.NOT_CONNECTED
     timestamp: Optional[datetime] = None
     description: str = ""
+    access: str = "RO" # Added access field matching usage
 
 @dataclass
 class Node:
@@ -46,8 +47,10 @@ class DeviceConfig:
     name: str
     ip_address: str
     port: int
-    device_type: DeviceType
+    device_type: DeviceType = DeviceType.IEC61850_IED
+    enabled: bool = True
     scd_file_path: Optional[str] = None
+    use_scd_discovery: bool = True # Prefer SCD by default if available
     # Protocol specific extras (e.g. Common Address for 104)
     protocol_params: Dict[str, Any] = field(default_factory=dict)
 

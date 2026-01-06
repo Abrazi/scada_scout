@@ -90,20 +90,20 @@ class SCDParser:
                 prefix = ln.get("prefix", "")
                 ln_class = ln.get("lnClass", "")
                 inst = ln.get("inst", "")
-                full_ln_name = f"{prefix}{ln_class}{inst}"
+                ln_class_or_inst = f"{prefix}{ln_class}{inst}"
                 
-                ln_node_obj = Node(name=full_ln_name, description=f"{ln_class} Node")
-                ld_node.children.append(ln_node_obj)
+                ln_node = Node(name=ln_class_or_inst, description=f"Logical Node ({ln_class})")
+                ld_node.children.append(ln_node)
                 
-                # Resolving DOs requires looking up LNType
-                ln_type = ln.get("lnType")
-                if ln_type:
-                    self._expand_ln_type(ln_node_obj, ln_type)
+                # Get LN Type for expansion
+                ln_type_id = ln.get("lnType")
+                
+                if ln_type_id:
+                    # Build the path prefix for this LN: "LD_NAME/LN_NAME"
+                    ln_path = f"{ld_name}/{ln_class_or_inst}"
                     
-                # Resolving DOs requires looking up LNType
-                ln_type = ln.get("lnType")
-                if ln_type:
-                    self._expand_ln_type(ln_node_obj, ln_type)
+                    # Expand the LN Type to get DOs and DAs, passing ld_name
+                    self._expand_ln_type_with_path(ln_node, ln_type_id, ln_path, ld_name)
                     
                 # --- Advanced Features: DataSets, Reporting, GOOSE ---
                 
@@ -135,7 +135,7 @@ class SCDParser:
                             ds_entry_node = Node(name=entry_name, description="Type=FCDA")
                             ds_node.children.append(ds_entry_node)
                     
-                    ln_node_obj.children.append(datasets_root)
+                    ln_node.children.append(datasets_root)
 
                 # 2. Reports Branch
                 report_elements = ln.findall("scl:ReportControl", self.ns) + ln.findall("ReportControl")
@@ -152,7 +152,7 @@ class SCDParser:
                         rpt_node = Node(name=rpt_name, description=desc)
                         reports_root.children.append(rpt_node)
                     
-                    ln_node_obj.children.append(reports_root)
+                    ln_node.children.append(reports_root)
 
                 # 3. GOOSE Branch
                 goose_elements = ln.findall("scl:GSEControl", self.ns) + ln.findall("GSEControl")
@@ -168,65 +168,109 @@ class SCDParser:
                         gse_node = Node(name=gse_name, description=desc)
                         goose_root.children.append(gse_node)
                     
-                    ln_node_obj.children.append(goose_root)
+                    ln_node.children.append(goose_root)
 
         return root_node
 
-    def _expand_ln_type(self, ln_node: Node, ln_type_id: str):
-        """Looks up LNodeType in DataTypeTemplates and adds DOs."""
-        # Find DataTypeTemplates
-        templates = self.root.find("scl:DataTypeTemplates", self.ns)
-        if not templates:
-            templates = self.root.find("DataTypeTemplates")
-        if not templates:
+    def _expand_ln_type_with_path(self, ln_node: Node, ln_type_id: str, path_prefix: str, ld_name: str = ""):
+        """
+        Recursively expand an LN Type into DOs and DAs.
+        path_prefix is typically 'LD_NAME/LN_NAME' (e.g., 'GPS01ECB01/XCBR1')
+        """
+        # Find DataTypeTemplates (not DataModelDirectory!)
+        templates_root = self.root.find("scl:DataTypeTemplates", self.ns)
+        if not templates_root:
+            templates_root = self.root.find("DataTypeTemplates")
+        if not templates_root:
             return
 
-        lntype_def = templates.find(f"scl:LNodeType[@id='{ln_type_id}']", self.ns)
+        # Build template dictionaries
+        lnode_types = {}
+        for lnt in templates_root.findall("scl:LNodeType", self.ns) + templates_root.findall("LNodeType"):
+            lid = lnt.get("id")
+            if lid:
+                lnode_types[lid] = lnt
+
+        do_types = {}
+        for dot in templates_root.findall("scl:DOType", self.ns) + templates_root.findall("DOType"):
+            did = dot.get("id")
+            if did:
+                do_types[did] = dot
+
+        da_types = {}
+        for dat in templates_root.findall("scl:DAType", self.ns) + templates_root.findall("DAType"):
+            daid = dat.get("id")
+            if daid:
+                da_types[daid] = dat
+
+        templates = {**lnode_types, **do_types, **da_types}
+
+        # Lookup LNType
+        lntype_def = templates.get(ln_type_id)
         if not lntype_def:
-            lntype_def = templates.find(f"LNodeType[@id='{ln_type_id}']")
-            
-        if not lntype_def:
+            logger.warning(f"LNType {ln_type_id} not found in templates")
             return
 
+        # Iterate DOs in LNType
         for do in lntype_def.findall("scl:DO", self.ns) + lntype_def.findall("DO"):
             do_name = do.get("name")
             do_type_id = do.get("type")
-            
+
             do_node = Node(name=do_name, description="Data Object")
             ln_node.children.append(do_node)
-            
-            # Recursively expand attributes (DA) from DOType
-            if do_type_id:
-                self._expand_do_type(do_node, do_type_id, templates)
 
-    def _expand_do_type(self, do_node: Node, do_type_id: str, templates: ET.Element):
-        dotype_def = templates.find(f"scl:DOType[@id='{do_type_id}']", self.ns)
-        if not dotype_def:
-            dotype_def = templates.find(f"DOType[@id='{do_type_id}']")
+            if do_type_id:
+                # Build path for this DO
+                do_path = f"{path_prefix}.{do_name}"
+                # Expand recursively, passing LD name
+                self._expand_do_type(do_node, do_type_id, templates, do_path, ld_name)
+
+    def _expand_ln_type(self, ln_node: Node, ln_type_id: str):
+        """Legacy wrapper for backward compatibility or direct calls."""
+        # This method is now deprecated as it cannot provide the necessary ld_name for full addresses.
+        # It will call the new method with an empty ld_name and a simplified path.
+        self._expand_ln_type_with_path(ln_node, ln_type_id, ln_node.name, "")
+
+    def _map_btype_to_signal_type(self, btype: str) -> SignalType:
+        """Maps SCL bType to internal SignalType."""
+        if btype == "BOOLEAN":
+            return SignalType.DOUBLE_BINARY
+        # Add more mappings as needed
+        return SignalType.ANALOG # Default
+
+    def _expand_do_type(self, parent_node: Node, do_type_id: str, templates: dict, path_prefix: str, ld_name: str = ""):
+        """Recursively expand a DO Type into DAs, using path_prefix for full address."""
+        dotype_def = templates.get(do_type_id)
         if not dotype_def:
             return
-
-        for da in dotype_def.findall("scl:DA", self.ns) + dotype_def.findall("DA"):
-            da_name = da.get("name")
-            fc = da.get("fc", "")
-            btype = da.get("bType", "")
+        
+        for sdo_or_da in list(dotype_def):
+            tag = sdo_or_da.tag.split('}')[-1]  # Strip namespace
+            elem_name = sdo_or_da.get("name")
             
-            # Create Signal
-            # For address, we technically need the full path, but here we are offline.
-            # We'll construct a relative path. Adapter will prefix.
-            
-            # Simple heuristic for type
-            sig_type = SignalType.ANALOG
-            if btype == "BOOLEAN" or "stVal" in da_name:
-                sig_type = SignalType.DOUBLE_BINARY # Close enough for visualize
+            if tag == "DA":  # Data Attribute - this is a signal
+                fc = sdo_or_da.get("fc")
+                btype = sdo_or_da.get("bType")
+                sig_type = self._map_btype_to_signal_type(btype)
                 
-            signal = Signal(
-                name=da_name,
-                address=f"{do_node.name}.{da_name}", # Placeholder
-                signal_type=sig_type,
-                description=f"FC={fc} Type={btype}"
-            )
-            do_node.signals.append(signal)
+                # Build full address with LD prefix
+                full_address = f"{ld_name}/{path_prefix}.{elem_name}" if ld_name else f"{path_prefix}.{elem_name}"
+                
+                signal = Signal(
+                    name=elem_name,
+                    address=full_address,
+                    signal_type=sig_type,
+                    description=f"FC:{fc} Type:{btype}"
+                )
+                parent_node.signals.append(signal)
+                
+            elif tag == "SDO":  # Sub Data Object
+                sdo_type_id = sdo_or_da.get("type")
+                sdo_node = Node(name=elem_name, description="Sub Data Object")
+                parent_node.children.append(sdo_node)
+                if sdo_type_id:
+                    new_path = f"{path_prefix}.{elem_name}"
+                    self._expand_do_type(sdo_node, sdo_type_id, templates, new_path, ld_name)
 
     def extract_ieds_info(self) -> List[Dict[str, str]]:
         """

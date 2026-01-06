@@ -73,7 +73,11 @@ class MainWindow(QMainWindow):
         self.dock_left = QDockWidget("Device Explorer", self)
         self.dock_left.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
         
-        self.device_tree = DeviceTreeWidget(self.device_manager)
+        # Create watch list manager first (needed by device tree)
+        from src.core.watch_list_manager import WatchListManager
+        self.watch_list_manager = WatchListManager(self.device_manager)
+        
+        self.device_tree = DeviceTreeWidget(self.device_manager, self.watch_list_manager)
         self.dock_left.setWidget(self.device_tree)
         self.addDockWidget(Qt.LeftDockWidgetArea, self.dock_left)
         
@@ -84,9 +88,36 @@ class MainWindow(QMainWindow):
         self.dock_right = QDockWidget("Data Visualization", self)
         self.dock_right.setAllowedAreas(Qt.RightDockWidgetArea | Qt.LeftDockWidgetArea)
         
-        self.signals_view = SignalsViewWidget(self.device_manager)
+        self.signals_view = SignalsViewWidget(self.device_manager, self.watch_list_manager)
         self.dock_right.setWidget(self.signals_view)
         self.addDockWidget(Qt.RightDockWidgetArea, self.dock_right)
+        
+        # Watch List panel  
+        self.dock_bottom = QDockWidget("Watch List", self)
+        self.dock_bottom.setAllowedAreas(Qt.BottomDockWidgetArea | Qt.TopDockWidgetArea)
+        
+        from src.ui.widgets.watch_list_widget import WatchListWidget
+        self.watch_list_widget = WatchListWidget(self.watch_list_manager)
+        self.dock_bottom.setWidget(self.watch_list_widget)
+        self.addDockWidget(Qt.BottomDockWidgetArea, self.dock_bottom)
+        
+        # Event Log panel (right side, tabified with Data Visualization)
+        self.dock_events = QDockWidget("Event Log", self)
+        self.dock_events.setAllowedAreas(Qt.RightDockWidgetArea | Qt.BottomDockWidgetArea)
+        
+        from src.ui.widgets.event_log_widget import EventLogWidget
+        self.event_log_widget = EventLogWidget()
+        self.dock_events.setWidget(self.event_log_widget)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.dock_events)
+        
+        # Tabify event log with signals view
+        self.tabifyDockWidget(self.dock_right, self.dock_events)
+        self.dock_right.raise_()  # Make signals view the active tab
+        
+        # Connect event logger to widget
+        from src.core.app_controller import AppController
+        # Get the app controller instance (passed from main)
+        # For now, we'll connect it after the fact in main.py
 
     def _show_connection_dialog(self):
         """Opens the Connection Dialog."""
@@ -95,10 +126,29 @@ class MainWindow(QMainWindow):
             config = dialog.get_config()
             try:
                 self.device_manager.add_device(config)
-                self.device_manager.connect_device(config.name)
+                self._connect_with_progress(config.name)
             except ValueError as e:
-                # TODO: Show error message
-                print(f"Error adding device: {e}")
+                from PySide6.QtWidgets import QMessageBox
+                QMessageBox.critical(self, "Error", f"Error adding device: {e}")
+    
+    def _connect_with_progress(self, device_name: str):
+        """Connect to device with progress dialog."""
+        from src.ui.widgets.connection_progress_dialog import ConnectionProgressDialog
+        
+        # Show progress dialog
+        progress_dialog = ConnectionProgressDialog(device_name, self)
+        
+        # Connect signal
+        self.device_manager.connection_progress.connect(
+            lambda name, msg, pct: progress_dialog.update_progress(msg, pct) if name == device_name else None
+        )
+        
+        # Start connection in background (for now, still blocking but with feedback)
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(100, lambda: self.device_manager.connect_device(device_name))
+        
+        # Show dialog
+        progress_dialog.exec()
 
     def _show_scd_import_dialog(self):
         """Opens the SCD Import Dialog."""

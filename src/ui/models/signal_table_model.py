@@ -1,5 +1,5 @@
 from PySide6.QtCore import Qt, QAbstractTableModel, QModelIndex
-from typing import List, Dict
+from typing import List, Dict, Optional
 from src.models.device_models import Signal
 
 class SignalTableModel(QAbstractTableModel):
@@ -59,6 +59,11 @@ class SignalTableModel(QAbstractTableModel):
             bottom_right = self.index(row, 5)
             self.dataChanged.emit(top_left, bottom_right, [Qt.DisplayRole])
 
+    def get_signal_at_row(self, row: int) -> Optional[Signal]:
+        if 0 <= row < len(self._signals):
+            return self._signals[row]
+        return None
+
     def rowCount(self, parent=QModelIndex()) -> int:
         return len(self._signals)
 
@@ -74,9 +79,12 @@ class SignalTableModel(QAbstractTableModel):
 
         if col == 0: return signal.name
         elif col == 1: return signal.address
-        elif col == 2: return signal.signal_type.value
-        elif col == 3: return str(signal.value)
-        elif col == 4: return signal.quality.value
+        elif col == 2: 
+            if hasattr(signal, 'signal_type') and signal.signal_type:
+                return signal.signal_type.value if hasattr(signal.signal_type, 'value') else str(signal.signal_type)
+            return "Unknown"
+        elif col == 3: return str(signal.value) if signal.value is not None else "-"
+        elif col == 4: return signal.quality.value if hasattr(signal.quality, 'value') else str(signal.quality)
         elif col == 5: 
             return signal.timestamp.strftime("%H:%M:%S.%f")[:-3] if signal.timestamp else "-"
         

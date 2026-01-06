@@ -9,9 +9,12 @@ class SignalsViewWidget(QWidget):
     Widget containing the Data Grid and Live Chart.
     Uses tabs to switch between Table View and Chart View.
     """
-    def __init__(self, device_manager, parent=None):
+    def __init__(self, device_manager, watch_list_manager=None, parent=None):
         super().__init__(parent)
         self.device_manager = device_manager
+        self.watch_list_manager = watch_list_manager
+        self.current_device_name = None  # Track which device's signals we're showing
+        
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(0, 0, 0, 0)
         
@@ -33,6 +36,10 @@ class SignalsViewWidget(QWidget):
         self.table_view.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table_view.setSelectionBehavior(QTableView.SelectRows)
         
+        # Enable context menu
+        self.table_view.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table_view.customContextMenuRequested.connect(self._on_table_context_menu)
+        
         # Init Model
         self.table_model = SignalTableModel()
         self.table_view.setModel(self.table_model)
@@ -43,7 +50,65 @@ class SignalsViewWidget(QWidget):
 
     def set_filter_node(self, node):
         """Updates the view to show signals from the given node."""
+        if node is None:
+            self.current_device_name = None
+        
         self.table_model.set_node_filter(node)
+        
+        # Trigger background read for these signals to update status from 'Not Connected'
+        if node:
+            # We need to find the device name for this node
+            # For simplicity, if we don't have it, we'll try to get it
+            device_name = self._get_current_device_name()
+            if device_name:
+                from PySide6.QtCore import QTimer
+                # Get all signals in this view
+                signals = self._collect_signals(node)
+                # Read them one by one in the background (very basic implementation)
+                for i, sig in enumerate(signals):
+                    # Delay slightly to avoid flooding
+                    QTimer.singleShot(i * 10, lambda s=sig: self.device_manager.read_signal(device_name, s))
+
+    def _on_table_context_menu(self, position):
+        """Handle right-click context menu in signals table."""
+        from PySide6.QtWidgets import QMenu
+        from PySide6.QtGui import QAction
+        
+        index = self.table_view.indexAt(position)
+        if not index.isValid():
+            return
+        
+        # Get the signal from the model
+        signal = self.table_model.get_signal_at_row(index.row())
+        if not signal or not self.watch_list_manager:
+            return
+        
+        # We need device_name - try to get from current context
+        # This is a limitation - we need to track which device's signals are shown
+        # For now, try to get from first connected device or require explicit tracking
+        device_name = self._get_current_device_name()
+        if not device_name:
+            return
+        
+        menu = QMenu()
+        add_action = QAction("Add to Watch List", self)
+        add_action.triggered.connect(lambda: self.watch_list_manager.add_signal(device_name, signal))
+        menu.addAction(add_action)
+        
+        menu.exec(self.table_view.viewport().mapToGlobal(position))
+    
+    def _get_current_device_name(self):
+        """Get the device name for current signals view."""
+        # Try to use tracked device name
+        if hasattr(self, 'current_device_name') and self.current_device_name:
+            return self.current_device_name
+        
+        # Fallback: get first connected device
+        devices = self.device_manager.get_all_devices()
+        for device in devices:
+            if device.connected:
+                return device.config.name
+        return None
 
     def _setup_chart_tab(self):
         """Create the Chart tab."""

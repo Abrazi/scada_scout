@@ -1,6 +1,7 @@
-PySide6>=6.6.0
+PySide6
 PyQt6-Charts
 numpy
-flake8
-black
+# Dev tools
 pytest
+ipython
+pyiec61850
