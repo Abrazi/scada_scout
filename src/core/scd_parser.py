@@ -1,5 +1,5 @@
 import xml.etree.ElementTree as ET
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any
 import os
 import logging
 
@@ -13,12 +13,14 @@ class SCDParser:
     Mimics the logic from the reference 'IEC61850DiscoverIED'.
     """
     
-    NS = {'scl': 'http://www.iec.ch/61850/2003/SCL'}
+    # Class-level cache for parsed trees: {file_path: (mtime, tree, root, ns)}
+    _cache = {}
 
     def __init__(self, file_path: str):
         self.file_path = file_path
         self.tree = None
         self.root = None
+        self.ns = {}
         self._parse()
 
     def _parse(self):
@@ -27,14 +29,30 @@ class SCDParser:
             return
         
         try:
+            mtime = os.path.getmtime(self.file_path)
+            
+            # Check cache
+            if self.file_path in self._cache:
+                cached_mtime, tree, root, ns = self._cache[self.file_path]
+                if cached_mtime == mtime:
+                    self.tree = tree
+                    self.root = root
+                    self.ns = ns
+                    # logger.debug(f"Using cached SCD parse for {self.file_path}")
+                    return
+
             self.tree = ET.parse(self.file_path)
             self.root = self.tree.getroot()
-            # Handle namespaced XML
-            # If the root tag has the namespace, we need to use it for queries
-            if 'http://www.iec.ch/61850/2003/SCL' in self.root.tag:
-                self.ns = self.NS
+            
+            # Detect Namespace
+            if '}' in self.root.tag:
+                ns_uri = self.root.tag.split('}')[0].strip('{')
+                self.ns = {'scl': ns_uri}
             else:
-                self.ns = {} # No namespace or different one, try to detect or fallback
+                self.ns = {}
+            
+            # Update cache
+            self._cache[self.file_path] = (mtime, self.tree, self.root, self.ns)
                 
         except Exception as e:
             logger.error(f"Failed to parse SCD file: {e}")
@@ -202,8 +220,27 @@ class SCDParser:
             daid = dat.get("id")
             if daid:
                 da_types[daid] = dat
+                
+        enum_types = {}
+        for et in templates_root.findall("scl:EnumType", self.ns) + templates_root.findall("EnumType"):
+            eid = et.get("id")
+            if eid:
+                enums = {}
+                for enum_val in et.findall("scl:EnumVal", self.ns) + et.findall("EnumVal"):
+                     ord_val = enum_val.get("ord")
+                     text_val = enum_val.text
+                     if ord_val is not None:
+                         try:
+                             enums[int(ord_val)] = text_val
+                         except: pass
+                enum_types[eid] = enums
+                logger.debug(f"Parsed EnumType '{eid}' with {len(enums)} values: {enums}")
 
-        templates = {**lnode_types, **do_types, **da_types}
+        logger.debug(f"Total EnumTypes found: {len(enum_types)}")
+        templates = {**lnode_types, **do_types, **da_types, **enum_types} # Include enums in templates for easy lookup if needed (though we separate them mostly)
+        # Store enums separately or mix them? 
+        # _expand_do_type receives `templates`. Let's assume we can lookup enums by ID in `templates`.
+        # Since ids are unique across types usually, this should be fine.
 
         # Lookup LNType
         lntype_def = templates.get(ln_type_id)
@@ -235,6 +272,10 @@ class SCDParser:
         """Maps SCL bType to internal SignalType."""
         if btype == "BOOLEAN":
             return SignalType.DOUBLE_BINARY
+        if btype == "Timestamp":
+            return SignalType.TIMESTAMP
+        if btype in ["Enum", "Dbpos"]:
+             return SignalType.BINARY
         # Add more mappings as needed
         return SignalType.ANALOG # Default
 
@@ -253,15 +294,60 @@ class SCDParser:
                 btype = sdo_or_da.get("bType")
                 sig_type = self._map_btype_to_signal_type(btype)
                 
+                if elem_name.lower().endswith(".t") or elem_name == "T":
+                    sig_type = SignalType.TIMESTAMP
+
+                # Control Check
+                access = "RO"
+                if fc == "CO" or elem_name == "ctVal":
+                     sig_type = SignalType.COMMAND
+                     access = "RW"
+
                 # Build full address with LD prefix
-                full_address = f"{ld_name}/{path_prefix}.{elem_name}" if ld_name else f"{path_prefix}.{elem_name}"
+                # Fix: Check if path_prefix already starts with ld_name to avoid duplication
+                # Although path_prefix usually is LN.DO...
+                # The user reported "GPS...CB1/GPS...CB1/XCBR1.Beh.stVal"
+                # This suggests ld_name was added, and maybe path_prefix also contained it?
+                # Or maybe ld_name itself contained the slash?
+                
+                # Standard check:
+                if ld_name and not path_prefix.startswith(ld_name + "/"):
+                    full_address = f"{ld_name}/{path_prefix}.{elem_name}"
+                else:
+                    # If path_prefix already has the LD (unlikely but safe)
+                    full_address = f"{path_prefix}.{elem_name}"
                 
                 signal = Signal(
                     name=elem_name,
                     address=full_address,
                     signal_type=sig_type,
-                    description=f"FC:{fc} Type:{btype}"
+                    description=f"FC:{fc} Type:{btype}",
+                    access=access,
+                    fc=fc
                 )
+                
+                # Check for Enum Mapping
+                type_id = sdo_or_da.get("type")
+                logger.debug(f"DA '{elem_name}': bType={btype}, fc={fc}, type={type_id}")
+                
+                if type_id:
+                     # Check if it's an EnumType (dict)
+                     # In our parsing above, enum_types entries are Dicts, while others are xml Elements.
+                     # We stored enums in templates, but they're dicts while LNodeTypes/DOTypes/DATypes are Elements
+                     if type_id in templates:
+                         possible_enum = templates[type_id]
+                         if isinstance(possible_enum, dict):
+                             logger.info(f"✓ Enum mapping for {full_address} ({elem_name}): {possible_enum}")
+                             signal.enum_map = possible_enum
+                             if sig_type == SignalType.ANALOG:
+                                 # Optionally convert to State type for enum values
+                                 pass
+                         else:
+                             # It's a DAType or other complex type, not an enum
+                             logger.debug(f"  Type '{type_id}' is not an EnumType (it's {type(possible_enum).__name__})")
+                     else:
+                         logger.warning(f"  Type '{type_id}' not found in templates for DA '{elem_name}'")
+                
                 parent_node.signals.append(signal)
                 
             elif tag == "SDO":  # Sub Data Object
@@ -272,36 +358,48 @@ class SCDParser:
                     new_path = f"{path_prefix}.{elem_name}"
                     self._expand_do_type(sdo_node, sdo_type_id, templates, new_path, ld_name)
 
-    def extract_ieds_info(self) -> List[Dict[str, str]]:
+    def extract_ieds_info(self) -> List[Dict[str, Any]]:
         """
-        Parses the Communication section to find all IEDs and their IP addresses.
-        Returns a list of dicts: {'name': 'IED1', 'ip': '1.2.3.4', 'port': '102'}
+        Parses the Communication section to find all IEDs and all their IP addresses.
+        Returns a list of dicts: 
+        {
+            'name': 'IED1', 
+            'ips': [
+                {'ip': '1.2.3.4', 'ap': 'S1', 'subnetwork': 'WA1', 'desc': 'Station Bus'},
+                {'ip': '10.0.0.1', 'ap': 'S2', 'subnetwork': 'WA2', 'desc': 'Process Bus'}
+            ]
+        }
         """
         if self.root is None:
             return []
 
-        ieds = []
-        
-        # Strategy 1: Communication Section (Best for IPs)
+        ieds_map = {} # name -> {name: str, ips: []}
+
+        # Strategy 1: Communication Section
         communication = self.root.find("scl:Communication", self.ns)
         if not communication:
             communication = self.root.find("Communication")
 
-        found_ied_names = set()
-
         if communication:
             # Scan SubNetworks
             for sub_net in communication.findall("scl:SubNetwork", self.ns) + communication.findall("SubNetwork"):
+                subnet_name = sub_net.get("name", "Unknown")
+                subnet_desc = sub_net.get("desc", "")
+                
                 for conn_ap in sub_net.findall("scl:ConnectedAP", self.ns) + sub_net.findall("ConnectedAP"):
                     ied_name = conn_ap.get("iedName")
                     if not ied_name: continue
-
+                    
+                    ap_name = conn_ap.get("apName", "")
+                    
+                    # Get Address
                     address = conn_ap.find("scl:Address", self.ns)
                     if not address:
                         address = conn_ap.find("Address")
                     
-                    ip = "127.0.0.1"
-                    port = "102"
+                    ip = None
+                    gateway = None
+                    subnet_mask = None
                     
                     if address:
                         for p in address.findall("scl:P", self.ns) + address.findall("P"):
@@ -309,30 +407,187 @@ class SCDParser:
                             if ptype == "IP":
                                 ip = p.text
                             elif ptype == "IP-SUBNET":
-                                # Handle IP-SUBNET mask ?? 
-                                pass
+                                subnet_mask = p.text
+                            elif ptype == "IP-GATEWAY":
+                                gateway = p.text
 
-                    ieds.append({
-                        "name": ied_name,
-                        "ip": ip,
-                        "port": port,
-                        "ap": conn_ap.get("apName")
-                    })
-                    found_ied_names.add(ied_name)
+                    if ip:
+                        if ied_name not in ieds_map:
+                            ieds_map[ied_name] = {'name': ied_name, 'ips': []}
+                        
+                        ieds_map[ied_name]['ips'].append({
+                            'ip': ip,
+                            'ap': ap_name,
+                            'subnetwork': subnet_name,
+                            'mask': subnet_mask,
+                            'gateway': gateway
+                        })
 
-        # Strategy 2: IED Section (Best if Communication missing or as fallback)
-        # Check for IEDs that were NOT found in Communication section
+        # Strategy 2: IED Section (Fallback for IEDs with no Communication info)
         all_ied_elements = self.root.findall("scl:IED", self.ns) + self.root.findall("IED")
         for ied in all_ied_elements:
             name = ied.get("name")
-            if name and name not in found_ied_names:
-                # We don't know the IP if it's not in Communication, so default to localhost
-                # User can edit it later
-                ieds.append({
-                    "name": name,
-                    "ip": "127.0.0.1", 
-                    "port": "102",
-                    "ap": "Unknown"
-                })
+            if name and name not in ieds_map:
+                # Default to localhost if not found in Communication
+                ieds_map[name] = {
+                    'name': name, 
+                    'ips': [{
+                        'ip': '127.0.0.1', 
+                        'ap': 'Default', 
+                        'subnetwork': 'Local',
+                        'mask': '255.255.255.0',
+                        'gateway': '0.0.0.0'
+                    }]
+                }
         
-        return ieds
+        return list(ieds_map.values())
+
+    def extract_goose_map(self) -> List[Dict]:
+        """
+        Extracts detailed GOOSE configuration map.
+        Returns list of dicts suitable for CSV export.
+        """
+        goose_entries = []
+        
+        if self.root is None:
+            return []
+
+        # Find all IEDs
+        ied_elements = self.root.findall("scl:IED", self.ns) + self.root.findall("IED")
+        
+        for ied in ied_elements:
+            ied_name = ied.get("name")
+            
+            # Search all Access Points (simplified: search all LDevices)
+            ap_elements = ied.findall(".//scl:AccessPoint", self.ns) + ied.findall(".//AccessPoint")
+            if not ap_elements:
+                # Fallback: search LDevices directly under IED if structure is flat
+                ld_elements = ied.findall("scl:LDevice", self.ns) + ied.findall("LDevice")
+                if ld_elements:
+                    # Mock AP wrapper
+                    ap_elements = [{'name': 'Default', 'lds': ld_elements}]
+                else:
+                    continue
+            else:
+                 # Real APs
+                 pass # We iterate below
+
+            for ap in ap_elements:
+                if isinstance(ap, dict):
+                     ap_name = ap['name']
+                     lds = ap['lds']
+                else:
+                     ap_name = ap.get("name")
+                     lds = ap.findall("scl:LDevice", self.ns) + ap.findall("LDevice")
+
+                for ld in lds:
+                    ld_inst = ld.get("inst")
+                    
+                    ln0 = ld.find("scl:LN0", self.ns)
+                    if not ln0:
+                        ln0 = ld.find("LN0")
+                    
+                    if not ln0: continue
+                    
+                    # Find GSE Controls
+                    gse_controls = ln0.findall("scl:GSEControl", self.ns) + ln0.findall("GSEControl")
+                    
+                    for gse in gse_controls:
+                        gse_name = gse.get("name")
+                        app_id = gse.get("appID")
+                        dat_set = gse.get("datSet")
+                        conf_rev = gse.get("confRev")
+                        
+                        # Find GSE element in Communication section to get MAC, VLAN etc
+                        # This requires cross-referencing Communication section which is tricky
+                        # We need <GSE ldInst="..." cbName="...">
+                        comm_info = self._find_gse_comm_info(ied_name, ap_name, ld_inst, gse_name)
+                        
+                        # Find DataSet content
+                        dataset_entries = self._get_dataset_entries(ln0, dat_set)
+                        
+                        for ds_entry in dataset_entries:
+                            entry = {
+                                "Source IED Name": ied_name,
+                                "Source AP": ap_name,
+                                "Source LDevice": ld_inst,
+                                "Source IP Address": comm_info.get('ip', ''), # Optional for GOOSE
+                                "Source Subnet": comm_info.get('subnetwork', ''),
+                                "Source MAC Address": comm_info.get('mac', ''),
+                                "Source VLAN-ID": comm_info.get('vlan', ''),
+                                "Source APPID": app_id,
+                                "Source MinTime": comm_info.get('minTime', ''),
+                                "Source MaxTime": comm_info.get('maxTime', ''),
+                                "Source DataSet": dat_set,
+                                "Source ConfRev": conf_rev,
+                                "Source ControlBlock": gse_name,
+                                "Source LogicalNode": ds_entry.get('ln', ''),
+                                "Source DataAttribute": ds_entry.get('da', ""),
+                                "Source Tag": f"{ied_name}{ld_inst}/{ds_entry.get('ln','')}.{ds_entry.get('do','')}.{ds_entry.get('da','')}"
+                            }
+                            goose_entries.append(entry)
+
+        return goose_entries
+
+    def _find_gse_comm_info(self, ied_name, ap_name, ld_inst, cb_name) -> Dict:
+        """Helper to find GSE address info in Communication section."""
+        info = {'mac': '', 'vlan': '', 'priority': '', 'appid': '', 'subnetwork': '', 'minTime': '', 'maxTime': ''}
+        
+        if self.root is None: return info
+        comm = self.root.find("scl:Communication", self.ns)
+        if not comm: comm = self.root.find("Communication")
+        if not comm: return info
+
+        # Locate ConnectedAP
+        # Search path: SubNetwork -> ConnectedAP(iedName, apName) -> GSE(ldInst, cbName)
+        for subnet in comm.findall("scl:SubNetwork", self.ns) + comm.findall("SubNetwork"):
+            subnet_name = subnet.get("name")
+            
+            for conn_ap in subnet.findall("scl:ConnectedAP", self.ns) + subnet.findall("ConnectedAP"):
+                if conn_ap.get("iedName") == ied_name and conn_ap.get("apName") == ap_name:
+                    
+                    # Find GSE
+                    for gse in conn_ap.findall("scl:GSE", self.ns) + conn_ap.findall("GSE"):
+                         if gse.get("ldInst") == ld_inst and gse.get("cbName") == cb_name:
+                             info['subnetwork'] = subnet_name
+                             
+                             address = gse.find("scl:Address", self.ns)
+                             if not address: address = gse.find("Address")
+                             
+                             if address:
+                                 for p in address.findall("scl:P", self.ns) + address.findall("P"):
+                                     ptype = p.get("type")
+                                     if ptype == "MAC-Address":
+                                         info['mac'] = p.text
+                                     elif ptype == "VLAN-ID":
+                                         info['vlan'] = p.text
+                                     elif ptype == "APPID":
+                                         info['appid'] = p.text
+                                     elif ptype == "VLAN-PRIORITY":
+                                         info['priority'] = p.text
+                                         
+                             min_time = gse.find("scl:MinTime", self.ns)
+                             if min_time is not None: info['minTime'] = min_time.text
+                             
+                             max_time = gse.find("scl:MaxTime", self.ns)
+                             if max_time is not None: info['maxTime'] = max_time.text
+                             
+                             return info
+        return info
+
+    def _get_dataset_entries(self, ln_node, dataset_name) -> List[Dict]:
+        """Parses FCDAs from a DataSet."""
+        entries = []
+        ds = ln_node.find(f"scl:DataSet[@name='{dataset_name}']", self.ns)
+        if not ds:
+             ds = ln_node.find(f"DataSet[@name='{dataset_name}']")
+        
+        if ds:
+            for fcda in ds.findall("scl:FCDA", self.ns) + ds.findall("FCDA"):
+                entries.append({
+                    'ln': f"{fcda.get('prefix','')}{fcda.get('lnClass')}{fcda.get('lnInst','')}",
+                    'do': fcda.get('doName'),
+                    'da': fcda.get('daName'),
+                    'fc': fcda.get('fc')
+                })
+        return entries

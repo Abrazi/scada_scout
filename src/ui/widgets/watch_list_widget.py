@@ -58,7 +58,10 @@ class WatchListWidget(QWidget):
         self.table.setHorizontalHeaderLabels([
             "Device", "Signal Name", "Address", "Value", "Quality", "Timestamp"
         ])
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.Interactive)
+        header.setStretchLastSection(True)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         
@@ -79,6 +82,8 @@ class WatchListWidget(QWidget):
         
         for watched in self.watch_manager.get_all_watched():
             self._add_signal_row(watched)
+        
+        self.table.resizeColumnsToContents()
     
     def _add_signal_row(self, watched: WatchedSignal):
         """Add a row for a watched signal."""

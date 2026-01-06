@@ -118,6 +118,13 @@ class WatchListManager(QObject):
                     watched.signal = updated_signal
                     # Emit update
                     self.signal_updated.emit(watch_id, updated_signal)
+                else:
+                    # If read_signal returns None, it means serious communication failure or device missing
+                    # Update quality to NOT_CONNECTED or INVALID if not already set by protocol
+                    if watched.signal.quality == SignalQuality.GOOD:
+                        watched.signal.quality = SignalQuality.NOT_CONNECTED
+                        watched.signal.value = None
+                        self.signal_updated.emit(watch_id, watched.signal)
                     
             except Exception as e:
                 logger.debug(f"Failed to poll {watch_id}: {e}")

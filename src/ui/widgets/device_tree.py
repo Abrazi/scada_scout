@@ -213,11 +213,10 @@ class DeviceTreeWidget(QWidget):
              sig_desc_item = QStandardItem(sig.description)
              sig_desc_item.setEditable(False)
              
-             # Extract FC/Type from description if parser put it there
-             # Parser puts "FC=XX Type=YY" in description
+             # Extract FC/Type from description (Adapter puts "FC=XX" there)
              s_fc = ""
              s_type = ""
-             if "FC=" in sig.description:
+             if sig.description and "FC=" in sig.description:
                  import re
                  m_fc = re.search(r"FC=([A-Z]+)", sig.description)
                  if m_fc: s_fc = m_fc.group(1)
@@ -303,6 +302,12 @@ class DeviceTreeWidget(QWidget):
                 remove_action = QAction("Remove Device", self)
                 remove_action.triggered.connect(lambda: self._confirm_remove_device(device_name))
                 menu.addAction(remove_action)
+                
+                # Copy Address for device
+                menu.addSeparator()
+                copy_action = QAction("Copy Device Name", self)
+                copy_action.triggered.connect(lambda: self._copy_to_clipboard(device_name))
+                menu.addAction(copy_action)
         
         elif isinstance(data, Signal) or (hasattr(data, 'name') and hasattr(data, 'address')):
             # Signal node (strict check or duck typing)
@@ -319,12 +324,32 @@ class DeviceTreeWidget(QWidget):
                     
                 watch_action.triggered.connect(add_watch)
                 menu.addAction(watch_action)
+
+                # Copy Address
+                copy_action = QAction("Copy Signal Address", self)
+                copy_action.triggered.connect(lambda: self._copy_to_clipboard(signal.address))
+                menu.addAction(copy_action)
                 
-                # Control option (placeholder for future SBO implementation)
+                # Control option
                 menu.addSeparator()
-                control_action = QAction("Control... (Coming Soon)", self)
-                control_action.setEnabled(False)
+                control_action = QAction("Control...", self)
+                if getattr(signal, 'access', 'RO') == "RW":
+                    control_action.setEnabled(True)
+                else:
+                    control_action.setEnabled(False)
+                    control_action.setToolTip("This signal is Read-Only")
                 menu.addAction(control_action)
+        
+        else:
+            # Generic Node (LD, LN, DO)
+            node = data
+            if hasattr(node, 'name'):
+                # Build address by traversing parents
+                full_address = self._build_node_address(root_item)
+                
+                copy_action = QAction("Copy node Address", self)
+                copy_action.triggered.connect(lambda: self._copy_to_clipboard(full_address))
+                menu.addAction(copy_action)
         
         if menu.actions():
             menu.exec(self.tree_view.viewport().mapToGlobal(position))
@@ -369,3 +394,39 @@ class DeviceTreeWidget(QWidget):
         if dialog.exec():
             new_config = dialog.get_config()
             self.device_manager.update_device_config(new_config)
+
+    def _copy_to_clipboard(self, text):
+        """Copies given text to system clipboard."""
+        from PySide6.QtWidgets import QApplication
+        clipboard = QApplication.clipboard()
+        clipboard.setText(text)
+
+    def _build_node_address(self, item: QStandardItem) -> str:
+        """Constructs full IEC 61850 address by traversing tree parents."""
+        parts = []
+        current = item
+        
+        while current:
+            data = current.data(Qt.UserRole)
+            if isinstance(data, str):
+                # We hit the device root (IED Name), stop here
+                break
+                
+            if hasattr(data, 'name'):
+                parts.insert(0, data.name)
+            
+            current = current.parent()
+            
+        # Standard IEC 61850 path: LD/LN.DO
+        # Our tree structure: LD -> LN -> DO
+        if len(parts) >= 3:
+            # LD/LN.DO
+            return f"{parts[0]}/{parts[1]}.{parts[2]}"
+        elif len(parts) == 2:
+            # LD/LN
+            return f"{parts[0]}/{parts[1]}"
+        elif len(parts) == 1:
+            # LD
+            return parts[0]
+            
+        return item.text()

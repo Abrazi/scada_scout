@@ -29,8 +29,18 @@ def main():
     window = MainWindow(device_manager)
     window.show()
     
-    # Connect event logger to event log widget
+    # Connect event logger to event log widget (Internal App Events)
     controller.event_logger.event_logged.connect(window.event_log_widget.log_event)
+    
+    # Connect Python Logging to event log widget
+    from src.core.logging_handler import QtLogHandler
+    qt_handler = QtLogHandler()
+    qt_handler.new_record.connect(window.event_log_widget.log_event)
+    
+    # Add handler to root logger
+    import logging
+    logging.getLogger().addHandler(qt_handler)
+    
     controller.event_logger.info("Application", "SCADA Scout started successfully")
     # Start the controller
     controller.start_application()

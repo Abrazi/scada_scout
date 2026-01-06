@@ -1,4 +1,4 @@
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QTableView, QHeaderView, QTabWidget
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QTableView, QHeaderView, QTabWidget, QPushButton, QSizePolicy
 from PySide6.QtGui import QStandardItemModel, QStandardItem, QPainter
 from PySide6.QtCharts import QChart, QChartView, QLineSeries
 from PySide6.QtCore import Qt
@@ -14,6 +14,7 @@ class SignalsViewWidget(QWidget):
         self.device_manager = device_manager
         self.watch_list_manager = watch_list_manager
         self.current_device_name = None  # Track which device's signals we're showing
+        self.current_node = None        # Track current node for manual refresh
         
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(0, 0, 0, 0)
@@ -31,9 +32,21 @@ class SignalsViewWidget(QWidget):
         self.table_tab = QWidget()
         layout = QVBoxLayout(self.table_tab)
         
+        # Toolbar
+        toolbar = QHBoxLayout()
+        self.btn_refresh = QPushButton("Refresh All")
+        self.btn_refresh.setFixedWidth(100)
+        self.btn_refresh.clicked.connect(self._on_refresh_clicked)
+        toolbar.addWidget(self.btn_refresh)
+        toolbar.addStretch()
+        layout.addLayout(toolbar)
+        
         self.table_view = QTableView()
         self.table_view.setAlternatingRowColors(True)
-        self.table_view.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        # Allow user to resize columns and auto-fit to contents initially
+        header = self.table_view.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.Interactive)
+        header.setStretchLastSection(True) 
         self.table_view.setSelectionBehavior(QTableView.SelectRows)
         
         # Enable context menu
@@ -48,26 +61,34 @@ class SignalsViewWidget(QWidget):
         
         self.tabs.addTab(self.table_tab, "Live Data")
 
+    def _on_refresh_clicked(self):
+        """Manually trigger a refresh for the currently shown signals."""
+        if self.current_node:
+            device_name = self._get_current_device_name()
+            if device_name:
+                signals = self._collect_signals(self.current_node)
+                if signals:
+                    self._trigger_background_read(device_name, signals)
+
     def set_filter_node(self, node):
         """Updates the view to show signals from the given node."""
+        self.current_node = node
         if node is None:
             self.current_device_name = None
         
         self.table_model.set_node_filter(node)
+        self.table_view.resizeColumnsToContents()
+
+    def _trigger_background_read(self, device_name, signals):
+        """Execute signal reads in a background thread to prevent UI freeze."""
+        import threading
+        from src.core.workers import BulkReadWorker
         
-        # Trigger background read for these signals to update status from 'Not Connected'
-        if node:
-            # We need to find the device name for this node
-            # For simplicity, if we don't have it, we'll try to get it
-            device_name = self._get_current_device_name()
-            if device_name:
-                from PySide6.QtCore import QTimer
-                # Get all signals in this view
-                signals = self._collect_signals(node)
-                # Read them one by one in the background (very basic implementation)
-                for i, sig in enumerate(signals):
-                    # Delay slightly to avoid flooding
-                    QTimer.singleShot(i * 10, lambda s=sig: self.device_manager.read_signal(device_name, s))
+        worker = BulkReadWorker(self.device_manager, device_name, signals)
+        # Use a simple thread for now. In a larger app, use QThreadPool.
+        t = threading.Thread(target=worker.run)
+        t.daemon = True
+        t.start()
 
     def _on_table_context_menu(self, position):
         """Handle right-click context menu in signals table."""
@@ -95,6 +116,17 @@ class SignalsViewWidget(QWidget):
         add_action.triggered.connect(lambda: self.watch_list_manager.add_signal(device_name, signal))
         menu.addAction(add_action)
         
+        # Control option
+        menu.addSeparator()
+        control_action = QAction("Control...", self)
+        if getattr(signal, 'access', 'RO') == "RW":
+            control_action.setEnabled(True)
+            control_action.triggered.connect(lambda: self._on_control_clicked(device_name, signal))
+        else:
+            control_action.setEnabled(False)
+            control_action.setToolTip("This signal is Read-Only")
+        menu.addAction(control_action)
+        
         menu.exec(self.table_view.viewport().mapToGlobal(position))
     
     def _get_current_device_name(self):
@@ -109,6 +141,21 @@ class SignalsViewWidget(QWidget):
             if device.connected:
                 return device.config.name
         return None
+
+    def _on_control_clicked(self, device_name, signal):
+        from PySide6.QtWidgets import QInputDialog, QMessageBox
+        
+        # User requested command
+        # For ctVal (INT32), we usually send an integer.
+        # Should we assume Integer?
+        val, ok = QInputDialog.getInt(self, "Send Control", f"Enter value for {signal.name}:", 0)
+        
+        if ok:
+             try:
+                 self.device_manager.send_control_command(device_name, signal, 'OPERATE', val)
+                 QMessageBox.information(self, "Success", f"Command sent to {signal.name}")
+             except Exception as e:
+                 QMessageBox.critical(self, "Error", f"Failed to send command: {e}")
 
     def _setup_chart_tab(self):
         """Create the Chart tab."""
@@ -141,8 +188,26 @@ class SignalsViewWidget(QWidget):
         self.table_model.update_signal(signal)
         
     def _collect_signals(self, node) -> list:
-        """Recursively collect all signals from a node tree."""
-        signals = list(node.signals)
-        for child in node.children:
-            signals.extend(self._collect_signals(child))
+        """Recursively collect all signals from a node tree (supports Node, Signal, or Device)."""
+        if node is None:
+            return []
+            
+        signals = []
+        
+        # 1. If it's a Signal (leaf)
+        if hasattr(node, 'address') and not hasattr(node, 'signals'):
+            return [node]
+            
+        # 2. If it's a Node (branch)
+        if hasattr(node, "signals") and node.signals:
+            signals.extend(node.signals)
+        
+        if hasattr(node, "children") and node.children:
+            for child in node.children:
+                signals.extend(self._collect_signals(child))
+                
+        # 3. If it's a Device (root)
+        if hasattr(node, "root_node") and node.root_node:
+            signals.extend(self._collect_signals(node.root_node))
+            
         return signals

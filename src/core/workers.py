@@ -55,3 +55,57 @@ class ConnectionWorker:
              self.signals.status_changed.emit(self.device_name, False)
         finally:
             self.signals.finished.emit()
+
+from PySide6.QtCore import QThread, Signal
+
+class SCDParseWorker(QThread):
+    """Worker to parse SCD file in background thread."""
+    progress = Signal(str, int) # message, percent
+    finished_parsing = Signal(list, str) # result (list of ieds), error_msg (if any)
+    
+    def __init__(self, file_path):
+        super().__init__()
+        self.file_path = file_path
+
+    def run(self):
+        try:
+            self.progress.emit("Reading SCD file...", 10)
+            
+            # Heavy import moved here to ensure it runs in thread if not already loaded
+            from src.core.scd_parser import SCDParser
+            
+            self.progress.emit("Parsing XML structure...", 30)
+            parser = SCDParser(self.file_path)
+            
+            if parser.root is None:
+                self.finished_parsing.emit([], "Failed to parse XML root.")
+                return
+
+            self.progress.emit("Extracting IED information...", 60)
+            ieds = parser.extract_ieds_info()
+            
+            self.progress.emit("Finalizing...", 90)
+            self.finished_parsing.emit(ieds, "")
+            
+        except Exception as e:
+            self.finished_parsing.emit([], str(e))
+
+class BulkReadWorker:
+    """Worker to read multiple signals in a background thread."""
+    def __init__(self, device_manager, device_name, signals):
+        self.device_manager = device_manager
+        self.device_name = device_name
+        self.signals_to_read = signals
+        self.signals = WorkerSignals()
+
+    def run(self):
+        import time
+        for sig in self.signals_to_read:
+            try:
+                # read_signal triggers status synchronization in DeviceManager
+                self.device_manager.read_signal(self.device_name, sig)
+                # Small sleep to be nice to the network/IED
+                time.sleep(0.001) 
+            except:
+                pass
+        self.signals.finished.emit()

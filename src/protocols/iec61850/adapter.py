@@ -187,13 +187,61 @@ class IEC61850Adapter(BaseProtocol):
             return result == 0
         except Exception as e:
             logger.warning(f"Port check failed: {e}")
-            return False
+            return None
 
     def _connect_mock(self):
         time.sleep(0.5)
         self.connected = True
         logger.info("MOCK: Connected.")
-        return True
+        return None
+
+    def _parse_mms_value(self, mms_val):
+        """Helper to parse generic MmsValue* to (value, SignalType, error_msg)."""
+        if not mms_val:
+            return None, SignalType.ANALOG, "No MMS value returned"
+
+        val_type = iec61850.MmsValue_getType(mms_val)
+        
+        # Check for data access error first
+        if val_type == iec61850.MMS_DATA_ACCESS_ERROR:
+            return None, SignalType.ANALOG, "Data Access Error"
+        
+        if val_type == iec61850.MMS_BOOLEAN:
+            return iec61850.MmsValue_getBoolean(mms_val), SignalType.DOUBLE_BINARY, ""
+            
+        elif val_type in [iec61850.MMS_INTEGER, iec61850.MMS_UNSIGNED]:
+            return iec61850.MmsValue_toInt32(mms_val), SignalType.ANALOG, ""
+            
+        elif val_type == iec61850.MMS_FLOAT:
+            return iec61850.MmsValue_toFloat(mms_val), SignalType.ANALOG, ""
+            
+        elif val_type == iec61850.MMS_VISIBLE_STRING:
+             return iec61850.MmsValue_toString(mms_val), SignalType.STATE, ""
+             
+        elif val_type == iec61850.MMS_BIT_STRING:
+            size = iec61850.MmsValue_getBitStringSize(mms_val)
+            val = 0
+            for i in range(size):
+                if iec61850.MmsValue_getBitStringBit(mms_val, i):
+                    val |= (1 << i)
+            return f"0x{val:X} ({size}b)", SignalType.BINARY, ""
+            
+        elif val_type == iec61850.MMS_UTC_TIME:
+             ts = self._get_timestamp_from_mms(mms_val)
+             if ts:
+                 return ts.strftime("%H:%M:%S.%f")[:-3], SignalType.TIMESTAMP, ""
+             else:
+                 return None, SignalType.TIMESTAMP, "Invalid timestamp format"
+
+        elif val_type == iec61850.MMS_STRUCTURE:
+             return "[Structure]", SignalType.STATE, ""
+             
+        elif val_type == iec61850.MMS_ARRAY:
+             size = iec61850.MmsValue_getArraySize(mms_val)
+             return f"[Array[{size}]]", SignalType.STATE, ""
+             
+        else:
+             return "[Complex Data]", SignalType.STATE, ""
 
     def disconnect(self):
         if self.connection:
@@ -230,7 +278,7 @@ class IEC61850Adapter(BaseProtocol):
         try:
             parser = SCDParser(self.config.scd_file_path)
             # Find IED in SCD that matches our config name, or take the first one
-            root = parser.get_structure(ied_name=None)
+            root = parser.get_structure(ied_name=self.config.name)
             return root
         except Exception as e:
             logger.error(f"Offline discovery failed: {e}")
@@ -363,28 +411,98 @@ class IEC61850Adapter(BaseProtocol):
                                         do_node = Node(name=do_name, description="Data Object")
                                         ln_node.children.append(do_node)
                                         
-                                        # For full discovery, we'd need to browse Data Attributes here
-                                        # For now, create signals for common attributes (Standard IEC 61850 attributes)
-                                        # We use full_ln_ref which includes LD name: "LDName/LNName"
+                                        # 1. Browse Data Attributes by Functional Constraint
+                                        full_do_ref = f"{full_ln_ref}.{do_name}"
                                         
-                                        # Common attributes to try
-                                        common_das = ["stVal", "q", "t", "mag.f", "cVal.mag.f", "Oper.ctlVal"]
+                                        fcs = [
+                                            (iec61850.IEC61850_FC_ST, "ST", "RO"),
+                                            (iec61850.IEC61850_FC_MX, "MX", "RO"),
+                                            (iec61850.IEC61850_FC_CO, "CO", "RW"),
+                                            (iec61850.IEC61850_FC_SP, "SP", "RW"),
+                                            (iec61850.IEC61850_FC_CF, "CF", "RW"),
+                                            (iec61850.IEC61850_FC_DC, "DC", "RO"),
+                                        ]
                                         
-                                        for da_name in common_das:
-                                            # The path should be the FULL Object Reference: LD/LN.DO.DA
-                                            full_da_path = f"{full_ln_ref}.{do_name}.{da_name}"
-                                            
-                                            sig = Signal(
-                                                name=da_name,
-                                                address=full_da_path,
-                                                signal_type=None,
-                                                access="RW"
-                                            )
-                                            # Add to DO node signals list
-                                            do_node.signals.append(sig)
-                                        
-                                        # Log if signals added
-                                        # self.event_logger.debug("Debug", f"Added {len(do_node.signals)} signals to {do_name}")
+                                        for fc_val, fc_name, access in fcs:
+                                            try:
+                                                # Use get Data Directory filtered by FC
+                                                ret_da = iec61850.IedConnection_getDataDirectoryByFC(
+                                                    self.connection, full_do_ref, fc_val
+                                                )
+                                                da_list = ret_da[0] if isinstance(ret_da, (list, tuple)) else ret_da
+                                                
+                                                if da_list:
+                                                    da_names = self._extract_string_list(da_list)
+                                                    for da_name in da_names:
+                                                        # Special handling for nested structures like mag, cVal (usually in MX or ST)
+                                                        if da_name in ["mag", "cVal", "Oper", "SBOw", "Cancel"]:
+                                                            sub_ref = f"{full_do_ref}.{da_name}"
+                                                            # Browsing sub-directory might also need FC? 
+                                                            # Usually yes, but getDataDirectory might be enough for sub-elements
+                                                            ret_sub = iec61850.IedConnection_getDataDirectory(self.connection, sub_ref)
+                                                            sub_list = ret_sub[0] if isinstance(ret_sub, (list, tuple)) else ret_sub
+                                                            if sub_list:
+                                                                sub_das = self._extract_string_list(sub_list)
+                                                                for sub_da in sub_das:
+                                                                    leaf_name = f"{da_name}.{sub_da}"
+                                                                    leaf_path = f"{full_do_ref}.{leaf_name}"
+                                                                    # Only ctlVal is controllable
+                                                                    sig_access = "RW" if "ctlVal" in leaf_name else "RO"
+                                                                    
+                                                                    # Set Signal Type
+                                                                    sig_type = None
+                                                                    if leaf_name.endswith(".t") or leaf_name.endswith(".T"):
+                                                                        sig_type = SignalType.TIMESTAMP
+                                                                    
+                                                                    sig = Signal(
+                                                                        name=leaf_name,
+                                                                        address=leaf_path,
+                                                                        signal_type=sig_type,
+                                                                        access=sig_access,
+                                                                        description=f"FC={fc_name} (Nested)"
+                                                                    )
+                                                                    do_node.signals.append(sig)
+                                                                iec61850.LinkedList_destroy(sub_list)
+                                                        else:
+                                                            full_da_path = f"{full_do_ref}.{da_name}"
+                                                            sig_access = "RW" if "ctlVal" in da_name else "RO"
+                                                            
+                                                            sig_type = None
+                                                            if da_name.endswith(".t") or da_name.endswith(".T"):
+                                                                sig_type = SignalType.TIMESTAMP
+                                                                
+                                                            sig = Signal(
+                                                                name=da_name,
+                                                                address=full_da_path,
+                                                                signal_type=sig_type,
+                                                                access=sig_access,
+                                                                description=f"FC={fc_name}"
+                                                            )
+                                                            do_node.signals.append(sig)
+                                                    
+                                                    iec61850.LinkedList_destroy(da_list)
+                                                    
+                                            except Exception as e:
+                                                # If ByFC fails, we just continue to next FC
+                                                continue
+                                                
+                                        # Fallback if NO signals found by FC and we haven't added any
+                                        if not do_node.signals:
+                                            if self.event_logger:
+                                                self.event_logger.debug("Discovery", f"    FC browsing yielded no results for {full_do_ref}, using generic discovery")
+                                            try:
+                                                ret_da = iec61850.IedConnection_getDataDirectory(self.connection, full_do_ref)
+                                                da_list = ret_da[0] if isinstance(ret_da, (list, tuple)) else ret_da
+                                                if da_list:
+                                                    da_names = self._extract_string_list(da_list)
+                                                    for da_name in da_names:
+                                                        do_node.signals.append(Signal(
+                                                            name=da_name, 
+                                                            address=f"{full_do_ref}.{da_name}",
+                                                            access="RO"
+                                                        ))
+                                                    iec61850.LinkedList_destroy(da_list)
+                                            except: pass
                                             
                             except Exception as e:
                                 if self.event_logger:
@@ -483,6 +601,20 @@ class IEC61850Adapter(BaseProtocol):
             
         return result
 
+    def _get_timestamp_from_mms(self, mms_val):
+        """Helper to extract Python datetime from MmsValue."""
+        if not mms_val:
+            return None
+        try:
+            mms_type = iec61850.MmsValue_getType(mms_val)
+            if mms_type == iec61850.MMS_UTC_TIME:
+                unix_ts = iec61850.MmsValue_toUnixTimestamp(mms_val)
+                # handle both float and int unix timestamps
+                return datetime.fromtimestamp(unix_ts)
+        except:
+             pass
+        return None
+
     def read_signal(self, signal: Signal) -> Signal:
         """Read a single signal value from the IED."""
         if self.event_logger:
@@ -491,8 +623,19 @@ class IEC61850Adapter(BaseProtocol):
         if not self.connected:
             signal.quality = SignalQuality.NOT_CONNECTED
             if self.event_logger:
-                self.event_logger.warning("IEC61850", f"← NOT CONNECTED")
+                self.event_logger.warning("IEC61850", f"← NOT CONNECTED (Internal State)")
             return signal
+
+        if HAS_LIBIEC61850 and self.connection:
+            # Check actual connection state
+            state = iec61850.IedConnection_getState(self.connection)
+            if state != iec61850.IED_STATE_CONNECTED:
+                self.connected = False
+                logger.warning(f"Connection lost detected during read for {self.config.ip_address} (State: {state})")
+                if self.event_logger:
+                    self.event_logger.error("IEC61850", f"← CONNECTION LOST (State: {state})")
+                signal.quality = SignalQuality.NOT_CONNECTED
+                return signal
 
         if not HAS_LIBIEC61850:
             # Mock update for testing
@@ -512,98 +655,338 @@ class IEC61850Adapter(BaseProtocol):
             # Example: address might be "XCBR1.Pos.stVal", need to prepend LD
             address = signal.address
             
+            # Clean up address if it has duplicated LD/LD prefix
+            # This happens because SCD parser might add LD prefix, and then Adapter adds it again or similar.
+            # User reported "GPS01ECB01CB1/GPS01ECB01CB1/XCBR1.Beh.stVal" -> Invalid.
+            parts = address.split('/')
+            if len(parts) >= 3 and parts[0] == parts[1]:
+                # GPS/GPS/LN.DO... -> GPS/LN.DO...
+                address = f"{parts[0]}/{'/'.join(parts[2:])}"
+                if self.event_logger:
+                    self.event_logger.debug("IEC61850", f"  Corrected address: {signal.address} -> {address}")
+            
             # If address doesn't contain '/', it's missing LD - we need to find it
             if '/' not in address:
-                # This is a problem - we need the full reference
-                # For now, log and fail
+                # Try to prepend the IED name or LD name from config
+                # Assuming config.name is the IED name
+                # We need the Logical Device name. Often IEDName + "LD0" or similar.
+                # But without knowing the LD structure, we can't guess. 
+                # Hopefully the new SCDParser fix resolves the generation of these addresses.
                 if self.event_logger:
                     self.event_logger.error("IEC61850", f"← INVALID ADDRESS: {address} (missing LD/)")
                 signal.quality = SignalQuality.INVALID
                 return signal
             
-            # Common functional constraints to try
-            fcs_to_try = [
-                ("ST", iec61850.IEC61850_FC_ST),  # Status
-                ("MX", iec61850.IEC61850_FC_MX),  # Measured value
-                ("CO", iec61850.IEC61850_FC_CO),  # Control
-                ("SP", iec61850.IEC61850_FC_SP),  # Set point
-                ("CF", iec61850.IEC61850_FC_CF),  # Configuration
-            ]
+            # Special handling for Control attributes (SBO, Oper, Cancel)
+            # These are often Write-Only or return specific structures.
+            # Reading them as standard Data Attributes might fail.
+            if any(x in address for x in [".SBO", ".SBOw", ".Oper", ".Cancel"]):
+                 # Should we try to read them? 
+                 # Maybe with FC=CO?
+                 pass 
             
+            # Common functional constraints to try
+            # Map string FC to constant
+            fc_map = {
+                "ST": iec61850.IEC61850_FC_ST,
+                "MX": iec61850.IEC61850_FC_MX,
+                "CO": iec61850.IEC61850_FC_CO,
+                "SP": iec61850.IEC61850_FC_SP,
+                "CF": iec61850.IEC61850_FC_CF,
+                "DC": iec61850.IEC61850_FC_DC,
+                "SG": iec61850.IEC61850_FC_SG, 
+                "SE": iec61850.IEC61850_FC_SE,
+                "SV": iec61850.IEC61850_FC_SV
+            }
+
+            fcs_to_try = []
+            
+            # 1. OPTIMIZATION: If Signal has specific FC, use ONLY that one.
+            if getattr(signal, 'fc', None) and signal.fc in fc_map:
+                 fcs_to_try.append((signal.fc, fc_map[signal.fc]))
+            else:
+                # Intelligent FC selection based on attribute name patterns
+                attr_name = address.split('.')[-1] if '.' in address else address
+                
+                # Known CF (Configuration) attributes
+                cf_attrs = ['ctlModel', 'sboTimeout', 'sboClass', 'minVal', 'maxVal', 
+                           'stepSize', 'dbRef', 'rangeC', 'units', 'd', 'dU', 'setVal',
+                           'operTimeout', 'T0', 'T1', 'T2', 'T3']
+                # Known ST (Status) attributes  
+                st_attrs = ['stVal', 'q', 't', 'Beh', 'Health', 'Mod', 'general', 'dirGeneral']
+                # Known MX (Measurement) attributes
+                mx_attrs = ['mag', 'cVal', 'phsA', 'phsB', 'phsC', 'neut', 'res', 'angRef']
+                # Known CO (Control) attributes
+                co_attrs = ['Oper', 'SBO', 'SBOw', 'Cancel', 'origin', 'ctlNum']
+                
+                if attr_name in cf_attrs or any(attr_name.endswith(a) for a in cf_attrs):
+                    fcs_to_try = [
+                        ("CF", iec61850.IEC61850_FC_CF),
+                        ("DC", iec61850.IEC61850_FC_DC),
+                        ("ST", iec61850.IEC61850_FC_ST),
+                    ]
+                elif attr_name in st_attrs or any(attr_name.endswith(a) for a in st_attrs):
+                    fcs_to_try = [
+                        ("ST", iec61850.IEC61850_FC_ST),
+                        ("MX", iec61850.IEC61850_FC_MX),
+                    ]
+                elif attr_name in mx_attrs or any(attr_name.endswith(a) for a in mx_attrs):
+                    fcs_to_try = [
+                        ("MX", iec61850.IEC61850_FC_MX),
+                        ("ST", iec61850.IEC61850_FC_ST),
+                    ]
+                elif attr_name in co_attrs or any(attr_name.endswith(a) for a in co_attrs):
+                    fcs_to_try = [
+                        ("CO", iec61850.IEC61850_FC_CO),
+                        ("ST", iec61850.IEC61850_FC_ST),
+                    ]
+                else:
+                    # Default fallback - try all common FCs
+                    fcs_to_try = [
+                        ("ST", iec61850.IEC61850_FC_ST),
+                        ("MX", iec61850.IEC61850_FC_MX),
+                        ("CF", iec61850.IEC61850_FC_CF),
+                        ("CO", iec61850.IEC61850_FC_CO),
+                        ("SP", iec61850.IEC61850_FC_SP),
+                        ("DC", iec61850.IEC61850_FC_DC),
+                    ]
+            
+            # Prioritize FC from SCD description if available (Secondary check for older parsed signals)
+            if not fcs_to_try:
+                 import re
+                 match = re.search(r"FC:([A-Z]{2})", signal.description or "")
+                 if match:
+                    prio_fc_name = match.group(1)
+                    if prio_fc_name in fc_map:
+                        fcs_to_try = [(prio_fc_name, fc_map[prio_fc_name])]
+            
+            # Final fallback
+            if not fcs_to_try:
+                 fcs_to_try = [
+                    ("ST", iec61850.IEC61850_FC_ST),
+                    ("MX", iec61850.IEC61850_FC_MX),
+                    ("DC", iec61850.IEC61850_FC_DC)
+                 ]
+
             value_read = False
             last_error = None
+            successful_fc = None  # Track which FC succeeded
+            
+            def extract_val(res, expected_types=None):
+                nonlocal last_error
+                
+                # Debug what we got
+                # if self.event_logger: 
+                #     self.event_logger.debug("IEC61850", f"DEBUG extract_val: {type(res)} {res}")
+
+                # pyiec61850 usually returns [value, error]
+                if isinstance(res, (list, tuple)) and len(res) >= 2:
+                    if res[1] == iec61850.IED_ERROR_OK:
+                        return res[0], True
+                    if res[1] != iec61850.IED_ERROR_OK:
+                         # ... error handling ...
+                        error_descriptions = {
+                            1: "NOT_CONNECTED",
+                            2: "ALREADY_CONNECTED",
+                            3: "CONNECTION_LOST",
+                            4: "SERVICE_NOT_SUPPORTED",
+                            5: "PARAMETER_VALUE_INCONSISTENT",
+                            10: "OBJECT_REFERENCE_INVALID",
+                            11: "OBJECT_UNDEFINED",
+                            13: "OBJECT_DOES_NOT_EXIST",
+                            20: "OBJECT_VALUE_INVALID",
+                            21: "OBJECT_ACCESS_UNSUPPORTED",
+                            22: "TYPE_INCONSISTENT",
+                            23: "TEMPORARILY_UNAVAILABLE",
+                            24: "OBJECT_ACCESS_DENIED",
+                            25: "OBJECT_NONE_EXISTENT",
+                        }
+                        error_desc = error_descriptions.get(res[1], f"UNKNOWN({res[1]})")
+                        last_error = f"IED Error {res[1]}: {error_desc}"
+                        if self.event_logger:
+                            self.event_logger.debug("IEC61850", f"    IED Error: {res[1]} ({error_desc}) for {address}")
+                    return None, False
+                
+                # If not a list/tuple, it might be the value directly OR an error object
+                if res is None:
+                    return None, False
+                
+                # Critical check: If we get an int when expecting something else (like Swig Object or Float)
+                # It indicates a potential raw error code return
+                if expected_types:
+                     if not isinstance(res, expected_types):
+                         # Special case: float vs int/float
+                         if float in expected_types and isinstance(res, (int, float)):
+                             return res, True
+                             
+                         # If we expected MmsValue (Swig object) but got int
+                         # (Swig objects usually aren't ints)
+                         if isinstance(res, int) and int not in expected_types:
+                             # Likely an error code returned directly
+                             last_error = f"Raw Error Code: {res}"
+                             if self.event_logger:
+                                 self.event_logger.debug("IEC61850", f"    Raw Return Mismatch: Expected {expected_types}, got int {res}")
+                             return None, False
+                             
+                return res, True
             
             for fc_name, fc in fcs_to_try:
                 try:
                     if self.event_logger:
                         self.event_logger.debug("IEC61850", f"  Try FC={fc_name} for {address}")
                     
-                    # Try reading as float first (most common for analog)
+                    # 1. Try reading as Timestamp if it looks like one
+                    if address.endswith(".t") or address.endswith(".T") or "Timestamp" in (signal.description or ""):
+                        try:
+                            # Use specialized read object for timestamps
+                            res = iec61850.IedConnection_readObject(self.connection, address, fc)
+                            mms_val, success = extract_val(res)
+                            if success:
+                                ts = self._get_timestamp_from_mms(mms_val)
+                                if ts:
+                                    signal.value = ts.strftime("%H:%M:%S.%f")[:-3]
+                                    signal.timestamp = ts
+                                    signal.signal_type = SignalType.TIMESTAMP
+                                    signal.quality = SignalQuality.GOOD
+                                    value_read = True
+                                    successful_fc = fc
+                                    iec61850.MmsValue_delete(mms_val)
+                                    if self.event_logger:
+                                        self.event_logger.transaction("IEC61850", f"← OK (TS): {address} = {signal.value}")
+                                    break
+                                else:
+                                    if self.event_logger:
+                                        self.event_logger.debug("IEC61850", f"  FC={fc_name} {address} read but not a valid UTC_TIME")
+                                iec61850.MmsValue_delete(mms_val)
+                        except Exception as e:
+                            if self.event_logger:
+                                self.event_logger.debug("IEC61850", f"  FC={fc_name} {address} TS read failed: {e}")
+                            pass
+
+                    # 2. Try reading as float first (most common for analog)
                     try:
-                        float_val = iec61850.IedConnection_readFloatValue(
-                            self.connection,
-                            address,
-                            fc
-                        )
-                        
-                        # If we got a valid float (not None), use it
-                        if float_val is not None:
-                            signal.value = float_val
+                        res = iec61850.IedConnection_readFloatValue(self.connection, address, fc)
+                        val, success = extract_val(res, expected_types=(float,))
+                        if success:
+                            signal.value = val
                             signal.signal_type = SignalType.ANALOG
                             signal.quality = SignalQuality.GOOD
                             signal.timestamp = datetime.now()
                             value_read = True
-                            
                             if self.event_logger:
-                                self.event_logger.transaction("IEC61850", f"← OK (FC={fc_name}): {address} = {float_val}")
+                                self.event_logger.transaction("IEC61850", f"← OK (FC={fc_name}): {address} = {val}")
                             break
-                    except Exception as e:
-                        last_error = str(e)
-                        pass
+                    except: pass
                     
                     # Try reading as boolean
                     try:
-                        bool_val = iec61850.IedConnection_readBooleanValue(
-                            self.connection,
-                            address,
-                            fc
-                        )
-                        
-                        if bool_val is not None:
-                            signal.value = bool_val
+                        res = iec61850.IedConnection_readBooleanValue(self.connection, address, fc)
+                        val, success = extract_val(res, expected_types=(bool,))
+                        if success:
+                            signal.value = val
                             signal.signal_type = SignalType.BINARY
                             signal.quality = SignalQuality.GOOD
                             signal.timestamp = datetime.now()
                             value_read = True
-                            
+                            successful_fc = fc
                             if self.event_logger:
-                                self.event_logger.transaction("IEC61850", f"← OK (FC={fc_name}): {address} = {bool_val}")
+                                self.event_logger.transaction("IEC61850", f"← OK (FC={fc_name}): {address} = {val}")
                             break
-                    except Exception as e:
-                        last_error = str(e)
-                        pass
+                    except: pass
                     
                     # Try reading as int32
                     try:
-                        int_val = iec61850.IedConnection_readInt32Value(
-                            self.connection,
-                            address,
-                            fc
-                        )
-                        
-                        if int_val is not None:
-                            signal.value = int_val
+                        res = iec61850.IedConnection_readInt32Value(self.connection, address, fc)
+                        val, success = extract_val(res, expected_types=(int,))
+                        if success:
+                            signal.value = val
                             signal.signal_type = SignalType.ANALOG
                             signal.quality = SignalQuality.GOOD
                             signal.timestamp = datetime.now()
                             value_read = True
-                            
                             if self.event_logger:
-                                self.event_logger.transaction("IEC61850", f"← OK (FC={fc_name}): {address} = {int_val}")
+                                self.event_logger.transaction("IEC61850", f"← OK (FC={fc_name}): {address} = {val}")
                             break
-                    except Exception as e:
-                        last_error = str(e)
-                        pass
+                    except: pass
+
+                    # Try reading as BitString (for Dbpos etc)
+                    try:
+                        # readBitStringValue returns [value, error] where value is a BitString object or similar
+                        res = iec61850.IedConnection_readBitStringValue(self.connection, address, fc)
+                        val, success = extract_val(res) # BitString might be special object, skip type check for now
+                        if success:
+                            signal.value = val # This might need further parsing if it's a raw bitstring
+                            signal.signal_type = SignalType.BINARY # Or DOUBLE_BINARY
+                            signal.quality = SignalQuality.GOOD
+                            signal.timestamp = datetime.now()
+                            value_read = True
+                            successful_fc = fc
+                            if self.event_logger:
+                                self.event_logger.transaction("IEC61850", f"← OK (FC={fc_name}): {address} = BITSTRING")
+                            break
+                    except: pass
+
+                    # Try reading as int64
+                    try:
+                        res = iec61850.IedConnection_readInt64Value(self.connection, address, fc)
+                        val, success = extract_val(res, expected_types=(int,))
+                        if success:
+                            signal.value = val
+                            signal.signal_type = SignalType.ANALOG
+                            signal.quality = SignalQuality.GOOD
+                            signal.timestamp = datetime.now()
+                            value_read = True
+                            successful_fc = fc
+                            break
+                    except: pass
+
+                    # Try reading as string
+                    try:
+                        res = iec61850.IedConnection_readStringValue(self.connection, address, fc)
+                        val, success = extract_val(res, expected_types=(str,))
+                        if success:
+                            signal.value = val
+                            signal.signal_type = SignalType.STATE
+                            signal.quality = SignalQuality.GOOD
+                            signal.timestamp = datetime.now()
+                            value_read = True
+                            successful_fc = fc
+                            break
+                    except: pass
+
+                    # Try generic readObject as fallback (Handles structs, arrays, enums, etc.)
+                    try:
+                         res = iec61850.IedConnection_readObject(self.connection, address, fc)
+                         mms_val, success = extract_val(res)
+                         if success:
+                            # Convert MMS Value to string/value
+                            val_str, val_type, error_msg = self._parse_mms_value(mms_val)
+                            
+                            if error_msg:
+                                # Data access error at MMS level
+                                signal.error = error_msg
+                                signal.quality = SignalQuality.INVALID
+                                if self.event_logger:
+                                    self.event_logger.warning("IEC61850", f"← MMS ERROR (FC={fc_name}): {address} - {error_msg}")
+                                # Don't break, try next FC
+                            else:
+                                signal.value = val_str
+                                signal.signal_type = val_type
+                                signal.quality = SignalQuality.GOOD
+                                signal.timestamp = datetime.now()
+                                value_read = True
+                                successful_fc = fc
+                                signal.error = ""  # Clear any previous error
+                                
+                                if self.event_logger:
+                                    self.event_logger.transaction("IEC61850", f"← OK (FC={fc_name}) [Object]: {address} = {val_str}")
+                                    
+                                iec61850.MmsValue_delete(mms_val)
+                                break
+                         
+                         if mms_val:
+                             iec61850.MmsValue_delete(mms_val)
+                    except: pass
                         
                 except Exception as e:
                     if self.event_logger:
@@ -611,14 +994,52 @@ class IEC61850Adapter(BaseProtocol):
                     last_error = str(e)
                     continue
             
+            if value_read:
+                # Success! Now try to get sibling timestamp (.t) if possible
+                if ".stVal" in address or ".mag" in address or ".cVal" in address:
+                    try:
+                        parts = address.split('.')
+                        if len(parts) > 1:
+                            # Usually DO.stVal -> DO.t
+                            # If it's DO.mag.f -> DO.t 
+                            # We'll try to go up until we find the DO
+                            base_do = ".".join(parts[:-1])
+                            if ".mag" in address or ".cVal" in address:
+                                # Go up one more level for nested attributes
+                                base_do = ".".join(parts[:-2])
+                            
+                            # Check both .t and .T
+                            for suffix in [".t", ".T"]:
+                                t_addr = f"{base_do}{suffix}"
+                                # Use the FC that successfully read the main value
+                                res_t = iec61850.IedConnection_readObject(self.connection, t_addr, successful_fc) 
+                                mms_t, ok_t = extract_val(res_t)
+                                if ok_t:
+                                    ts = self._get_timestamp_from_mms(mms_t)
+                                    if ts:
+                                        signal.timestamp = ts
+                                    iec61850.MmsValue_delete(mms_t)
+                                    break
+                    except: pass
+
             if not value_read:
                 signal.quality = SignalQuality.INVALID
                 signal.value = None
+                error_msg = "Could not read with any FC"
+                if last_error:
+                    error_msg = last_error
+                signal.error = error_msg
                 if self.event_logger:
-                    error_msg = f"Could not read {address} with any FC"
-                    if last_error:
-                        error_msg += f" (Last error: {last_error})"
-                    self.event_logger.error("IEC61850", f"← FAILED: {error_msg}")
+                    self.event_logger.error("IEC61850", f"← FAILED: {address} - {error_msg}")
+            
+            # ENUM MAPPING
+            if value_read and getattr(signal, 'enum_map', None) and isinstance(signal.value, int):
+                if signal.value in signal.enum_map:
+                    # Update value to string representation
+                    # E.g. 1 -> "Open", 2 -> "Closed"
+                    # Keep original value somewhere? Maybe just overwrite for display
+                    signal.value = f"{signal.enum_map[signal.value]} ({signal.value})"
+                    signal.signal_type = SignalType.STATE
             
             return signal
             

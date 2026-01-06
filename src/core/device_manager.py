@@ -148,6 +148,33 @@ class DeviceManager(QObject):
     def get_device(self, device_name: str) -> Optional[Device]:
         return self._devices.get(device_name)
 
+    def load_offline_scd(self, device_name: str):
+        """
+        Triggers offline discovery from SCD file without connecting.
+        Useful for populating the tree immediately after import.
+        """
+        device = self._devices.get(device_name)
+        if not device or not device.config.scd_file_path:
+            return
+
+        # We need a protocol adapter to run discovery logic (it has the parser logic)
+        # Even if not connected, we can instantiate it.
+        if device_name not in self._protocols:
+             protocol = self._create_protocol(device.config)
+             if protocol:
+                 self._protocols[device_name] = protocol
+        
+        protocol = self._protocols.get(device_name)
+        if protocol and hasattr(protocol, 'discover'):
+            try:
+                # Force SCD usage just in case? config.use_scd_discovery should be true from import
+                root = protocol.discover()
+                device.root_node = root
+                self.device_updated.emit(device_name)
+                logger.info(f"Offline SCD loaded for {device_name}")
+            except Exception as e:
+                logger.error(f"Failed to load offline SCD for {device_name}: {e}")
+
     def get_all_devices(self) -> List[Device]:
         return list(self._devices.values())
 
@@ -253,9 +280,16 @@ class DeviceManager(QObject):
         
         try:
             updated_signal = protocol.read_signal(signal)
+            
+            # Sync connection status if protocol has it
+            if hasattr(protocol, 'connected'):
+                if protocol.connected != self._devices[device_name].connected:
+                    self.update_connection_status(device_name, protocol.connected)
+            
             return updated_signal
         except Exception as e:
             logger.debug(f"Failed to read signal {signal.address} from {device_name}: {e}")
+            # If an exception happened in the protocol, consider it disconnected if it's a connection error
             return None
 
     def send_control_command(self, device_name: str, signal: Signal, command: str, value: Any):

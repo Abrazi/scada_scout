@@ -1,4 +1,4 @@
-from PySide6.QtWidgets import QDialog, QVBoxLayout, QPushButton, QHBoxLayout, QFileDialog, QTableWidget, QTableWidgetItem, QHeaderView, QDialogButtonBox, QLabel, QMessageBox, QLineEdit
+from PySide6.QtWidgets import QDialog, QVBoxLayout, QPushButton, QHBoxLayout, QFileDialog, QTableWidget, QTableWidgetItem, QHeaderView, QDialogButtonBox, QLabel, QMessageBox, QLineEdit, QComboBox
 from PySide6.QtCore import Qt
 from typing import List
 import fnmatch
@@ -67,58 +67,83 @@ class SCDImportDialog(QDialog):
             self._parse_and_list_with_progress(fname)
     
     def _parse_and_list_with_progress(self, path):
-        """Parse SCD file with progress feedback."""
-        from PySide6.QtWidgets import QProgressDialog
-        from PySide6.QtCore import Qt
+        """Parse SCD file with progress feedback using background thread."""
+        from PySide6.QtWidgets import QProgressDialog, QApplication
+        from src.core.workers import SCDParseWorker
         
-        # Show progress dialog
-        progress = QProgressDialog("Parsing SCD file...", "Cancel", 0, 100, self)
-        progress.setWindowTitle("Loading SCD")
-        progress.setWindowModality(Qt.WindowModal)
-        progress.setValue(10)
+        # Setup Progress Dialog
+        self.progress_dialog = QProgressDialog("Reading SCD file...", "Cancel", 0, 100, self)
+        self.progress_dialog.setWindowTitle("Loading SCD")
+        self.progress_dialog.setWindowModality(Qt.WindowModal)
+        self.progress_dialog.setMinimumDuration(0)
+        self.progress_dialog.setValue(0)
+        # Force show immediately
+        self.progress_dialog.show()
+        QApplication.processEvents()
         
-        try:
-            progress.setLabelText("Reading XML file...")
-            progress.setValue(30)
+        # Setup Worker (SCDParseWorker is now a QThread)
+        self.worker = SCDParseWorker(path)
+        self.worker.progress.connect(self._update_progress)
+        self.worker.finished_parsing.connect(self._on_parse_finished)
+        self.worker.finished.connect(self.worker.deleteLater)
+        
+        self.worker.start()
+        
+    def _update_progress(self, msg, val):
+        self.progress_dialog.setLabelText(msg)
+        self.progress_dialog.setValue(val)
+
+    def _on_parse_finished(self, ieds, error_msg):
+        self.progress_dialog.close()
+        
+        if error_msg:
+             QMessageBox.critical(self, "Parse Error", f"Failed to parse SCD file:\n{error_msg}")
+             return
+
+        self.parsed_ieds = ieds
+        self._populate_table()
+
+    def _populate_table(self):
+        from PySide6.QtWidgets import QComboBox
+        
+        self.table.setRowCount(0)
+        # We need to sort or filter?
+        
+        for ied in self.parsed_ieds:
+            row = self.table.rowCount()
+            self.table.insertRow(row)
             
-            parser = SCDParser(path)
+            # Name
+            self.table.setItem(row, 0, QTableWidgetItem(ied['name']))
             
-            progress.setLabelText("Extracting IED information...")
-            progress.setValue(60)
+            # IP / Access Point Selection
+            # If multiple IPs, use ComboBox
+            ips = ied.get('ips', [])
             
-            self.parsed_ieds = parser.extract_ieds_info()
-            
-            progress.setLabelText("Populating table...")
-            progress.setValue(80)
-            
-            self.table.setRowCount(0)
-            for ied in self.parsed_ieds:
-                row = self.table.rowCount()
-                self.table.insertRow(row)
-                
-                # Name
-                self.table.setItem(row, 0, QTableWidgetItem(ied['name']))
-                
-                # IP
-                self.table.setItem(row, 1, QTableWidgetItem(ied['ip']))
-                
-                # AP
-                self.table.setItem(row, 2, QTableWidgetItem(ied.get('ap', '')))
-                
-                # Checkbox
-                chk_item = QTableWidgetItem()
-                chk_item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
-                chk_item.setCheckState(Qt.Checked) 
-                self.table.setItem(row, 3, chk_item)
-            
-            progress.setValue(100)
-            
-        except Exception as e:
-            progress.close()
-            from PySide6.QtWidgets import QMessageBox
-            QMessageBox.critical(self, "Parse Error", f"Failed to parse SCD file:\n{str(e)}")
-        finally:
-            progress.close()
+            if not ips:
+                 self.table.setItem(row, 1, QTableWidgetItem("N/A"))
+                 self.table.setItem(row, 2, QTableWidgetItem("N/A"))
+            elif len(ips) == 1:
+                 # Simple Text
+                 ip_info = ips[0]
+                 self.table.setItem(row, 1, QTableWidgetItem(ip_info['ip']))
+                 self.table.setItem(row, 2, QTableWidgetItem(f"{ip_info['ap']} ({ip_info['subnetwork']})"))
+            else:
+                 # ComboBox
+                 combo = QComboBox()
+                 for ip_info in ips:
+                     # Item Data: IP, Item Text: IP - AP (SubNet)
+                     desc = f"{ip_info['ip']} - {ip_info['ap']} ({ip_info['subnetwork']})"
+                     combo.addItem(desc, ip_info) # Store full dict in userData
+                 
+                 self.table.setCellWidget(row, 1, combo)
+                 self.table.setItem(row, 2, QTableWidgetItem("Multiple (Select IP)"))
+
+            # Checkbox
+            chk_item = QTableWidgetItem()
+            chk_item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+            chk_item.setCheckState(Qt.Checked) 
+            self.table.setItem(row, 3, chk_item)
 
 
     def _select_all(self):
@@ -153,41 +178,55 @@ class SCDImportDialog(QDialog):
             ip_item = self.table.item(row, 1)
             ap_item = self.table.item(row, 2)
             
-            name = name_item.text().lower() if name_item else ""
-            ip = ip_item.text().lower() if ip_item else ""
-            ap = ap_item.text().lower() if ap_item else ""
+            ip_text = ""
+            combo = self.table.cellWidget(row, 1)
+            if isinstance(combo, QComboBox):
+                 ip_text = combo.currentText().lower()
+            elif ip_item:
+                 ip_text = ip_item.text().lower()
+            
+            name_text = name_item.text().lower() if name_item else ""
+            ap_text = ap_item.text().lower() if ap_item else ""
             
             match = False
             if use_glob:
-                # fnmatch requires the pattern to match the ENTIRE string
-                if fnmatch.fnmatch(name, search) or fnmatch.fnmatch(ip, search) or fnmatch.fnmatch(ap, search):
-                    match = True
+                import fnmatch
+                if fnmatch.fnmatch(name_text, search): match = True
+                elif fnmatch.fnmatch(ip_text, search): match = True
+                elif fnmatch.fnmatch(ap_text, search): match = True
             else:
-                # Standard substring search
-                if search in name or search in ip or search in ap:
-                    match = True
-                    
+                if search in name_text: match = True
+                elif search in ip_text: match = True
+                elif search in ap_text: match = True
+                
             self.table.setRowHidden(row, not match)
+
 
     def get_selected_configs(self) -> List[DeviceConfig]:
         configs = []
         rows = self.table.rowCount()
-        print(f"DEBUG: get_selected_configs called. Rows={rows}")
+        
         for row in range(rows):
             chk_item = self.table.item(row, 3)
             state = chk_item.checkState()
-            print(f"DEBUG: Row {row}, CheckState={state}")
             
-            # Relaxed check: Accept any checked state
             if state != Qt.Unchecked:
                 name = self.table.item(row, 0).text()
-                ip = self.table.item(row, 1).text()
-                # Port? Defaulting to 102
                 
+                ip = "127.0.0.1"
+                # Check if it's a combobox
+                widget = self.table.cellWidget(row, 1)
+                if widget and isinstance(widget, QComboBox): # Updated import check if needed
+                     data = widget.currentData() # This is the ip_info dict
+                     ip = data['ip']
+                else:
+                     ip_item = self.table.item(row, 1)
+                     ip = ip_item.text() if ip_item else "127.0.0.1"
+
                 configs.append(DeviceConfig(
                     name=name,
                     ip_address=ip,
-                    port=102, # Todo: Parse OSI-PSEL for custom port?
+                    port=102, 
                     device_type=DeviceType.IEC61850_IED,
                     scd_file_path=self.scd_path
                 ))

@@ -46,8 +46,62 @@ class EventLogWidget(QWidget):
         
         btn_layout.addStretch()
         layout.addLayout(btn_layout)
+
+        # Toolbar for Play/Pause and Filtering
+        toolbar_layout = QHBoxLayout()
+        layout.addLayout(toolbar_layout)
+
+        # Pause/Resume
+        self.btn_pause = QPushButton("Pause")
+        self.btn_pause.setCheckable(True)
+        self.btn_pause.clicked.connect(self._toggle_pause)
+        toolbar_layout.addWidget(self.btn_pause)
+        
+        # Filter Source
+        from PySide6.QtWidgets import QComboBox
+        self.combo_source = QComboBox()
+        self.combo_source.addItem("All Sources")
+        self.combo_source.addItem("Application") # Only app logs
+        self.combo_source.addItem("Devices") # All device logs
+        self.combo_source.currentTextChanged.connect(self._apply_source_filter)
+        toolbar_layout.addWidget(self.combo_source)
+        
+        toolbar_layout.addStretch()
         
         self.all_events = [] # Store all events to support filtering
+        self.is_paused = False
+        self.source_filter = "All Sources" # or specific device name
+
+    def update_device_list(self, devices):
+        """Updates the source filter with available devices."""
+        # preserve current selection
+        current = self.combo_source.currentText()
+        
+        self.combo_source.blockSignals(True)
+        self.combo_source.clear()
+        self.combo_source.addItem("All Sources")
+        self.combo_source.addItem("Application") 
+        self.combo_source.insertSeparator(2)
+        
+        for dev in devices:
+            self.combo_source.addItem(dev)
+            
+        # restore selection if possible
+        idx = self.combo_source.findText(current)
+        if idx >= 0:
+            self.combo_source.setCurrentIndex(idx)
+        else:
+            self.combo_source.setCurrentIndex(0)
+            
+        self.combo_source.blockSignals(False)
+
+    def _toggle_pause(self):
+        self.is_paused = self.btn_pause.isChecked()
+        self.btn_pause.setText("Resume" if self.is_paused else "Pause")
+
+    def _apply_source_filter(self, text):
+        self.source_filter = text
+        self._refresh_log_view()
         
     def _refresh_log_view(self):
         """Re-populates the text area based on current filter."""
@@ -57,6 +111,9 @@ class EventLogWidget(QWidget):
 
     def log_event(self, level: str, source: str, message: str):
         """Add an event to the log with timestamp and color coding."""
+        if self.is_paused:
+            return
+
         timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
         
         event = {
@@ -75,15 +132,31 @@ class EventLogWidget(QWidget):
         # If "Verbose" is OFF, hide TRANSACTION and detailed READ events unless it's a change or error
         if not self.chk_verbose.isChecked():
             # Hide transactions (IEC61850 calls)
-            if event['level'] == 'TRANSACTION':
+            if level == 'TRANSACTION':
                 return
             # Hide generic cyclic reads if not error
-            if event['source'] == 'WatchList' and 'Read' in event['message'] and event['level'] == 'INFO':
+            if source == 'WatchList' and 'Read' in message and level == 'INFO':
                  # Keep it only if it looks like a value update or error?
                  pass 
         
+        # Source Filtering
+        if self.source_filter == "All Sources":
+            pass # Show all
+        elif self.source_filter == "Application":
+            # Show specific sources
+            if source not in ["Main", "AppController", "DeviceManager", "IEC61850Adapter", "EventLog", "SCDImport"]:
+                 # If source is likely a device name (not in this list), skip
+                 if "Manager" not in source and "Main" not in source:
+                     return
+        else:
+             # Specific Device selected
+             if source != self.source_filter:
+                 return 
+        
         # Color code by level
         level = event['level']
+        source = event['source']
+        message = event['message']
         if level == "ERROR":
             color = "#f48771"
         elif level == "WARNING":

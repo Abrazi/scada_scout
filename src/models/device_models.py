@@ -15,6 +15,9 @@ class SignalType(Enum):
     COUNTER = "Counter"
     COMMAND = "Command"
 
+    TIMESTAMP = "Timestamp"
+    STATE = "State/Enum"
+
 class SignalQuality(Enum):
     GOOD = "Good"
     INVALID = "Invalid"
@@ -31,7 +34,10 @@ class Signal:
     quality: SignalQuality = SignalQuality.NOT_CONNECTED
     timestamp: Optional[datetime] = None
     description: str = ""
-    access: str = "RO" # Added access field matching usage
+    access: str = "RO" 
+    fc: str = "" # Functional Constraint
+    enum_map: Dict[int, str] = field(default_factory=dict) # Mapping for integer values
+    error: str = "" # Error message if read/write failed
 
 @dataclass
 class Node:
