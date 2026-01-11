@@ -114,7 +114,9 @@ class SCDImportDialog(QDialog):
             self.table.insertRow(row)
             
             # Name
-            self.table.setItem(row, 0, QTableWidgetItem(ied['name']))
+            name_item = QTableWidgetItem(ied['name'])
+            name_item.setData(Qt.UserRole, ied.get('description', ''))
+            self.table.setItem(row, 0, name_item)
             
             # IP / Access Point Selection
             # If multiple IPs, use ComboBox
@@ -225,6 +227,7 @@ class SCDImportDialog(QDialog):
 
                 configs.append(DeviceConfig(
                     name=name,
+                    description=self.table.item(row, 0).data(Qt.UserRole) or "",
                     ip_address=ip,
                     port=102, 
                     device_type=DeviceType.IEC61850_IED,

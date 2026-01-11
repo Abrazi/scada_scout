@@ -100,12 +100,15 @@ class BulkReadWorker:
 
     def run(self):
         import time
+        import logging
+        logger = logging.getLogger(__name__)
+
         for sig in self.signals_to_read:
             try:
                 # read_signal triggers status synchronization in DeviceManager
                 self.device_manager.read_signal(self.device_name, sig)
                 # Small sleep to be nice to the network/IED
                 time.sleep(0.001) 
-            except:
-                pass
+            except Exception as e:
+                logger.warning(f"BulkReadWorker error for {self.device_name}: {e}")
         self.signals.finished.emit()

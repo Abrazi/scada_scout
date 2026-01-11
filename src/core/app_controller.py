@@ -29,10 +29,11 @@ class AppController(QObject):
     def start_application(self):
         """Called when the application is ready to start."""
         logger.info("Application starting...")
-        # TODO: Load saved configuration
+        # Load saved configuration
+        self.device_manager.load_configuration()
         self.update_engine.start()
 
     def _on_tick(self):
         """Periodic logic execution."""
-        # Future: Poll devices, Check connection health
-        pass
+        # Poll devices that have polling enabled
+        self.device_manager.poll_devices()

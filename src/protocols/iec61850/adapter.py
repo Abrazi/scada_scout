@@ -37,12 +37,20 @@ from src.protocols.base_protocol import BaseProtocol
 from src.models.device_models import Signal, SignalType, SignalQuality, Node, DeviceConfig
 from src.core.scd_parser import SCDParser
 
-# Try to import real library, fallback to mock if missing (dev mode)
+# Try to import real library, fallback to local wrapper, then mock if missing
+HAS_LIBIEC61850 = False
 try:
-    from pyiec61850 import iec61850
+    from . import lib61850 as iec61850
     HAS_LIBIEC61850 = True
+    logger.info("Using local lib61850 wrapper")
 except ImportError:
-    HAS_LIBIEC61850 = False
+    try:
+        from pyiec61850 import iec61850
+        HAS_LIBIEC61850 = True
+        logger.info("Using external pyiec61850 library")
+    except ImportError:
+        HAS_LIBIEC61850 = False
+        logger.warning("libiec61850 not found, using MOCK mode")
 
 logger = logging.getLogger(__name__)
 
@@ -66,27 +74,27 @@ class IEC61850Adapter(BaseProtocol):
         if self.event_logger:
             self.event_logger.info("Connection", f"=== Starting connection to {self.config.ip_address}:{self.config.port} ===")
         
-        # Step 1: Ping check
+        # Step 1: Network reachability check (cross-platform)
         if self.event_logger:
-            self.event_logger.info("Connection", f"Step 1/4: Checking network reachability (ping {self.config.ip_address})...")
+            self.event_logger.info("Connection", f"Step 1/4: Checking network reachability...")
         
-        ping_success = self._ping_device()
+        from src.utils.network_utils import NetworkUtils
         
-        if not ping_success:
+        reachable = NetworkUtils.check_host_reachable(self.config.ip_address, timeout=2.0)
+        
+        if not reachable:
             if self.event_logger:
-                self.event_logger.error("Connection", f"❌ Ping FAILED - Device {self.config.ip_address} is not reachable")
-            logger.error(f"Ping failed for {self.config.ip_address}")
-            self.connected = False
-            return False
+                self.event_logger.warning("Connection", f"⚠ Host {self.config.ip_address} may not be reachable (continuing anyway)")
+            logger.warning(f"Host {self.config.ip_address} appears unreachable")
+        else:
+            if self.event_logger:
+                self.event_logger.info("Connection", f"✓ Host is reachable")
         
-        if self.event_logger:
-            self.event_logger.info("Connection", f"✓ Ping successful - Device is reachable")
-        
-        # Step 2: TCP port check
+        # Step 2: TCP port check (cross-platform)
         if self.event_logger:
             self.event_logger.info("Connection", f"Step 2/4: Checking TCP port {self.config.port}...")
         
-        port_open = self._check_port()
+        port_open = NetworkUtils.check_tcp_port(self.config.ip_address, self.config.port, timeout=2.0)
         
         if not port_open:
             if self.event_logger:
@@ -149,45 +157,6 @@ class IEC61850Adapter(BaseProtocol):
                     pass
                 self.connection = None
             return False
-    
-    def _ping_device(self) -> bool:
-        """Ping the device to check network reachability."""
-        import subprocess
-        import platform
-        
-        try:
-            # Determine ping command based on OS
-            param = '-n' if platform.system().lower() == 'windows' else '-c'
-            # Send 2 pings with 1 second timeout
-            command = ['ping', param, '2', '-W', '1', self.config.ip_address]
-            
-            result = subprocess.run(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=3
-            )
-            
-            return result.returncode == 0
-            
-        except Exception as e:
-            logger.warning(f"Ping check failed with exception: {e}")
-            # If ping fails, we'll try to connect anyway
-            return True  # Don't block connection on ping failure
-    
-    def _check_port(self) -> bool:
-        """Check if TCP port is reachable."""
-        import socket
-        
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(2)
-            result = sock.connect_ex((self.config.ip_address, self.config.port))
-            sock.close()
-            return result == 0
-        except Exception as e:
-            logger.warning(f"Port check failed: {e}")
-            return None
 
     def _connect_mock(self):
         time.sleep(0.5)

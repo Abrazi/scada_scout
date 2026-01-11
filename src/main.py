@@ -26,7 +26,7 @@ def main():
     # No default devices added on startup
     # User must add manually or import SCD
     # Create Main Window
-    window = MainWindow(device_manager)
+    window = MainWindow(device_manager, event_logger=controller.event_logger)
     window.show()
     
     # Connect event logger to event log widget (Internal App Events)

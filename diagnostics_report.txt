@@ -1,0 +1,77 @@
+================================================================================
+SCADA SCOUT - DIAGNOSTICS REPORT
+================================================================================
+
+SYSTEM INFORMATION
+--------------------------------------------------------------------------------
+Operating System: Linux 6.14.0-37-generic
+Version: #37~24.04.1-Ubuntu SMP PREEMPT_DYNAMIC Thu Nov 20 10:25:38 UTC 2
+Architecture: x86_64
+Hostname: majid-ThinkPad
+Local IP: 127.0.0.1
+
+NETWORK INTERFACES
+--------------------------------------------------------------------------------
+Interface: lo
+  IP: 127.0.0.1
+  Netmask: 255.0.0.0
+  MAC: 00:00:00:00:00:00
+  Status: UP
+
+Interface: wlp0s20f3
+  IP: 192.168.2.10
+  Netmask: 255.255.255.0
+  MAC: 98:bd:80:b8:74:f5
+  Status: UP
+
+Interface: docker0
+  IP: 172.17.0.1
+  Netmask: 255.255.0.0
+  MAC: 76:3d:c6:b5:70:55
+  Status: DOWN
+
+Interface: br-f1cd83f067d3
+  IP: 10.0.0.1
+  Netmask: 255.255.255.0
+  MAC: 9e:14:b3:35:96:c0
+  Status: DOWN
+
+Interface: vmnet1
+  IP: 192.168.38.1
+  Netmask: 255.255.255.0
+  MAC: 00:50:56:c0:00:01
+  Status: UP
+
+Interface: vmnet2
+  IP: 10.0.0.1
+  Netmask: 255.0.0.0
+  MAC: 00:50:56:c0:00:02
+  Status: UP
+
+Interface: vmnet8
+  IP: 192.168.154.1
+  Netmask: 255.255.255.0
+  MAC: 00:50:56:c0:00:08
+  Status: UP
+
+CONFIGURED DEVICES
+--------------------------------------------------------------------------------
+Total Devices: 2
+Connected: 0
+Disconnected: 2
+
+Device: m1
+  Type: Modbus Slave Server
+  Address: 127.0.0.1:5020
+  Status: DISCONNECTED
+  Signals: 0
+
+Device: s1
+  Type: Modbus TCP
+  Address: 127.0.0.1:5020
+  Status: DISCONNECTED
+  Signals: 5
+
+================================================================================
+END OF REPORT
+================================================================================

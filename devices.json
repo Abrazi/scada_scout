@@ -1,0 +1,32 @@
+{
+    "devices": [
+        {
+            "name": "1",
+            "ip_address": "127.0.0.1",
+            "port": 5020,
+            "folder": "20",
+            "description": "",
+            "device_type": "Modbus Slave Server",
+            "enabled": true,
+            "scd_file_path": null,
+            "use_scd_discovery": true,
+            "protocol_params": {},
+            "polling_enabled": true,
+            "poll_interval": 1.0,
+            "modbus_unit_id": 1,
+            "modbus_timeout": 3.0,
+            "modbus_register_maps": [],
+            "modbus_slave_mappings": [],
+            "modbus_slave_blocks": [
+                {
+                    "name": "Block 1",
+                    "register_type": "holding",
+                    "start_address": 300,
+                    "count": 10,
+                    "description": ""
+                }
+            ]
+        }
+    ],
+    "folders": {}
+}
