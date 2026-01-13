@@ -177,6 +177,7 @@ class DeviceTreeWidget(QWidget):
         """Configures the TreeView appearance."""
         self.tree_view.setAlternatingRowColors(True)
         self.tree_view.setSelectionBehavior(QTreeView.SelectRows)
+        self.tree_view.setSelectionMode(QTreeView.ExtendedSelection)  # Enable Ctrl/Shift multi-selection
         self.tree_view.setEditTriggers(QTreeView.DoubleClicked | QTreeView.EditKeyPressed)
         self.tree_view.header().setSectionResizeMode(QHeaderView.ResizeToContents)
         
@@ -729,43 +730,70 @@ class DeviceTreeWidget(QWidget):
             # Find the device name by traversing up the tree
             device_name = self._find_device_for_item(root_item)
             
+            # Check if multiple signals are selected
+            selected_indexes = self.tree_view.selectionModel().selectedIndexes()
+            # Get unique rows (since each row has multiple columns)
+            selected_rows = list(set(idx.row() for idx in selected_indexes if idx.column() == 0))
+            
+            # Collect all selected signals
+            selected_signals = []
+            for idx in selected_indexes:
+                if idx.column() == 0:  # Only process column 0 to avoid duplicates
+                    item = self.model.itemFromIndex(idx)
+                    if item:
+                        item_data = item.data(Qt.UserRole)
+                        if isinstance(item_data, Signal) or (hasattr(item_data, 'name') and hasattr(item_data, 'address')):
+                            selected_signals.append(item_data)
+            
             if device_name and self.watch_list_manager:
-                watch_action = QAction("Add to Watch List", self)
-                # Use closure to capture variables
-                def add_watch():
-                    self.watch_list_manager.add_signal(device_name, signal)
-                    
-                watch_action.triggered.connect(add_watch)
-                menu.addAction(watch_action)
-
-                # Copy Address
-                copy_action = QAction("Copy Signal Address", self)
-                copy_action.triggered.connect(lambda: self._copy_to_clipboard(signal.address))
-                menu.addAction(copy_action)
-                
-                # Control option
-                menu.addSeparator()
-                control_action = QAction("Control...", self)
-                # Enable control if access indicates RW or address looks like a control (Oper/ctlVal)
-                if getattr(signal, 'access', 'RO') == "RW" or ".Oper" in getattr(signal, 'address', '') or ".ctlVal" in getattr(signal, 'address', ''):
-                    control_action.setEnabled(True)
-                    # Hook up control action
-                    control_action.triggered.connect(lambda: self._invoke_control_dialog(device_name, signal))
+                # Show different menu options based on selection count
+                if len(selected_signals) > 1:
+                    watch_action = QAction(f"Add {len(selected_signals)} Signals to Watch List", self)
+                    def add_multiple_watch():
+                        for sig in selected_signals:
+                            self.watch_list_manager.add_signal(device_name, sig)
+                    watch_action.triggered.connect(add_multiple_watch)
+                    menu.addAction(watch_action)
                 else:
-                    control_action.setEnabled(False)
-                    control_action.setToolTip("This signal is Read-Only")
-                menu.addAction(control_action)
-                
-                # Diagnostics: Read Now
-                read_action = QAction("Read Value Now", self)
-                # Single connection only (avoid duplicate triggers causing dialog to reopen)
-                read_action.triggered.connect(lambda: self._manual_read_signal(device_name, signal))
-                menu.addAction(read_action)
+                    watch_action = QAction("Add to Watch List", self)
+                    # Use closure to capture variables
+                    def add_watch():
+                        self.watch_list_manager.add_signal(device_name, signal)
+                        
+                    watch_action.triggered.connect(add_watch)
+                    menu.addAction(watch_action)
 
-                # Enumeration Inspection
-                enum_action = QAction("Show Enumeration", self)
-                enum_action.triggered.connect(lambda: self._show_enumeration_dialog(signal))
-                menu.addAction(enum_action)
+                # Copy Address (only for single selection)
+                if len(selected_signals) == 1:
+                    copy_action = QAction("Copy Signal Address", self)
+                    copy_action.triggered.connect(lambda: self._copy_to_clipboard(signal.address))
+                    menu.addAction(copy_action)
+                
+                # Control option (only for single selection)
+                if len(selected_signals) == 1:
+                    menu.addSeparator()
+                    control_action = QAction("Control...", self)
+                    # Enable control if access indicates RW or address looks like a control (Oper/ctlVal)
+                    if getattr(signal, 'access', 'RO') == "RW" or ".Oper" in getattr(signal, 'address', '') or ".ctlVal" in getattr(signal, 'address', ''):
+                        control_action.setEnabled(True)
+                        # Hook up control action
+                        control_action.triggered.connect(lambda: self._invoke_control_dialog(device_name, signal))
+                    else:
+                        control_action.setEnabled(False)
+                        control_action.setToolTip("This signal is Read-Only")
+                    menu.addAction(control_action)
+                    
+                    # Diagnostics: Read Now
+                    read_action = QAction("Read Value Now", self)
+                    # Single connection only (avoid duplicate triggers causing dialog to reopen)
+                    read_action.triggered.connect(lambda: self._manual_read_signal(device_name, signal))
+                    menu.addAction(read_action)
+
+                    # Enumeration Inspection
+                    enum_action = QAction("Show Enumeration", self)
+                    enum_action.triggered.connect(lambda: self._show_enumeration_dialog(signal))
+                    menu.addAction(enum_action)
+        
         
         else:
             # Generic Node (LD, LN, DO)
@@ -846,8 +874,8 @@ class DeviceTreeWidget(QWidget):
             from src.models.device_models import DeviceType
             device = self.device_manager.get_device(device_name)
             if device and device.config.device_type in (DeviceType.MODBUS_TCP, DeviceType.MODBUS_SERVER):
-                from src.ui.dialogs.modbus_control_dialog import ModbusControlDialog
-                dlg = ModbusControlDialog(device_name, self.device_manager, self)
+                from src.ui.widgets.modbus_write_dialog import ModbusWriteDialog
+                dlg = ModbusWriteDialog(signal, self.device_manager, device_name, self)
                 dlg.exec()
             else:
                 from src.ui.dialogs.control_dialog import ControlDialog

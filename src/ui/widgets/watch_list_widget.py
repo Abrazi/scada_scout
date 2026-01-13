@@ -15,9 +15,10 @@ class WatchListWidget(QWidget):
     # Signals
     export_requested = QtSignal()
     
-    def __init__(self, watch_list_manager: WatchListManager, parent=None):
+    def __init__(self, watch_list_manager: WatchListManager, device_manager=None, parent=None):
         super().__init__(parent)
         self.watch_manager = watch_list_manager
+        self.device_manager = device_manager
         
         self._setup_ui()
         self._connect_signals()
@@ -54,15 +55,18 @@ class WatchListWidget(QWidget):
         
         # Table
         self.table = QTableWidget()
-        self.table.setColumnCount(6)
+        self.table.setColumnCount(13)
         self.table.setHorizontalHeaderLabels([
-            "Device", "Signal Name", "Address", "Value", "Quality", "Timestamp"
+            "Name", "Address", "Access", "Type", 
+            "Modbus Type", "Endianness", "Scale", "Offset",
+            "Value", "Quality", "Timestamp", "Last Changed", "Error"
         ])
         
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.Interactive)
         header.setStretchLastSection(True)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.ExtendedSelection)  # Enable Ctrl/Shift multi-selection
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         
         # Context menu for table
@@ -70,6 +74,14 @@ class WatchListWidget(QWidget):
         self.table.customContextMenuRequested.connect(self._show_context_menu)
         
         layout.addWidget(self.table)
+        
+    def keyPressEvent(self, event):
+        """Handle keyboard shortcuts."""
+        from PySide6.QtCore import Qt
+        if event.key() == Qt.Key_Delete:
+            self._remove_selected_signals()
+        else:
+            super().keyPressEvent(event)
         
     def _connect_signals(self):
         """Connect watch manager signals."""
@@ -90,35 +102,67 @@ class WatchListWidget(QWidget):
         row = self.table.rowCount()
         self.table.insertRow(row)
         
-        # Device
-        self.table.setItem(row, 0, QTableWidgetItem(watched.device_name))
+        signal = watched.signal
         
-        # Signal Name
-        self.table.setItem(row, 1, QTableWidgetItem(watched.signal.name))
+        # Column 0: Name
+        self.table.setItem(row, 0, QTableWidgetItem(signal.name))
         
-        # Address
-        self.table.setItem(row, 2, QTableWidgetItem(watched.signal.address))
+        # Column 1: Address
+        self.table.setItem(row, 1, QTableWidgetItem(signal.address))
         
-        # Value
-        value_str = str(watched.signal.value) if watched.signal.value is not None else "--"
-        self.table.setItem(row, 3, QTableWidgetItem(value_str))
+        # Column 2: Access
+        access = getattr(signal, 'access', 'RO')
+        self.table.setItem(row, 2, QTableWidgetItem(access))
         
-        # Quality
-        quality_item = QTableWidgetItem(watched.signal.quality.value)
+        # Column 3: Type
+        if hasattr(signal, 'signal_type') and signal.signal_type:
+            type_str = signal.signal_type.value if hasattr(signal.signal_type, 'value') else str(signal.signal_type)
+        else:
+            type_str = "Unknown"
+        self.table.setItem(row, 3, QTableWidgetItem(type_str))
+        
+        # Column 4: Modbus Type
+        modbus_type = signal.modbus_data_type.value if signal.modbus_data_type else "-"
+        self.table.setItem(row, 4, QTableWidgetItem(modbus_type))
+        
+        # Column 5: Endianness
+        endianness = signal.modbus_endianness.value if signal.modbus_endianness else "-"
+        self.table.setItem(row, 5, QTableWidgetItem(endianness))
+        
+        # Column 6: Scale
+        self.table.setItem(row, 6, QTableWidgetItem(str(signal.modbus_scale)))
+        
+        # Column 7: Offset
+        self.table.setItem(row, 7, QTableWidgetItem(str(signal.modbus_offset)))
+        
+        # Column 8: Value
+        value_str = str(signal.value) if signal.value is not None else "--"
+        self.table.setItem(row, 8, QTableWidgetItem(value_str))
+        
+        # Column 9: Quality
+        quality_item = QTableWidgetItem(signal.quality.value)
         # Color code by quality
-        if watched.signal.quality == SignalQuality.GOOD:
+        if signal.quality == SignalQuality.GOOD:
             quality_item.setBackground(Qt.green)
-        elif watched.signal.quality == SignalQuality.INVALID:
+        elif signal.quality == SignalQuality.INVALID:
             quality_item.setBackground(Qt.red)
         else:
             quality_item.setBackground(Qt.gray)
-        self.table.setItem(row, 4, quality_item)
+        self.table.setItem(row, 9, quality_item)
         
-        # Timestamp
-        ts_str = watched.signal.timestamp.strftime("%H:%M:%S") if watched.signal.timestamp else "--"
-        self.table.setItem(row, 5, QTableWidgetItem(ts_str))
+        # Column 10: Timestamp
+        ts_str = signal.timestamp.strftime("%H:%M:%S") if signal.timestamp else "--"
+        self.table.setItem(row, 10, QTableWidgetItem(ts_str))
         
-        # Store watch_id in row data
+        # Column 11: Last Changed
+        lc_str = signal.last_changed.strftime("%H:%M:%S") if signal.last_changed else "--"
+        self.table.setItem(row, 11, QTableWidgetItem(lc_str))
+        
+        # Column 12: Error
+        error_str = signal.error or "-"
+        self.table.setItem(row, 12, QTableWidgetItem(error_str))
+        
+        # Store watch_id in row data (column 0)
         self.table.item(row, 0).setData(Qt.UserRole, watched.watch_id)
     
     def _on_signal_updated(self, watch_id: str, signal: Signal):
@@ -127,12 +171,22 @@ class WatchListWidget(QWidget):
         for row in range(self.table.rowCount()):
             item = self.table.item(row, 0)
             if item and item.data(Qt.UserRole) == watch_id:
-                # Update value
-                value_str = str(signal.value) if signal.value is not None else "--"
-                self.table.item(row, 3).setText(value_str)
+                # Update all columns
+                # Column 0: Name (usually doesn't change)
+                # Column 1: Address (usually doesn't change)
+                # Column 2: Access (usually doesn't change)
+                # Column 3: Type (usually doesn't change)
+                # Column 4: Modbus Type (usually doesn't change)
+                # Column 5: Endianness (usually doesn't change)
+                # Column 6: Scale (usually doesn't change)
+                # Column 7: Offset (usually doesn't change)
                 
-                # Update quality
-                quality_item = self.table.item(row, 4)
+                # Column 8: Value
+                value_str = str(signal.value) if signal.value is not None else "--"
+                self.table.item(row, 8).setText(value_str)
+                
+                # Column 9: Quality
+                quality_item = self.table.item(row, 9)
                 quality_item.setText(signal.quality.value)
                 if signal.quality == SignalQuality.GOOD:
                     quality_item.setBackground(Qt.green)
@@ -141,9 +195,17 @@ class WatchListWidget(QWidget):
                 else:
                     quality_item.setBackground(Qt.gray)
                 
-                # Update timestamp
+                # Column 10: Timestamp
                 ts_str = signal.timestamp.strftime("%H:%M:%S") if signal.timestamp else "--"
-                self.table.item(row, 5).setText(ts_str)
+                self.table.item(row, 10).setText(ts_str)
+                
+                # Column 11: Last Changed
+                lc_str = signal.last_changed.strftime("%H:%M:%S") if signal.last_changed else "--"
+                self.table.item(row, 11).setText(lc_str)
+                
+                # Column 12: Error
+                error_str = signal.error or "-"
+                self.table.item(row, 12).setText(error_str)
                 break
     
     def _on_interval_changed(self, value: int):
@@ -168,19 +230,143 @@ class WatchListWidget(QWidget):
     
     def _show_context_menu(self, position):
         """Show context menu for table rows."""
-        from PySide6.QtWidgets import QMenu
+        from PySide6.QtWidgets import QMenu, QApplication
         from PySide6.QtGui import QAction
+        from src.models.device_models import DeviceType
         
         index = self.table.indexAt(position)
         if not index.isValid():
             return
         
-        # Get watch_id
-        watch_id = self.table.item(index.row(), 0).data(Qt.UserRole)
+        # Get all selected rows
+        selected_rows = list(set(idx.row() for idx in self.table.selectedIndexes()))
+        
+        if not selected_rows:
+            return
         
         menu = QMenu()
-        remove_action = QAction("Remove from Watch List", self)
-        remove_action.triggered.connect(lambda: self.watch_manager.remove_signal(watch_id))
-        menu.addAction(remove_action)
+        
+        # If multiple rows selected, show batch remove option
+        if len(selected_rows) > 1:
+            remove_action = QAction(f"Remove {len(selected_rows)} Signals from Watch List", self)
+            remove_action.triggered.connect(self._remove_selected_signals)
+            menu.addAction(remove_action)
+        else:
+            # Single selection - show full menu
+            row = selected_rows[0]
+            
+            # Get watch_id and signal info
+            watch_id = self.table.item(row, 0).data(Qt.UserRole)
+            
+            # Get the watched signal object
+            watched = None
+            for w in self.watch_manager.get_all_watched():
+                if w.watch_id == watch_id:
+                    watched = w
+                    break
+            
+            if not watched:
+                return
+            
+            signal = watched.signal
+            device_name = watched.device_name
+            
+            # Control option (if device_manager is available)
+            if self.device_manager:
+                control_action = QAction("Control...", self)
+                # Enable control if access indicates RW or address looks like a control
+                if getattr(signal, 'access', 'RO') == "RW" or ".Oper" in getattr(signal, 'address', '') or ".ctlVal" in getattr(signal, 'address', ''):
+                    control_action.setEnabled(True)
+                    control_action.triggered.connect(lambda: self._invoke_control_dialog(device_name, signal))
+                else:
+                    control_action.setEnabled(False)
+                    control_action.setToolTip("This signal is Read-Only")
+                menu.addAction(control_action)
+                
+                # Read Now option
+                read_action = QAction("Read Value Now", self)
+                read_action.triggered.connect(lambda: self._manual_read_signal(device_name, signal))
+                menu.addAction(read_action)
+                
+                menu.addSeparator()
+            
+            # Copy Address
+            copy_action = QAction("Copy Signal Address", self)
+            copy_action.triggered.connect(lambda: self._copy_to_clipboard(signal.address))
+            menu.addAction(copy_action)
+            
+            menu.addSeparator()
+            
+            # Remove from watch list
+            remove_action = QAction("Remove from Watch List", self)
+            remove_action.triggered.connect(lambda: self.watch_manager.remove_signal(watch_id))
+            menu.addAction(remove_action)
         
         menu.exec(self.table.viewport().mapToGlobal(position))
+    
+    def _remove_selected_signals(self):
+        """Remove all selected signals from watch list."""
+        selected_rows = list(set(idx.row() for idx in self.table.selectedIndexes()))
+        
+        if not selected_rows:
+            return
+        
+        # Collect watch_ids from selected rows
+        watch_ids = []
+        for row in selected_rows:
+            item = self.table.item(row, 0)
+            if item:
+                watch_id = item.data(Qt.UserRole)
+                if watch_id:
+                    watch_ids.append(watch_id)
+        
+        # Remove all selected signals
+        for watch_id in watch_ids:
+            self.watch_manager.remove_signal(watch_id)
+    
+    def _invoke_control_dialog(self, device_name, signal):
+        """Open control dialog for a signal."""
+        try:
+            from src.models.device_models import DeviceType
+            device = self.device_manager.get_device(device_name)
+            if device and device.config.device_type in (DeviceType.MODBUS_TCP, DeviceType.MODBUS_SERVER):
+                from src.ui.widgets.modbus_write_dialog import ModbusWriteDialog
+                dlg = ModbusWriteDialog(signal, self.device_manager, device_name, self)
+                dlg.exec()
+            else:
+                from src.ui.dialogs.control_dialog import ControlDialog
+                dlg = ControlDialog(device_name, signal, self.device_manager, self)
+                dlg.exec()
+        except Exception:
+            logger.exception("Failed to open control dialog from watch list")
+    
+    def _manual_read_signal(self, device_name, signal):
+        """Manually triggers a read for a single signal and shows result."""
+        from PySide6.QtWidgets import QMessageBox
+        
+        try:
+            # Force read via device manager
+            updated_signal = self.device_manager.read_signal(device_name, signal)
+
+            # If read was enqueued to IEC worker, perform a blocking read for manual request
+            if updated_signal is None:
+                # Best-effort synchronous read via protocol adapter
+                proto = self.device_manager.get_or_create_protocol(device_name)
+                if proto and hasattr(proto, 'read_signal'):
+                    updated_signal = proto.read_signal(signal)
+
+            if updated_signal:
+                val = updated_signal.value
+                qual = updated_signal.quality.value if hasattr(updated_signal.quality, 'value') else str(updated_signal.quality)
+                QMessageBox.information(self, "Read Result", f"Signal: {signal.name}\nValue: {val}\nQuality: {qual}\nTimestamp: {updated_signal.timestamp}")
+            else:
+                QMessageBox.warning(self, "Read Failed", f"Could not read signal {signal.name}")
+        except Exception as e:
+            QMessageBox.critical(self, "Read Error", f"Error reading signal: {e}")
+    
+    def _copy_to_clipboard(self, text):
+        """Copies given text to system clipboard."""
+        from PySide6.QtWidgets import QApplication
+        clipboard = QApplication.clipboard()
+        clipboard.setText(text)
+

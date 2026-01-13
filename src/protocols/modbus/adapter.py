@@ -55,9 +55,13 @@ class ModbusTCPAdapter(BaseProtocol):
             return False
         
         if self.event_logger:
-            self.event_logger.info("Modbus", f"Connecting to {self.config.ip_address}:{self.config.port}")
+            self.event_logger.info(self.config.name, f"Connecting to {self.config.ip_address}:{self.config.port}")
         
         try:
+            # Ensure clean state - disconnect any existing connection
+            if self.client:
+                self.disconnect()
+            
             # Create client (pymodbus 3.x auto-connects on first request)
             self.client = ModbusTcpClient(
                 host=self.config.ip_address,
@@ -67,7 +71,7 @@ class ModbusTCPAdapter(BaseProtocol):
             
             # Attempt connection
             if self.event_logger:
-                self.event_logger.transaction("Modbus", f"→ TCP Connect to {self.config.ip_address}:{self.config.port}")
+                self.event_logger.transaction(self.config.name, f"→ TCP Connect to {self.config.ip_address}:{self.config.port}")
             
             # In pymodbus 3.x, connect() returns None
             self.client.connect()
@@ -78,11 +82,11 @@ class ModbusTCPAdapter(BaseProtocol):
                 if test_result.isError():
                     # Connection OK but device returned error (might be normal)
                     if self.event_logger:
-                        self.event_logger.warning("Modbus", f"Connection OK but device returned error: {test_result}")
+                        self.event_logger.warning(self.config.name, f"Connection OK but device returned error: {test_result}")
                 else:
                     if self.event_logger:
-                        self.event_logger.transaction("Modbus", "← Connection SUCCESS")
-                        self.event_logger.info("Modbus", f"✓ Connected to Unit ID {self.unit_id}")
+                        self.event_logger.transaction(self.config.name, "← Connection SUCCESS")
+                        self.event_logger.info(self.config.name, f"✓ Connected to Unit ID {self.unit_id}")
                     logger.info(f"Connected to Modbus device at {self.config.ip_address}")
                 
                 self.connected = True
@@ -93,7 +97,7 @@ class ModbusTCPAdapter(BaseProtocol):
                     
         except ConnectionException as e:
             if self.event_logger:
-                self.event_logger.error("Modbus", f"← Connection FAILED: {e}")
+                self.event_logger.error(self.config.name, f"← Connection FAILED: {e}")
             logger.error(f"Failed to connect to Modbus device: {e}")
             self.connected = False
             return False
@@ -101,7 +105,7 @@ class ModbusTCPAdapter(BaseProtocol):
         except Exception as e:
             logger.error(f"Modbus connection error: {e}")
             if self.event_logger:
-                self.event_logger.error("Modbus", f"Connection exception: {e}")
+                self.event_logger.error(self.config.name, f"Connection exception: {e}")
             self.connected = False
             return False
     
@@ -111,9 +115,11 @@ class ModbusTCPAdapter(BaseProtocol):
             try:
                 self.client.close()
                 if self.event_logger:
-                    self.event_logger.info("Modbus", "Disconnected")
+                    self.event_logger.info(self.config.name, "Disconnected")
             except Exception as e:
                 logger.debug(f"Error closing modbus client: {e}")
+            finally:
+                self.client = None  # Ensure clean state for reconnection
         self.connected = False
         logger.info("Modbus disconnected")
     
@@ -122,7 +128,7 @@ class ModbusTCPAdapter(BaseProtocol):
         Discover Modbus device structure by scanning configured register maps
         """
         if self.event_logger:
-            self.event_logger.info("Discovery", "Starting Modbus device discovery")
+            self.event_logger.info(self.config.name, "Starting Modbus device discovery")
         
         root = Node(
             name=self.config.name,
@@ -138,13 +144,13 @@ class ModbusTCPAdapter(BaseProtocol):
         else:
             # Default discovery: scan common register ranges
             if self.event_logger:
-                self.event_logger.info("Discovery", "No register maps configured, using default scan")
+                self.event_logger.info(self.config.name, "No register maps configured, using default scan")
             
             root.children.extend(self._default_discovery())
         
         if self.event_logger:
             total_signals = sum(len(child.signals) for child in root.children)
-            self.event_logger.info("Discovery", f"✓ Discovery complete: {len(root.children)} groups, {total_signals} signals")
+            self.event_logger.info(self.config.name, f"✓ Discovery complete: {len(root.children)} groups, {total_signals} signals")
         
         return root
     
@@ -265,7 +271,7 @@ class ModbusTCPAdapter(BaseProtocol):
             count = self._get_register_size(signal.modbus_data_type or ModbusDataType.UINT16)
             
             if self.event_logger:
-                self.event_logger.transaction("Modbus", f"→ READ FC{func_code} Unit={unit_id} Addr={address} Count={count}")
+                self.event_logger.transaction(self.config.name, f"→ READ FC{func_code} Unit={unit_id} Addr={address} Count={count}")
             
             # Execute read based on function code
             result = None
@@ -288,7 +294,7 @@ class ModbusTCPAdapter(BaseProtocol):
                 signal.quality = SignalQuality.INVALID
                 signal.error = str(result)
                 if self.event_logger:
-                    self.event_logger.error("Modbus", f"← READ ERROR: {result}")
+                    self.event_logger.error(self.config.name, f"← READ ERROR: {result}")
                 self._emit_update(signal)
                 return signal
             
@@ -317,7 +323,7 @@ class ModbusTCPAdapter(BaseProtocol):
             signal.error = ""
             
             if self.event_logger:
-                self.event_logger.transaction("Modbus", f"← READ OK: {signal.value}")
+                self.event_logger.transaction(self.config.name, f"← READ OK: {signal.value}")
             
             # Emit update for live data subscribers
             self._emit_update(signal)
@@ -329,13 +335,13 @@ class ModbusTCPAdapter(BaseProtocol):
             signal.error = "Connection lost"
             self.connected = False
             if self.event_logger:
-                self.event_logger.error("Modbus", "← Connection lost during read")
+                self.event_logger.error(self.config.name, "← Connection lost during read")
             self._emit_update(signal)
         except Exception as e:
             signal.quality = SignalQuality.INVALID
             signal.error = str(e)
             if self.event_logger:
-                self.event_logger.error("Modbus", f"← READ EXCEPTION: {e}")
+                self.event_logger.error(self.config.name, f"← READ EXCEPTION: {e}")
             logger.error(f"Error reading Modbus signal {signal.address}: {e}")
             self._emit_update(signal)
         
@@ -345,7 +351,7 @@ class ModbusTCPAdapter(BaseProtocol):
         """Write value to a Modbus signal"""
         if not self.connected or not self.client:
             if self.event_logger:
-                self.event_logger.error("Modbus", "Cannot write: not connected")
+                self.event_logger.error(self.config.name, "Cannot write: not connected")
             return False
         
         try:
@@ -359,7 +365,7 @@ class ModbusTCPAdapter(BaseProtocol):
             address = int(parts[2])
             
             if self.event_logger:
-                self.event_logger.transaction("Modbus", f"→ WRITE FC{func_code} Unit={unit_id} Addr={address} Value={value}")
+                self.event_logger.transaction(self.config.name, f"→ WRITE FC{func_code} Unit={unit_id} Addr={address} Value={value}")
             try:
                 # FC 05: Write Single Coil, FC 06: Write Single Register, FC 15: Write Multiple Coils, FC 16: Write Multiple Registers
                 if func_code == 1:  # Write Single Coil (mapped to internally as FC 05)
@@ -383,7 +389,7 @@ class ModbusTCPAdapter(BaseProtocol):
                 
                 else:
                     if self.event_logger:
-                        self.event_logger.error("Modbus", f"Cannot write to FC{func_code} (read-only)")
+                        self.event_logger.error(self.config.name, f"Cannot write to FC{func_code} (read-only)")
                     signal.error = "Read-Only"
                     signal.quality = SignalQuality.INVALID
                     return False
@@ -398,21 +404,21 @@ class ModbusTCPAdapter(BaseProtocol):
             
             if result and not result.isError():
                 if self.event_logger:
-                    self.event_logger.transaction("Modbus", f"← WRITE SUCCESS")
+                    self.event_logger.transaction(self.config.name, f"← WRITE SUCCESS")
                 signal.error = ""
                 signal.quality = SignalQuality.GOOD
                 return True
             else:
                 err_msg = f"Write Error: {result}"
                 if self.event_logger:
-                    self.event_logger.error("Modbus", f"← {err_msg}")
+                    self.event_logger.error(self.config.name, f"← {err_msg}")
                 signal.error = str(result)
                 signal.quality = SignalQuality.INVALID
                 return False
         
         except Exception as e:
             if self.event_logger:
-                self.event_logger.error("Modbus", f"← WRITE EXCEPTION: {e}")
+                self.event_logger.error(self.config.name, f"← WRITE EXCEPTION: {e}")
             logger.error(f"Error writing Modbus signal: {e}")
             signal.error = str(e)
             signal.quality = SignalQuality.INVALID

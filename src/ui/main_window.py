@@ -190,7 +190,7 @@ class MainWindow(QMainWindow):
         self.dock_bottom = QDockWidget("Watch List", self)
         self.dock_bottom.setAllowedAreas(Qt.BottomDockWidgetArea | Qt.TopDockWidgetArea)
         
-        self.watch_list_widget = WatchListWidget(self.watch_list_manager)
+        self.watch_list_widget = WatchListWidget(self.watch_list_manager, self.device_manager)
         self.dock_bottom.setWidget(self.watch_list_widget)
         self.addDockWidget(Qt.BottomDockWidgetArea, self.dock_bottom)
         
