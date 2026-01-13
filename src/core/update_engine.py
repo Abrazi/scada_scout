@@ -17,6 +17,21 @@ class UpdateEngine(QObject):
         self._timer.timeout.connect(self._on_timeout)
         self._interval = interval_ms
         self._running = False
+        self.iec_worker = None # To be injected
+
+    def set_iec_worker(self, worker):
+        self.iec_worker = worker
+
+    def refresh_live_data(self, refs: list):
+        """Asynchronously refresh a list of signals (by reference/address)."""
+        if not self.iec_worker:
+            return
+
+        for ref in refs:
+            self.iec_worker.enqueue({
+                "action": "read",
+                "ref": ref
+            })
 
     def start(self):
         """Starts the update timer."""

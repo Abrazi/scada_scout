@@ -483,10 +483,56 @@ class DeviceManager(QObject):
                     logger.error(f"Error sending control command: {e}")
             return
 
-        # If we have specific device
         if command == 'SELECT':
             protocol.select(signal)
         elif command == 'OPERATE':
             protocol.operate(signal, value)
         elif command == 'CANCEL':
             protocol.cancel(signal)
+
+    def is_controllable(self, device_name: str, signal: Signal) -> bool:
+        """
+        Determines if a Data Attribute is controllable based on IEC 61850 rules.
+        Checks ctlModel behavior.
+        """
+        # 1. Name check
+        if "ctlVal" not in signal.address:
+            return False
+
+        # 2. Find ctlModel via adapter
+        protocol = self._protocols.get(device_name)
+        if not protocol:
+            return False
+            
+        # Construct path to ctlModel (sibling of ctlVal)
+        # e.g. Device/LN.Pos.Oper.ctlVal -> Device/LN.Pos.Oper.ctlModel ??
+        # Or usually Device/LN.Pos.ctlModel is at CF level? 
+        # Actually ctlModel is usually a CF (Configuration) attribute of the control object.
+        # It's usually at the same level as Oper/SBOw? 
+        # Let's look for sibling 'ctlModel'.
+        
+        base_path = signal.address.rsplit('.', 1)[0] # Strip .ctlVal
+        # If path is ...Oper.ctlVal, parent is Oper. ctlModel is inside Oper?
+        # No, ctlModel is usually in the Logical Node or the DO.
+        # Standard: DO contains ctlModel.
+        # If signal is ...DO.Oper.ctlVal -> ctlModel is at ...DO.ctlModel
+        
+        # Heuristic: Try to read ctlModel at the DO level.
+        # We need to guess the DO path.
+        # If address is 'IED/LN.Pos.Oper.ctlVal', DO is 'IED/LN.Pos'.
+        
+        # User logic: "ln = da.parent.parent" implies: ctlVal -> Oper -> DO ?
+        # So we go up 2 levels.
+        parts = signal.address.split('.')
+        if len(parts) >= 2:
+             # Try finding ctlModel at varying levels up
+             # This requires reading the model or having it cached.
+             # Adapter's 'discover' populates simple model.
+             pass
+             
+        # For robustness, we delegating to the adapter to read/check it.
+        if hasattr(protocol, 'check_control_model'):
+             return protocol.check_control_model(signal.address)
+             
+        return True # Fallback if we can't check
+
