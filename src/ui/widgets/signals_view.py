@@ -66,13 +66,20 @@ class SignalsViewWidget(QWidget):
         
         layout.addWidget(self.table_view)
         
+        # No Signals Overlay
+        from PySide6.QtWidgets import QLabel
+        self.lbl_no_signals = QLabel("No signals found (Select a node)", self.table_view)
+        self.lbl_no_signals.setAlignment(Qt.AlignCenter)
+        self.lbl_no_signals.setStyleSheet("font-size: 16px; color: gray; background: rgba(255, 255, 255, 128);")
+        self.lbl_no_signals.hide()
+        
         self.tabs.addTab(self.table_tab, "Live Data")
         
         # Timer for Auto-Refresh
         from PySide6.QtCore import QTimer
         self.refresh_timer = QTimer(self)
         self.refresh_timer.timeout.connect(self._on_refresh_clicked)
-        self.refresh_timer.start(3000)
+        # self.refresh_timer.start(3000)
 
     def _on_auto_refresh_toggled(self, state):
         if state == Qt.Checked:
@@ -113,11 +120,32 @@ class SignalsViewWidget(QWidget):
             # We rely on _get_current_device_name heuristic or explicit set
             pass
 
+    def resizeEvent(self, event):
+        """Ensure overlay stays centered."""
+        if hasattr(self, 'lbl_no_signals') and self.lbl_no_signals.isVisible():
+             self.lbl_no_signals.resize(self.table_view.size())
+             self.lbl_no_signals.move(0, 0) # Relative to table view if parented? 
+             # Actually parent is table_view, so 0,0 covers it.
+        super().resizeEvent(event)
+
+    def set_filter_node(self, node):
+        """Updates the view to show signals from the given node."""
+        self.current_node = node
+        if node is None:
+            self.current_device_name = None
+        
         self.table_model.set_node_filter(node)
         self.table_view.resizeColumnsToContents()
         
-        # Trigger immediate refresh when node changes
-        self._on_refresh_clicked()
+        # Toggle Overlay
+        if self.table_model.rowCount() == 0:
+            self.lbl_no_signals.show()
+            self.lbl_no_signals.resize(self.table_view.size())
+        else:
+            self.lbl_no_signals.hide()
+        
+        # Auto-trigger disabled per user request
+        # self._on_refresh_clicked()
 
     def _trigger_background_read(self, device_name, signals):
         """Execute signal reads in a background thread to prevent UI freeze."""
@@ -193,19 +221,11 @@ class SignalsViewWidget(QWidget):
         return None
 
     def _on_control_clicked(self, device_name, signal):
-        from PySide6.QtWidgets import QInputDialog, QMessageBox
+        from src.ui.dialogs.control_dialog import ControlDialog
         
-        # User requested command
-        # For ctVal (INT32), we usually send an integer.
-        # Should we assume Integer?
-        val, ok = QInputDialog.getInt(self, "Send Control", f"Enter value for {signal.name}:", 0)
-        
-        if ok:
-             try:
-                 self.device_manager.send_control_command(device_name, signal, 'OPERATE', val)
-                 QMessageBox.information(self, "Success", f"Command sent to {signal.name}")
-             except Exception as e:
-                 QMessageBox.critical(self, "Error", f"Failed to send command: {e}")
+        dialog = ControlDialog(device_name, signal, self.device_manager, self)
+        dialog.exec()
+
 
     def _setup_chart_tab(self):
         """Create the Chart tab."""

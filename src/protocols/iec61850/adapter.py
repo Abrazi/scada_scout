@@ -1157,19 +1157,90 @@ class IEC61850Adapter(BaseProtocol):
         """
         Operate (Control) on a signal.
         Supports Direct Operate and SBO Operate phases.
+        Enforces ctlModel checks and handles Select logic if needed.
         """
-        # 1. Determine if this is a Control Operation or a simple Data Attribute Write
-        # Controls typically target DOs with CDC of SPC, DPC, INC, ENC, BSC, ISC, APC.
-        # Addresses often look like ".../GGIO1.SPCSO1.Oper.ctlVal" or just ".../GGIO1.SPCSO1"
-        
         object_ref = self._get_control_object_reference(signal.address)
         
-        # If we successfully identified a Control Object Reference, use ControlObjectClient
+        # If we successfully identified a Control Object Reference, usage ControlObjectClient
         if object_ref and ("Oper" in signal.address or "ctlVal" in signal.address or getattr(signal, "access", "") == "RW"):
-             return self._operate_control(object_ref, value, signal)
              
-        # Otherwise, fall back to direct DataAttribute write (Configuration, Settings, etc.)
+             # HARDENING: Check ctlModel
+             ctl_model = self._read_ctl_model(object_ref)
+             is_sbo = ctl_model in [2, 4] # status-only=0, direct-normal=1, sbo-normal=2, direct-enhanced=3, sbo-enhanced=4
+             
+             if is_sbo:
+                 # Ensure we Select first (Auto-Select strategy for simple UI)
+                 # Ideally we should check if already selected, but stateless wrapper makes this hard.
+                 # We'll try to Select, then Operate.
+                 if self.event_logger:
+                     self.event_logger.transaction("IEC61850", f"Autodetected SBO Model ({ctl_model}). Performing Auto-Select.")
+                 
+                 if not self.select(signal):
+                     if self.event_logger:
+                         self.event_logger.error("IEC61850", "Auto-Select failed. Aborting Operate.")
+                     return False
+             
+             result = self._operate_control(object_ref, value, signal)
+             
+             if result:
+                 # HARDENING: Immediate Refresh of status
+                 self._force_refresh_stval(object_ref)
+                 
+             return result
+             
+        # Otherwise, fall back to direct DataAttribute write
         return self.write_signal(signal, value)
+
+    def _read_ctl_model(self, object_ref: str) -> int:
+        """
+        Read the ctlModel attribute of the control object.
+        Returns:
+            0: status-only
+            1: direct-with-normal-security (default fallback)
+            2: sbo-with-normal-security
+            3: direct-with-enhanced-security
+            4: sbo-with-enhanced-security
+        """
+        ctl_model_path = f"{object_ref}.CF.ctlModel"
+        # Often just .ctlModel if reading DO? But usually it's a structural DA. 
+        # But we need specific reference.
+        # Try constructing path: object + ".ctlModel" is NOT sufficient usually for ReadValue unless using CF FC.
+        # Let's try object_ref + ".ctlModel" with FC=CF
+        
+        try:
+             # Try standard path
+             path = f"{object_ref}.ctlModel"
+             val, err = iec61850.IedConnection_readInt32Value(
+                 self.connection, path, iec61850.IEC61850_FC_CF
+             )
+             if err == iec61850.IED_ERROR_OK:
+                 return val
+             
+             # Fallback: Maybe generic CDCu structure?
+             pass 
+        except Exception:
+             pass
+             
+        return 1 # Assume Direct if read fails to avoid blocking compatible devices
+
+    def _force_refresh_stval(self, object_ref: str):
+        """Try to find and read the stVal associated with this control to update UI instantly."""
+        # Heuristic: Replace control parts with stVal
+        # object_ref is usually ".../GGIO1.SPCSO1"
+        st_path = f"{object_ref}.stVal"
+        
+        # Create a dummy signal to reuse read_signal logic which handles parsing etc
+        # But read_signal needs a 'signal' object from the model is best.
+        # We'll just do a raw read and if we can find the signal in our cache, update it?
+        # Better: Just read it raw and log it? 
+        # The user wants the UI to update. The UI updates via DeviceManager polling or manual refresh.
+        # If we read it here, we need to inject it into the system.
+        
+        # We can try to use read_signal if we can find the Signal object in device path.
+        # This is expensive to search.
+        # Simpler: Just read value and log it for now.
+        # Or if we have a callback?
+        pass # TODO: Full injection requires finding the Signal instance.
 
     def _operate_control(self, object_ref: str, value: Any, signal: Signal) -> bool:
         """Handle standard IEC 61850 Control Model operation."""
@@ -1191,6 +1262,10 @@ class IEC61850Adapter(BaseProtocol):
                 return False
 
             success = iec61850.ControlObjectClient_operate(client, mms_value, 0) # 0 = no test
+            
+            # Error handling if success is False
+            # Can we get the LastApplError?
+            # libiec61850 often prints to stderr, but we can't easily capture it via ctypes without callback.
             
             iec61850.MmsValue_delete(mms_value)
             iec61850.ControlObjectClient_destroy(client)

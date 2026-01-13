@@ -384,26 +384,38 @@ class ModbusTCPAdapter(BaseProtocol):
                 else:
                     if self.event_logger:
                         self.event_logger.error("Modbus", f"Cannot write to FC{func_code} (read-only)")
+                    signal.error = "Read-Only"
+                    signal.quality = SignalQuality.INVALID
                     return False
             except Exception as e:
+                err_msg = f"Write Exception: {e}"
                 if self.event_logger:
-                    self.event_logger.error("Modbus", f"← WRITE EXCEPTION: {e}")
+                    self.event_logger.error("Modbus", f"← {err_msg}")
                 logger.error(f"Error writing Modbus signal: {e}")
+                signal.error = str(e)
+                signal.quality = SignalQuality.INVALID
                 return False
             
             if result and not result.isError():
                 if self.event_logger:
                     self.event_logger.transaction("Modbus", f"← WRITE SUCCESS")
+                signal.error = ""
+                signal.quality = SignalQuality.GOOD
                 return True
             else:
+                err_msg = f"Write Error: {result}"
                 if self.event_logger:
-                    self.event_logger.error("Modbus", f"← WRITE ERROR: {result}")
+                    self.event_logger.error("Modbus", f"← {err_msg}")
+                signal.error = str(result)
+                signal.quality = SignalQuality.INVALID
                 return False
         
         except Exception as e:
             if self.event_logger:
                 self.event_logger.error("Modbus", f"← WRITE EXCEPTION: {e}")
             logger.error(f"Error writing Modbus signal: {e}")
+            signal.error = str(e)
+            signal.quality = SignalQuality.INVALID
             return False
     
     def _get_register_size(self, data_type: ModbusDataType) -> int:

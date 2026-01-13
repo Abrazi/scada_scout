@@ -21,6 +21,23 @@ class SignalTableModel(QAbstractTableModel):
         super().__init__(parent)
         self._signals: List[Signal] = []
         self._signal_map: Dict[str, int] = {} # Map signal unique ID to row index
+        self._updates_suspended = False
+
+    def suspend_updates(self, suspend: bool):
+        """
+        If True, signals are updated in background but Views are NOT notified (prevents event flood).
+        If False, immediately triggers a full view refresh.
+        """
+        self._updates_suspended = suspend
+        if not suspend:
+            # Replaced bulk reset to layoutChanged to keep selection if possible, 
+            # but for bulk updates reset is safer/cleaner visually?
+            # dataChanged for all range is better.
+            if self._signals:
+                tl = self.index(0, 0)
+                br = self.index(len(self._signals)-1, 12)
+                self.dataChanged.emit(tl, br, [Qt.DisplayRole, Qt.BackgroundRole, Qt.ForegroundRole])
+            # self.layoutChanged.emit()
 
     def set_node_filter(self, node):
         """Sets the current node to display signals for."""
@@ -69,10 +86,12 @@ class SignalTableModel(QAbstractTableModel):
         if row is not None:
             self._signals[row] = signal
             
-            # Notify view that the entire row might have changed for safety
-            top_left = self.index(row, 0)
-            bottom_right = self.index(row, 12)
-            self.dataChanged.emit(top_left, bottom_right, [Qt.DisplayRole])
+            # Optimization: If suspended, DO NOT emit dataChanged
+            if not self._updates_suspended:
+                # Notify view that the entire row might have changed for safety
+                top_left = self.index(row, 0)
+                bottom_right = self.index(row, 12)
+                self.dataChanged.emit(top_left, bottom_right, [Qt.DisplayRole])
 
     def get_signals(self) -> List[Signal]:
         """Returns the current list of signals in the model."""
@@ -180,6 +199,10 @@ class SignalTableModel(QAbstractTableModel):
                     return QBrush(QColor(255, 200, 200))  # Light red
                 elif signal.quality == SignalQuality.NOT_CONNECTED:
                     return QBrush(QColor(220, 220, 220))  # Gray
+
+        if role == Qt.ForegroundRole and col == 12: # Error column
+            if signal.error:
+                return QBrush(QColor(255, 0, 0)) # Red text
         
         return None
 

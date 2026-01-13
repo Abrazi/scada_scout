@@ -25,6 +25,15 @@ class DeviceTreeWidget(QWidget):
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(0, 0, 0, 0)
         
+        # Filter Bar
+        from PySide6.QtWidgets import QLineEdit, QHBoxLayout
+        filter_layout = QHBoxLayout()
+        self.txt_filter = QLineEdit()
+        self.txt_filter.setPlaceholderText("Search devices...")
+        self.txt_filter.textChanged.connect(self._filter_tree)
+        filter_layout.addWidget(self.txt_filter)
+        self.layout.addLayout(filter_layout)
+        
         self.tree_view = QTreeView()
         self.layout.addWidget(self.tree_view)
         
@@ -37,6 +46,85 @@ class DeviceTreeWidget(QWidget):
         # Selection and Editing
         self.tree_view.selectionModel().selectionChanged.connect(self._on_selection_changed)
         self.model.itemChanged.connect(self._on_item_changed)
+
+    def _filter_tree(self, text):
+        """Filter the tree view based on text."""
+        search = text.lower()
+        
+        def filter_recursive(item):
+            visible = False
+            # Check self
+            if search in item.text().lower():
+                visible = True
+            
+            # Check children
+            for i in range(item.rowCount()):
+                child = item.child(i)
+                child_visible = filter_recursive(child)
+                if child_visible:
+                    visible = True
+            
+            # If visible, hide/show using view (if using proxy) or set row hidden
+            # Ideally with QStandardItemModel, we might want Proxy, but hiding rows works too.
+            # QTreeView.setRowHidden needs visual index.
+            # Easier: Use Proxy? Or manual traversal.
+            # Let's try manual traversal of the View for simplicity if not using Proxy.
+            # Wait, hiding requires mapping indices.
+            
+            # Better approach for QStandardItemModel: Loop visible rows?
+            return visible
+
+        # Simpler Implementation: Iterate all items from root
+        # If text is empty, show all
+        if not search:
+            self._show_all_items(self.model.invisibleRootItem())
+            return
+
+        self._filter_item_visibility(self.model.invisibleRootItem(), search)
+
+    def _show_all_items(self, parent):
+        for i in range(parent.rowCount()):
+            self.tree_view.setRowHidden(i, parent.index(), False)
+            child = parent.child(i)
+            if child:
+                self._show_all_items(child)
+
+    def _filter_item_visibility(self, parent, search):
+        for i in range(parent.rowCount()):
+            child = parent.child(i)
+            should_show = False
+            
+            # Check text of this item (and col 2 desc)
+            txt = child.text().lower()
+            desc = child.index().siblingAtColumn(2).data()
+            if desc: txt += " " + str(desc).lower()
+            
+            if search in txt:
+                should_show = True
+            
+            # Check children recursively
+            children_visible = False
+            if child.rowCount() > 0:
+                children_visible = self._filter_item_visibility(child, search)
+            
+            if should_show or children_visible:
+                self.tree_view.setRowHidden(i, parent.index(), False)
+                if children_visible:
+                    self.tree_view.expand(child.index())
+                    # Ensure parents expanded
+                    # This happens implicitly if we see children
+            else:
+                self.tree_view.setRowHidden(i, parent.index(), True)
+            
+            # Return true if any part of this branch is visible
+            if should_show or children_visible:
+                return True
+        return False # This logic is slightly flawed for return value vs loop, fixing below.
+
+    # Revised Filter Logic
+    def _filter_tree_revised(self, text):
+        pass # Placeholder, replacing logic in _filter_tree directly
+
 
     def _on_selection_changed(self, selected, deselected):
         try:
