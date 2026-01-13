@@ -1,0 +1,110 @@
+Here’s the clean, reliable way to do it 👇
+
+1️⃣ Don’t activate the copied venv (important)
+
+A venv contains absolute paths to:
+
+the old Python install
+
+system libraries
+
+OS-specific binaries
+
+So activating it on a new computer often fails or behaves weirdly.
+
+✅ Best practice: delete the old venv folder
+(or just ignore it)
+
+2️⃣ Make sure Python is installed
+
+On the new computer, check:
+
+python --version
+
+
+or (sometimes):
+
+python3 --version
+
+ption A: Upgrade Python (best) 
+
+Install Python 3.10 or 3.11 on the new computer
+
+Delete the venv:
+
+rmdir /s /q venv
+
+
+Recreate it:
+
+python -m venv venv
+venv\Scripts\activate
+
+
+Upgrade pip:
+
+python -m pip install --upgrade pip
+
+
+Install requirements:
+
+pip install -r requirements.txt
+
+
+✅ This keeps your dependencies exactly as intended.
+
+If that fails, install Python from python.org first.
+
+3️⃣ Create a new virtual environment
+
+From your project root (where your code lives):
+
+macOS / Linux
+python3 -m venv venv
+
+Windows
+python -m venv venv
+
+
+This creates a fresh venv for this machine.
+
+4️⃣ Activate the new venv
+macOS / Linux
+source venv/bin/activate
+
+Windows (PowerShell)
+venv\Scripts\Activate.ps1
+
+Windows (cmd)
+venv\Scripts\activate
+
+
+You’ll know it worked when you see:
+
+(venv)
+
+
+at the start of your terminal line.
+
+5️⃣ Reinstall dependencies
+
+If your project has a requirements.txt (hopefully 🤞):
+
+pip install -r requirements.txt
+
+
+If you don’t have one and the old computer is still available:
+
+pip freeze > requirements.txt
+
+
+Then move that file over and install again.
+
+6️⃣ Run your program
+
+Example:
+
+python main.py
+
+
+or whatever your entry file is.

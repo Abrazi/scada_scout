@@ -1,7 +1,19 @@
-PySide6
-PyQt6-Charts
-numpy
-# Dev tools
-pytest
-ipython
-pyiec61850
+# Core GUI Dependencies
+PySide6>=6.5.0
+PyQt6-Charts>=6.5.0
+numpy>=1.24.0
+
+# Protocol Libraries
+pymodbus>=3.5.0
+
+# IEC 61850 Protocol
+# Note: Requires native libiec61850 library (dll/so/dylib) to be installed
+#       See IEC61850_SETUP.md for installation instructions
+
+# Cross-Platform Utilities
+psutil>=5.9.0
+
+# Development Tools (optional)
+pytest>=7.4.0
+pytest-qt>=4.2.0
+ipython>=8.14.0

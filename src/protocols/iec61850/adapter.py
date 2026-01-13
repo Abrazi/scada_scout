@@ -1,12 +1,15 @@
-from typing import Optional, Any
+from typing import Optional, Any, Dict
 from enum import Enum
+from datetime import datetime
 import logging
+import time
+
 from src.protocols.base_protocol import BaseProtocol
 from src.models.device_models import DeviceConfig, Node, Signal, SignalType, SignalQuality
 from src.core.scd_parser import SCDParser
 
-# Placeholder for libiec61850 import in a real app
-# import iec61850 
+# Import the ctypes wrapper for libiec61850
+from . import iec61850_wrapper as iec61850
 
 logger = logging.getLogger(__name__)
 
@@ -27,24 +30,6 @@ class IedConnection:
 
     def Connect(self, ip, port):
         self._connected = True
-
-from datetime import datetime
-import logging
-import time
-from typing import Dict, Any, Optional
-
-from src.protocols.base_protocol import BaseProtocol
-from src.models.device_models import Signal, SignalType, SignalQuality, Node, DeviceConfig
-from src.core.scd_parser import SCDParser
-
-# Try to import real library, fallback to mock if missing (dev mode)
-try:
-    from pyiec61850 import iec61850
-    HAS_LIBIEC61850 = True
-except ImportError:
-    HAS_LIBIEC61850 = False
-
-logger = logging.getLogger(__name__)
 
 class IEC61850Adapter(BaseProtocol):
     """
@@ -96,11 +81,12 @@ class IEC61850Adapter(BaseProtocol):
                 self.event_logger.info("Connection", f"✓ Port {self.config.port} is reachable")
         
         # Step 3: IEC 61850 connection attempt
-        if not HAS_LIBIEC61850:
+        # Check if library is loaded
+        if not iec61850.is_library_loaded():
             if self.event_logger:
-                self.event_logger.warning("Connection", "Step 3/4: Using MOCK mode (libiec61850 not available)")
-            self.connected = True
-            return True
+                self.event_logger.error("Connection", f"Step 3/4: Library not loaded - {iec61850.get_load_error()}")
+            self.connected = False
+            return False
         
         try:
             if self.event_logger:
@@ -145,8 +131,8 @@ class IEC61850Adapter(BaseProtocol):
             if self.connection:
                 try:
                     iec61850.IedConnection_destroy(self.connection)
-                except:
-                    pass
+                except Exception as e:
+                    logger.debug(f"Error destroying connection: {e}")
                 self.connection = None
             return False
     
@@ -157,15 +143,17 @@ class IEC61850Adapter(BaseProtocol):
         
         try:
             # Determine ping command based on OS
-            param = '-n' if platform.system().lower() == 'windows' else '-c'
-            # Send 2 pings with 1 second timeout
-            command = ['ping', param, '2', '-W', '1', self.config.ip_address]
+            is_windows = platform.system().lower() == 'windows'
+            param = '-n' if is_windows else '-c'
+            timeout_param = '-w' if is_windows else '-W'
+            # Send 2 pings with 1 second timeout (1000ms on Windows, 1000ms on Unix)
+            command = ['ping', param, '2', timeout_param, '1000', self.config.ip_address]
             
             result = subprocess.run(
                 command,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                timeout=3
+                timeout=5
             )
             
             return result.returncode == 0
@@ -284,12 +272,133 @@ class IEC61850Adapter(BaseProtocol):
             logger.error(f"Offline discovery failed: {e}")
             return Node(name="Error_SCD_Parse")
 
+    def _recursive_browse_da(self, parent_path: str, parent_node: Node, fc_name: str, depth: int = 0):
+        """Recursively browse Data Attributes to find leaves."""
+        if depth > 5: # Safety limit
+            return
+
+        try:
+            # Try to get children
+            ret = iec61850.IedConnection_getDataDirectory(self.connection, parent_path)
+            children = None
+            if isinstance(ret, (list, tuple)):
+                children = ret[0]
+            else:
+                children = ret
+            
+            child_names = []
+            if children:
+                child_names = self._extract_string_list(children)
+                iec61850.LinkedList_destroy(children)
+            
+            if not child_names:
+                # It's a leaf (or empty structure)
+                # Add as signal
+                # Determine access and type heuristics
+                name = parent_path.split('.')[-1]
+                access = "RW" if "ctlVal" in name or "Oper" in parent_path else "RO"
+                
+                sig_type = None
+                if name in ["stVal", "general", "q"]: sig_type = SignalType.STATE
+                elif name in ["mag", "f", "i"]: sig_type = SignalType.ANALOG
+                elif name in ["t"]: sig_type = SignalType.TIMESTAMP
+                elif "ctlVal" in name: sig_type = SignalType.BINARY
+                
+                parent_node.signals.append(Signal(
+                    name=name,
+                    address=parent_path,
+                    signal_type=sig_type,
+                    access=access,
+                    description=f"FC={fc_name}"
+                ))
+                return
+
+            # It has children, recurse
+            for child in child_names:
+                full_path = f"{parent_path}.{child}"
+                
+                # Optimization: If child is a known leaf type, don't recurse (save RTT)
+                # But be careful not to miss nested structs.
+                # Leaves: stVal, q, t, ctlVal, f, i, b, d, dU
+                # Structs: mag, cVal, phsA, ...
+                
+                # If we are sure it's a leaf, add it directly.
+                # But 'd' can be Description (leaf) or something else? Usually leaf.
+                # Let's recurse unless we are very sure.
+                # Actually, browsing everything is safer.
+                
+                # Create a sub-node in the tree? 
+                # The user wants "leaves read". 
+                # Usually we flatten the signals list under the DO, 
+                # OR we create a tree structure.
+                # The current UI expects signals in the DO node?
+                # The SignalsView shows a tree. If we add signals to DO, they show up as leaves of DO.
+                # If we want a hierarchy like DO -> mag -> f, we need Nodes for mag.
+                
+                # Check if we should create a Node or just flatten the name.
+                # "mag.f" as signal name is common.
+                # But "phsA.cVal.mag.f" is long.
+                # Let's try to create intermediate nodes if it's a complex struct.
+                
+                # For now, let's flatten into the DO for simplicity, 
+                # using dot notation for signal names: "mag.f"
+                # But wait, _recursive_browse_da is called with parent_node (DO).
+                # If we recurse, we can pass the SAME parent_node and append "child.grandchild" name?
+                # Or create new Nodes?
+                # Creating new Nodes is better for the Tree View.
+                
+                # Let's check if it's likely a leaf.
+                is_likely_leaf = child in ["stVal", "q", "t", "ctlVal", "f", "i", "b", "d", "dU", "Check", "Test"]
+                
+                if is_likely_leaf:
+                     # Add as signal
+                    access = "RW" if "ctlVal" in child else "RO"
+                    sig_type = None
+                    if child in ["stVal", "general", "q"]: sig_type = SignalType.STATE
+                    elif child in ["f", "i"]: sig_type = SignalType.ANALOG
+                    elif child in ["t"]: sig_type = SignalType.TIMESTAMP
+                    elif "ctlVal" in child: sig_type = SignalType.BINARY
+                    
+                    parent_node.signals.append(Signal(
+                        name=child,
+                        address=full_path,
+                        signal_type=sig_type,
+                        access=access,
+                        description=f"FC={fc_name}"
+                    ))
+                else:
+                    # It's likely a struct (mag, cVal, phsA, etc.)
+                    # Create a sub-node
+                    sub_node = Node(name=child, description="Structure")
+                    parent_node.children.append(sub_node)
+                    self._recursive_browse_da(full_path, sub_node, fc_name, depth + 1)
+                    
+                    # If sub_node ends up empty (no leaves found), maybe it WAS a leaf?
+                    # But we handled the "no children" case at the start of the function.
+                    # So if we are here, it HAD children.
+                    # But if we failed to browse children?
+                    if not sub_node.children and not sub_node.signals:
+                        # Remove empty node
+                        parent_node.children.remove(sub_node)
+                        # Maybe add as signal?
+                        parent_node.signals.append(Signal(
+                            name=child,
+                            address=full_path,
+                            access="RO",
+                            description=f"FC={fc_name} (Unknown)"
+                        ))
+
+        except Exception as e:
+            # If error, assume leaf or access denied
+            # self.event_logger.debug("Discovery", f"Browse error at {parent_path}: {e}")
+            pass
+
     def _discover_online(self) -> Node:
         """Browse IED structure directly from the connected device."""
-        if not HAS_LIBIEC61850 or not self.connection:
+        if not iec61850.is_library_loaded() or not self.connection:
              if self.event_logger:
-                 self.event_logger.warning("Discovery", "Cannot perform online discovery - not connected or library missing")
-             return Node(name=self.config.name, description="Not Connected")
+                 self.event_logger.error("Discovery", "Library missing or not connected - Cannot perform online discovery")
+             return Node(name=self.config.name, description="Error: libiec61850 not available")
 
         root = Node(name=self.config.name, description="IEC 61850 IED (Online)")
         
@@ -298,8 +407,6 @@ class IEC61850Adapter(BaseProtocol):
         
         try:
             # Get the server directory (Logical Devices)
-            # Use getLogicalDeviceList which is specific for LD names
-            # getLogicalDeviceList returns [LinkedList, ErrorCode] in this binding
             ret = iec61850.IedConnection_getLogicalDeviceList(self.connection)
             
             ld_list = None
@@ -311,78 +418,66 @@ class IEC61850Adapter(BaseProtocol):
             
             if not ld_list:
                 if self.event_logger:
-                    self.event_logger.warning("Discovery", "No Logical Devices found (getLogicalDeviceList returned empty)")
+                    self.event_logger.warning("Discovery", "No Logical Devices found")
                 return root
             
-            # Try to convert LinkedList to Python list
             ld_names = self._extract_string_list(ld_list)
             
             if self.event_logger:
                 self.event_logger.info("Discovery", f"Found {len(ld_names)} Logical Device(s): {', '.join(ld_names)}")
             
             # Update root name from first LD (Heuristic)
-            # MMS exposes Logical Devices (Domains).
-            # We try to derive a clean IED name.
             if ld_names:
-                # 1. Try to find common prefix if multiple LDs
+                # 1. Try to find common prefix
                 import os
                 if len(ld_names) > 1:
                     derived_name = os.path.commonprefix(ld_names)
                     if derived_name.endswith('_') or derived_name.endswith('/'):
                         derived_name = derived_name[:-1]
                     if not derived_name:
-                         # Fallback to first
                          derived_name = ld_names[0]
                 else:
                     derived_name = ld_names[0]
 
-                # 2. Cleanup suffix like "LD0", "LD1", "/LD0"
-                # Many IEDs use naming "MyIEDLD0" or "MyIED_LD0"
+                # 2. Cleanup suffix
                 import re
-                # Remove trailing "LD" + digits
                 derived_name = re.sub(r'[_\W]?(LD|CTRL|PROT)\d*$', '', derived_name, flags=re.IGNORECASE)
-                # Remove trailing slash part if any
                 if '/' in derived_name:
                     derived_name = derived_name.split('/')[0]
-                
-                # If we stripped everything (empty), revert to raw name
                 if not derived_name:
                     derived_name = ld_names[0]
                     
                 root.name = derived_name
-                if self.event_logger:
-                    self.event_logger.info("Discovery", f"Derived IED name '{derived_name}' from Logical Device(s) {ld_names}")
             
             # Browse each Logical Device
             for ld_name in ld_names:
-                if self.event_logger:
-                    self.event_logger.debug("Discovery", f"Browsing Logical Device: {ld_name}")
-                
                 ld_node = Node(name=ld_name, description="Logical Device")
                 root.children.append(ld_node)
                 
+                # Try to read Name Plate (NamPlt) from LLN0
+                # Usually LD/LLN0.NamPlt.vendor
+                try:
+                    vendor_path = f"{ld_name}/LLN0.NamPlt.vendor"
+                    vendor_res = iec61850.IedConnection_readStringValue(self.connection, vendor_path, iec61850.IEC61850_FC_DC)
+                    if isinstance(vendor_res, (list, tuple)) and vendor_res[1] == iec61850.IED_ERROR_OK:
+                        vendor = vendor_res[0]
+                        root.description = f"IED: {vendor}"
+                        # If we have a vendor, maybe we can get a better name?
+                        # But 'root.name' is used for the tree root.
+                        if self.event_logger:
+                            self.event_logger.info("Discovery", f"Found Vendor: {vendor}")
+                except: pass
+
                 # Get Logical Nodes for this LD
                 try:
-                    if self.event_logger:
-                        self.event_logger.transaction("IEC61850", f"→ getLogicalDeviceDirectory({ld_name})")
-                    
                     ret_ln = iec61850.IedConnection_getLogicalDeviceDirectory(self.connection, ld_name)
-                    
-                    ln_list = None
-                    if isinstance(ret_ln, (list, tuple)):
-                         ln_list = ret_ln[0]
-                    else:
-                         ln_list = ret_ln
+                    ln_list = ret_ln[0] if isinstance(ret_ln, (list, tuple)) else ret_ln
                     
                     if ln_list:
                         ln_names = self._extract_string_list(ln_list)
                         
-                        if self.event_logger:
-                            self.event_logger.debug("Discovery", f"  Found {len(ln_names)} Logical Node(s) in {ld_name}")
-                        
                         for ln_name in ln_names:
                             full_ln_ref = f"{ld_name}/{ln_name}"
-                            
                             ln_node = Node(name=ln_name, description="Logical Node")
                             ld_node.children.append(ln_node)
                             
@@ -393,39 +488,30 @@ class IEC61850Adapter(BaseProtocol):
                                     full_ln_ref,
                                     iec61850.ACSI_CLASS_DATA_OBJECT
                                 )
-                                
-                                do_list = None
-                                if isinstance(ret_do, (list, tuple)):
-                                    self.event_logger.info("Debug", f"DO List Raw: {ret_do}")
-                                    do_list = ret_do[0]
-                                else:
-                                    self.event_logger.info("Debug", f"DO List Raw: {ret_do}")
-                                    do_list = ret_do
+                                do_list = ret_do[0] if isinstance(ret_do, (list, tuple)) else ret_do
                                 
                                 if do_list:
                                     do_names = self._extract_string_list(do_list)
-                                    self.event_logger.info("Debug", f"Extracted DOs: {do_names}")
                                     
                                     for do_name in do_names:
                                         do_node = Node(name=do_name, description="Data Object")
-                                        do_node = Node(name=do_name, description="Data Object")
                                         ln_node.children.append(do_node)
                                         
-                                        # 1. Browse Data Attributes by Functional Constraint
                                         full_do_ref = f"{full_ln_ref}.{do_name}"
                                         
+                                        # Browse Data Attributes by Functional Constraint
                                         fcs = [
-                                            (iec61850.IEC61850_FC_ST, "ST", "RO"),
-                                            (iec61850.IEC61850_FC_MX, "MX", "RO"),
-                                            (iec61850.IEC61850_FC_CO, "CO", "RW"),
-                                            (iec61850.IEC61850_FC_SP, "SP", "RW"),
-                                            (iec61850.IEC61850_FC_CF, "CF", "RW"),
-                                            (iec61850.IEC61850_FC_DC, "DC", "RO"),
+                                            (iec61850.IEC61850_FC_ST, "ST"),
+                                            (iec61850.IEC61850_FC_MX, "MX"),
+                                            (iec61850.IEC61850_FC_CO, "CO"),
+                                            (iec61850.IEC61850_FC_SP, "SP"),
+                                            (iec61850.IEC61850_FC_CF, "CF"),
+                                            (iec61850.IEC61850_FC_DC, "DC"),
                                         ]
                                         
-                                        for fc_val, fc_name, access in fcs:
+                                        found_signals = False
+                                        for fc_val, fc_name in fcs:
                                             try:
-                                                # Use get Data Directory filtered by FC
                                                 ret_da = iec61850.IedConnection_getDataDirectoryByFC(
                                                     self.connection, full_do_ref, fc_val
                                                 )
@@ -434,62 +520,54 @@ class IEC61850Adapter(BaseProtocol):
                                                 if da_list:
                                                     da_names = self._extract_string_list(da_list)
                                                     for da_name in da_names:
-                                                        # Special handling for nested structures like mag, cVal (usually in MX or ST)
-                                                        if da_name in ["mag", "cVal", "Oper", "SBOw", "Cancel"]:
-                                                            sub_ref = f"{full_do_ref}.{da_name}"
-                                                            # Browsing sub-directory might also need FC? 
-                                                            # Usually yes, but getDataDirectory might be enough for sub-elements
-                                                            ret_sub = iec61850.IedConnection_getDataDirectory(self.connection, sub_ref)
-                                                            sub_list = ret_sub[0] if isinstance(ret_sub, (list, tuple)) else ret_sub
-                                                            if sub_list:
-                                                                sub_das = self._extract_string_list(sub_list)
-                                                                for sub_da in sub_das:
-                                                                    leaf_name = f"{da_name}.{sub_da}"
-                                                                    leaf_path = f"{full_do_ref}.{leaf_name}"
-                                                                    # Only ctlVal is controllable
-                                                                    sig_access = "RW" if "ctlVal" in leaf_name else "RO"
-                                                                    
-                                                                    # Set Signal Type
-                                                                    sig_type = None
-                                                                    if leaf_name.endswith(".t") or leaf_name.endswith(".T"):
-                                                                        sig_type = SignalType.TIMESTAMP
-                                                                    
-                                                                    sig = Signal(
-                                                                        name=leaf_name,
-                                                                        address=leaf_path,
-                                                                        signal_type=sig_type,
-                                                                        access=sig_access,
-                                                                        description=f"FC={fc_name} (Nested)"
-                                                                    )
-                                                                    do_node.signals.append(sig)
-                                                                iec61850.LinkedList_destroy(sub_list)
-                                                        else:
-                                                            full_da_path = f"{full_do_ref}.{da_name}"
-                                                            sig_access = "RW" if "ctlVal" in da_name else "RO"
-                                                            
+                                                        # Use recursive browse for each DA
+                                                        # We create a sub-node for the DA if it's complex?
+                                                        # Or just pass the DO node?
+                                                        # The DA returned here is the top-level attribute in the DO for that FC.
+                                                        # It could be 'stVal' (leaf) or 'mag' (struct).
+                                                        
+                                                        full_da_path = f"{full_do_ref}.{da_name}"
+                                                        
+                                                        # Check if it's a leaf to avoid unnecessary recursion overhead
+                                                        if da_name in ["stVal", "q", "t", "ctlVal"]:
+                                                            # Fast path
+                                                            access = "RW" if "ctlVal" in da_name else "RO"
                                                             sig_type = None
-                                                            if da_name.endswith(".t") or da_name.endswith(".T"):
-                                                                sig_type = SignalType.TIMESTAMP
-                                                                
-                                                            sig = Signal(
+                                                            if da_name == "stVal": sig_type = SignalType.STATE
+                                                            elif da_name == "t": sig_type = SignalType.TIMESTAMP
+                                                            
+                                                            do_node.signals.append(Signal(
                                                                 name=da_name,
                                                                 address=full_da_path,
                                                                 signal_type=sig_type,
-                                                                access=sig_access,
+                                                                access=access,
                                                                 description=f"FC={fc_name}"
-                                                            )
-                                                            do_node.signals.append(sig)
+                                                            ))
+                                                        else:
+                                                            # Recurse
+                                                            # Create a node for it?
+                                                            # If we want "mag.f", we can create a Node "mag" and put "f" in it.
+                                                            sub_node = Node(name=da_name, description=f"FC={fc_name}")
+                                                            do_node.children.append(sub_node)
+                                                            self._recursive_browse_da(full_da_path, sub_node, fc_name)
+                                                            
+                                                            # Cleanup empty nodes
+                                                            if not sub_node.children and not sub_node.signals:
+                                                                do_node.children.remove(sub_node)
+                                                                # Add as signal if it was a leaf after all
+                                                                do_node.signals.append(Signal(
+                                                                    name=da_name,
+                                                                    address=full_da_path,
+                                                                    access="RO",
+                                                                    description=f"FC={fc_name}"
+                                                                ))
                                                     
+                                                    found_signals = True
                                                     iec61850.LinkedList_destroy(da_list)
-                                                    
-                                            except Exception as e:
-                                                # If ByFC fails, we just continue to next FC
-                                                continue
-                                                
-                                        # Fallback if NO signals found by FC and we haven't added any
-                                        if not do_node.signals:
-                                            if self.event_logger:
-                                                self.event_logger.debug("Discovery", f"    FC browsing yielded no results for {full_do_ref}, using generic discovery")
+                                            except: continue
+                                        
+                                        if not found_signals:
+                                            # Fallback generic browse
                                             try:
                                                 ret_da = iec61850.IedConnection_getDataDirectory(self.connection, full_do_ref)
                                                 da_list = ret_da[0] if isinstance(ret_da, (list, tuple)) else ret_da
@@ -504,26 +582,18 @@ class IEC61850Adapter(BaseProtocol):
                                                     iec61850.LinkedList_destroy(da_list)
                                             except: pass
                                             
-                            except Exception as e:
-                                if self.event_logger:
-                                    self.event_logger.debug("Discovery", f"  Could not browse DOs for {full_ln_ref}: {e}")
-                                
-                    try:
-                        iec61850.LinkedList_destroy(ln_list)
-                    except:
-                        pass
+                            except Exception: pass
+                    
+                    try: iec61850.LinkedList_destroy(ln_list)
+                    except: pass
                         
-                except Exception as e:
-                    if self.event_logger:
-                        self.event_logger.warning("Discovery", f"Failed to browse LD {ld_name}: {e}")
+                except Exception: pass
             
-            try:
-                iec61850.LinkedList_destroy(ld_list)
-            except:
-                pass
+            try: iec61850.LinkedList_destroy(ld_list)
+            except: pass
             
             if self.event_logger:
-                self.event_logger.info("Discovery", f"✓ Online discovery complete - found {len(root.children)} Logical Device(s)")
+                self.event_logger.info("Discovery", f"✓ Online discovery complete")
             
             return root
             
@@ -531,75 +601,22 @@ class IEC61850Adapter(BaseProtocol):
             if self.event_logger:
                 self.event_logger.error("Discovery", f"Online discovery failed: {e}")
             logger.error(f"Online discovery failed: {e}")
-            import traceback
-            traceback.print_exc()
             root.children.append(Node(name="Error", description=str(e)))
             return root
-    
+
     def _extract_string_list(self, linked_list) -> list:
         """
-        Extract strings from a pyiec61850 LinkedList.
+        Extract strings from a ctypes LinkedList.
+        Uses the helper function from iec61850_wrapper.
         """
-        result = []
         if not linked_list:
-            return result
+            return []
         
-        # Debug logging manually since self.event_logger might not be passed here easily? 
-        # Actually this is a method of the class, so we can use self.event_logger if available.
-        # But let's use print for safety if logger is filtered.
-        # print(f"DEBUG: _extract_string_list called with type {type(linked_list)}")
-        
-        import ctypes
-            
         try:
-            current = linked_list
-            max_items = 1000
-            count = 0
-            
-            while current and count < max_items:
-                # 1. Try to get data pointer
-                data = iec61850.LinkedList_getData(current)
-                
-                # print(f"DEBUG: Item {count}: data type {type(data)}")
-                
-                if data:
-                    # Case A: It's already a string (rare with these bindings but possible)
-                    if isinstance(data, str):
-                        result.append(data)
-                    else:
-                        # Case B: It's a SWIG Object / Pointer
-                        try:
-                            # Try to get address. SWIG objects usually implement __int__ or have .this
-                            addr = 0
-                            if hasattr(data, "this"):
-                                addr = int(data.this)
-                            elif hasattr(data, "__int__"):
-                                addr = int(data)
-                            
-                            if addr:
-                                c_str = ctypes.cast(addr, ctypes.c_char_p)
-                                if c_str.value:
-                                    val = c_str.value.decode('utf-8', errors='ignore')
-                                    result.append(val)
-                                    # print(f"DEBUG: Extracted string: {val}")
-                            # Fallback: sometimes str(data) works for simple types
-                            else:
-                                s = str(data)
-                                if "Swig" not in s and "ptr" not in s and "0x" not in s:
-                                    result.append(s)
-                                    
-                        except Exception as e:
-                            # logger.debug(f"Failed to cast data: {e}")
-                            pass
-                
-                # Move to next
-                current = iec61850.LinkedList_getNext(current)
-                count += 1
-                
+            return iec61850.LinkedList_toStringList(linked_list)
         except Exception as e:
-            logger.warning(f"LinkedList iteration failed: {e}")
-            
-        return result
+            logger.warning(f"LinkedList extraction failed: {e}")
+            return []
 
     def _get_timestamp_from_mms(self, mms_val):
         """Helper to extract Python datetime from MmsValue."""
@@ -611,8 +628,8 @@ class IEC61850Adapter(BaseProtocol):
                 unix_ts = iec61850.MmsValue_toUnixTimestamp(mms_val)
                 # handle both float and int unix timestamps
                 return datetime.fromtimestamp(unix_ts)
-        except:
-             pass
+        except (ValueError, OSError, OverflowError):
+             logger.debug(f"Failed to parse UTC time from MMS value")
         return None
 
     def read_signal(self, signal: Signal) -> Signal:
@@ -624,9 +641,10 @@ class IEC61850Adapter(BaseProtocol):
             signal.quality = SignalQuality.NOT_CONNECTED
             if self.event_logger:
                 self.event_logger.warning("IEC61850", f"← NOT CONNECTED (Internal State)")
+            self._emit_update(signal) # Emit even if failed
             return signal
 
-        if HAS_LIBIEC61850 and self.connection:
+        if self.connection:
             # Check actual connection state
             state = iec61850.IedConnection_getState(self.connection)
             if state != iec61850.IED_STATE_CONNECTED:
@@ -635,18 +653,8 @@ class IEC61850Adapter(BaseProtocol):
                 if self.event_logger:
                     self.event_logger.error("IEC61850", f"← CONNECTION LOST (State: {state})")
                 signal.quality = SignalQuality.NOT_CONNECTED
+                self._emit_update(signal)
                 return signal
-
-        if not HAS_LIBIEC61850:
-            # Mock update for testing
-            import random
-            if signal.signal_type == SignalType.ANALOG:
-                signal.value = round(random.uniform(220.0, 240.0), 2)
-            elif signal.signal_type == SignalType.BINARY:
-                signal.value = random.choice([True, False])
-            signal.timestamp = datetime.now()
-            signal.quality = SignalQuality.GOOD
-            return signal
 
         # Read from actual IED using correct pyiec61850 API
         try:
@@ -1041,6 +1049,7 @@ class IEC61850Adapter(BaseProtocol):
                     signal.value = f"{signal.enum_map[signal.value]} ({signal.value})"
                     signal.signal_type = SignalType.STATE
             
+            self._emit_update(signal) # CRITICAL: Emit the update!
             return signal
             
         except Exception as e:
@@ -1051,6 +1060,7 @@ class IEC61850Adapter(BaseProtocol):
             traceback.print_exc()
             signal.quality = SignalQuality.INVALID
             signal.value = None
+            self._emit_update(signal)
             return signal
 
         # Real Read
@@ -1102,15 +1112,100 @@ class IEC61850Adapter(BaseProtocol):
         return signal
 
     def select(self, signal: Signal) -> bool:
-        # Placeholder for real select
+        """
+        Select-Before-Operate (SBO).
+        """
+        if not self.connected:
+            return False
+            
+        # TODO: Implement real SBO using ControlObject
+        # For now, we assume Direct Operate or SBO is handled by the library's write/operate functions if we use the high-level API
         return True
 
     def operate(self, signal: Signal, value: Any) -> bool:
-        # Placeholder for real operate
-        return True
+        """
+        Operate (Control) on a signal.
+        """
+        if self.event_logger:
+            self.event_logger.transaction("IEC61850", f"→ OPERATE {signal.address} = {value}")
+            
+        if not self.connected:
+            if self.event_logger:
+                self.event_logger.error("IEC61850", "Cannot operate: Not connected")
+            return False
+
+        try:
+            # 1. Convert value to MmsValue
+            mms_value = self._create_mms_value(value, signal)
+            if not mms_value:
+                if self.event_logger:
+                    self.event_logger.error("IEC61850", f"Failed to create MMS value for {value}")
+                return False
+            
+            # 2. Perform Write / Operate
+            # We need to determine if we should use writeObject or operate methods.
+            # operate methods are for Control Models (SBO, Direct).
+            # writeObject is for setting data attributes directly.
+            
+            # If address ends with .Oper.ctlVal, it's a control.
+            # If address ends with .setVal, it's a setting.
+            
+            # For simplicity, we try writeObject first which covers many cases.
+            # But for controls, we might need ControlObjectClient.
+            
+            # Let's try generic writeObject first.
+            # We need the FC. For controls it is usually CO or SP.
+            # For settings it is CF or SP.
+            
+            fc = iec61850.IEC61850_FC_CO # Default for controls
+            if "setVal" in signal.address or "sbo" in signal.address.lower():
+                 fc = iec61850.IEC61850_FC_CF
+            elif "stVal" in signal.address: # Simulation/Testing
+                 fc = iec61850.IEC61850_FC_ST
+            
+            # Override if signal has FC
+            if getattr(signal, 'fc', None):
+                 # Map string to constant
+                 pass 
+            
+            err = iec61850.IedConnection_writeObject(self.connection, signal.address, fc, mms_value)
+            
+            iec61850.MmsValue_delete(mms_value)
+            
+            if err == iec61850.IED_ERROR_OK:
+                if self.event_logger:
+                    self.event_logger.transaction("IEC61850", "← OPERATE SUCCESS")
+                return True
+            else:
+                if self.event_logger:
+                    self.event_logger.error("IEC61850", f"← OPERATE FAILED: Error {err}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Operate failed: {e}")
+            if self.event_logger:
+                self.event_logger.error("IEC61850", f"← OPERATE EXCEPTION: {e}")
+            return False
 
     def cancel(self, signal: Signal) -> bool:
         return True
     
+    def _create_mms_value(self, value: Any, signal: Signal):
+        """Create MmsValue from Python value."""
+        try:
+            if isinstance(value, bool):
+                return iec61850.MmsValue_newBoolean(value)
+            elif isinstance(value, float):
+                return iec61850.MmsValue_newFloat(value)
+            elif isinstance(value, int):
+                # Check if it should be Integer or Unsigned?
+                # Default to Int32
+                return iec61850.MmsValue_newInt32(value)
+            elif isinstance(value, str):
+                return iec61850.MmsValue_newVisibleString(value)
+            return None
+        except:
+            return None
+
     def _detect_vendor_pre_connect(self):
         pass # Keep cleanup

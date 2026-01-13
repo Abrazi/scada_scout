@@ -185,6 +185,9 @@ class SignalsViewWidget(QWidget):
 
     def _on_signal_update(self, device_name, signal):
         """Handle live update."""
+        # import logging
+        # logger = logging.getLogger("SignalsView")
+        # logger.debug(f"Signal Update received: {signal.address} = {signal.value}")
         self.table_model.update_signal(signal)
         
     def _collect_signals(self, node) -> list:
