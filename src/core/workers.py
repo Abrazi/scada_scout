@@ -105,10 +105,13 @@ class BulkReadWorker:
 
         for sig in self.signals_to_read:
             try:
-                # read_signal triggers status synchronization in DeviceManager
-                self.device_manager.read_signal(self.device_name, sig)
-                # Small sleep to be nice to the network/IED
-                time.sleep(0.001) 
+                # read_signal will enqueue to IEC worker if available (non-blocking)
+                res = self.device_manager.read_signal(self.device_name, sig)
+                # If read_signal returns a Signal (synchronous path), it's already processed.
+                # If it returns None, the read was enqueued and will be delivered asynchronously.
+                # Small sleep to be nice to the network/IED when synchronous
+                if res is not None:
+                    time.sleep(0.001)
             except Exception as e:
                 logger.warning(f"BulkReadWorker error for {self.device_name}: {e}")
                 
@@ -128,14 +131,16 @@ class IEC61850Worker(QObject):
     """
     Dedicated Worker for IEC 61850 operations (Read/Write/Control).
     Uses a thread-safe queue to process requests sequentially off the GUI thread.
+    Emits `data_ready` as (device_name, Signal)
     """
-    data_ready = Signal(str, object)   # ref, value
+    data_ready = Signal(str, object)   # device_name, Signal
     error = Signal(str)
     finished = Signal()
 
-    def __init__(self, iec_client):
+    def __init__(self, iec_client, device_name: str):
         super().__init__()
         self._client = iec_client
+        self._device_name = device_name
         self._queue = queue.Queue()
         self._running = True
 
@@ -143,38 +148,53 @@ class IEC61850Worker(QObject):
     def run(self):
         while self._running:
             try:
-                # Blocking get with timeout allows checking _running flag
                 task = self._queue.get(timeout=0.1)
             except queue.Empty:
                 continue
 
             try:
-                action = task["action"]
+                action = task.get("action")
+
                 if action == "read":
-                    ref = task["ref"]
-                    # Assume client.read returns python value or MmsValue
-                    # We might need to handle the conversion here or in client wrapper
-                    if hasattr(self._client, 'read_value'):
-                         val = self._client.read_value(ref)
+                    # Expect a Signal object in task['signal']
+                    signal = task.get('signal')
+                    if signal is None:
+                        continue
+
+                    # Adapter's read_signal returns an updated Signal
+                    if hasattr(self._client, 'read_signal'):
+                        updated = self._client.read_signal(signal)
                     else:
-                         val = self._client.read(ref)
-                    
-                    self.data_ready.emit(ref, val)
+                        # Fallback: try to call read by address if available
+                        if hasattr(self._client, 'read'):
+                            val = self._client.read(signal.address)
+                            signal.value = val
+                            updated = signal
+                        else:
+                            updated = signal
+
+                    # Adapter implementations typically call the protocol data callback
+                    # via BaseProtocol._emit_update(signal). Avoid duplicating the update
+                    # here to prevent double-emits. If an adapter does not call back,
+                    # the AppController can be extended to listen to this signal.
 
                 elif action == "write":
-                    self._client.write(task["ref"], task["value"])
+                    signal = task.get('signal')
+                    value = task.get('value')
+                    if hasattr(self._client, 'write_signal'):
+                        self._client.write_signal(signal, value)
+                    elif hasattr(self._client, 'write'):
+                        self._client.write(signal.address, value)
 
                 elif action == "control":
-                    # Support SBO vs Direct
-                    val = task.get("value")
-                    sbo = task.get("sbo", False)
-                    
+                    signal = task.get('signal')
+                    value = task.get('value')
+                    # Prefer operate API
                     if hasattr(self._client, 'operate'):
-                        self._client.operate(task["ref"], val, sbo)
-                    else:
-                        # Fallback if operate signature differs, relying on wrapper
-                        # But user provided specific call signature, likely for a cleaner wrapper
-                        pass
+                        self._client.operate(signal, value)
+                    elif hasattr(self._client, 'write_signal'):
+                        # Try write as fallback
+                        self._client.write_signal(signal, value)
 
             except Exception as e:
                 self.error.emit(str(e))

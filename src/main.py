@@ -44,6 +44,9 @@ def main():
     controller.event_logger.info("Application", "SCADA Scout started successfully")
     # Start the controller
     controller.start_application()
+
+    # Ensure controller can clean up background threads on exit
+    app.aboutToQuit.connect(controller.shutdown)
     
     window.show()
     

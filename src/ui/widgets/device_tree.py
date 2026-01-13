@@ -74,13 +74,19 @@ class DeviceTreeWidget(QWidget):
             # Better approach for QStandardItemModel: Loop visible rows?
             return visible
 
-        # Simpler Implementation: Iterate all items from root
         # If text is empty, show all
         if not search:
             self._show_all_items(self.model.invisibleRootItem())
             return
 
-        self._filter_item_visibility(self.model.invisibleRootItem(), search)
+        # Recompute visibility for every top-level child
+        root = self.model.invisibleRootItem()
+        for i in range(root.rowCount()):
+            child = root.child(i)
+            visible = self._filter_item_visibility(child, search)
+            self.tree_view.setRowHidden(i, root.index(), not visible)
+            if visible:
+                self.tree_view.expand(child.index())
 
     def _show_all_items(self, parent):
         for i in range(parent.rowCount()):
@@ -90,36 +96,46 @@ class DeviceTreeWidget(QWidget):
                 self._show_all_items(child)
 
     def _filter_item_visibility(self, parent, search):
+        # Determine if any child or this parent matches
+        branch_visible = False
         for i in range(parent.rowCount()):
             child = parent.child(i)
-            should_show = False
-            
+            if not child:
+                continue
+
             # Check text of this item (and col 2 desc)
-            txt = child.text().lower()
-            desc = child.index().siblingAtColumn(2).data()
-            if desc: txt += " " + str(desc).lower()
-            
-            if search in txt:
-                should_show = True
-            
-            # Check children recursively
+            try:
+                txt = child.text().lower()
+            except Exception:
+                txt = ""
+
+            desc = child.index().siblingAtColumn(2).data() if child.index().isValid() else None
+            if desc:
+                try:
+                    txt += " " + str(desc).lower()
+                except Exception:
+                    pass
+
+            should_show = (search in txt)
+
+            # Recursively check children
             children_visible = False
             if child.rowCount() > 0:
                 children_visible = self._filter_item_visibility(child, search)
-            
-            if should_show or children_visible:
-                self.tree_view.setRowHidden(i, parent.index(), False)
-                if children_visible:
+
+            visible = should_show or children_visible
+            # Set row hidden state relative to parent
+            self.tree_view.setRowHidden(i, parent.index(), not visible)
+
+            if visible:
+                branch_visible = True
+                # Expand to reveal matches
+                try:
                     self.tree_view.expand(child.index())
-                    # Ensure parents expanded
-                    # This happens implicitly if we see children
-            else:
-                self.tree_view.setRowHidden(i, parent.index(), True)
-            
-            # Return true if any part of this branch is visible
-            if should_show or children_visible:
-                return True
-        return False # This logic is slightly flawed for return value vs loop, fixing below.
+                except Exception:
+                    pass
+
+        return branch_visible
 
     # Revised Filter Logic
     def _filter_tree_revised(self, text):
@@ -720,8 +736,11 @@ class DeviceTreeWidget(QWidget):
                 # Control option
                 menu.addSeparator()
                 control_action = QAction("Control...", self)
-                if getattr(signal, 'access', 'RO') == "RW":
+                # Enable control if access indicates RW or address looks like a control (Oper/ctlVal)
+                if getattr(signal, 'access', 'RO') == "RW" or ".Oper" in getattr(signal, 'address', '') or ".ctlVal" in getattr(signal, 'address', ''):
                     control_action.setEnabled(True)
+                    # Hook up control action
+                    control_action.triggered.connect(lambda: self._invoke_control_dialog(device_name, signal))
                 else:
                     control_action.setEnabled(False)
                     control_action.setToolTip("This signal is Read-Only")
@@ -729,7 +748,7 @@ class DeviceTreeWidget(QWidget):
                 
                 # Diagnostics: Read Now
                 read_action = QAction("Read Value Now", self)
-                read_action.triggered.connect(lambda: self._manual_read_signal(device_name, signal))
+                # Single connection only (avoid duplicate triggers causing dialog to reopen)
                 read_action.triggered.connect(lambda: self._manual_read_signal(device_name, signal))
                 menu.addAction(read_action)
 
@@ -800,6 +819,15 @@ class DeviceTreeWidget(QWidget):
         from PySide6.QtWidgets import QApplication
         clipboard = QApplication.clipboard()
         clipboard.setText(text)
+
+    def _invoke_control_dialog(self, device_name, signal):
+        """Open control dialog for a signal (separated to avoid lambda closure issues)."""
+        try:
+            from src.ui.dialogs.control_dialog import ControlDialog
+            dlg = ControlDialog(device_name, signal, self.device_manager, self)
+            dlg.exec()
+        except Exception:
+            logger.exception("Failed to open control dialog")
 
     def _show_modbus_slave_dialog(self, device_name):
         """Shows the Modbus Slave configuration dialog (register editor)."""
@@ -966,7 +994,14 @@ class DeviceTreeWidget(QWidget):
         try:
             # Force read via device manager
             updated_signal = self.device_manager.read_signal(device_name, signal)
-            
+
+            # If read was enqueued to IEC worker, perform a blocking read for manual request
+            if updated_signal is None:
+                # Best-effort synchronous read via protocol adapter
+                proto = self.device_manager.get_or_create_protocol(device_name)
+                if proto and hasattr(proto, 'read_signal'):
+                    updated_signal = proto.read_signal(signal)
+
             if updated_signal:
                 val = updated_signal.value
                 qual = updated_signal.quality.value if hasattr(updated_signal.quality, 'value') else str(updated_signal.quality)

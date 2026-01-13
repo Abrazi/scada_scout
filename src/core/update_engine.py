@@ -17,21 +17,27 @@ class UpdateEngine(QObject):
         self._timer.timeout.connect(self._on_timeout)
         self._interval = interval_ms
         self._running = False
-        self.iec_worker = None # To be injected
+        self.device_manager = None
 
-    def set_iec_worker(self, worker):
-        self.iec_worker = worker
+    def set_device_manager(self, device_manager):
+        """Inject the DeviceManager so UpdateEngine can schedule reads via it."""
+        self.device_manager = device_manager
 
-    def refresh_live_data(self, refs: list):
-        """Asynchronously refresh a list of signals (by reference/address)."""
-        if not self.iec_worker:
+    def refresh_live_data(self, device_name: str, signals: list):
+        """Asynchronously refresh a list of Signal objects for a device.
+
+        This delegates to DeviceManager.read_signal so that DeviceManager
+        can route reads to the proper per-device IEC worker or fall back
+        to synchronous protocol reads when necessary.
+        """
+        if not self.device_manager:
             return
 
-        for ref in refs:
-            self.iec_worker.enqueue({
-                "action": "read",
-                "ref": ref
-            })
+        for sig in signals:
+            try:
+                self.device_manager.read_signal(device_name, sig)
+            except Exception:
+                pass
 
     def start(self):
         """Starts the update timer."""

@@ -31,6 +31,8 @@ class DeviceManager(QObject):
         self._devices: Dict[str, Device] = {}
         self._protocols: Dict[str, BaseProtocol] = {}
         self.event_logger = None  # Will be set by AppController
+        # per-device IEC worker mapping (set by AppController)
+        self.iec_workers: Dict[str, object] = {}
         self.config_path = config_path
         self.folder_descriptions: Dict[str, str] = {} # folder_name -> description
 
@@ -61,45 +63,41 @@ class DeviceManager(QObject):
     def remove_device(self, device_name: str):
         """Removes a device and cleans up its connection."""
         if device_name in self._devices:
-            self.disconnect_device(device_name)
-            del self._devices[device_name]
+            # Disconnect protocol and cleanup
+            try:
+                self.disconnect_device(device_name)
+            except Exception:
+                pass
+
+            # Remove device object
+            try:
+                del self._devices[device_name]
+            except KeyError:
+                pass
+
+            # Remove protocol wrapper
             if device_name in self._protocols:
-                del self._protocols[device_name]
+                try:
+                    del self._protocols[device_name]
+                except Exception:
+                    pass
+
+            # Cleanup any IEC worker assigned to this device
+            if hasattr(self, 'iec_workers') and device_name in self.iec_workers:
+                try:
+                    wk = self.iec_workers.pop(device_name)
+                    # Attempt to stop worker if it exposes stop()
+                    try:
+                        wk.stop()
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+
             logger.info(f"Device removed: {device_name}")
             self.device_removed.emit(device_name)
             self.save_configuration()
             
-    def clear_all_devices(self):
-        """Removes all devices and clears project state."""
-        device_names = list(self._devices.keys())
-        for name in device_names:
-            self.remove_device(name)
-        self.folder_descriptions.clear()
-        logger.info("Cleared all devices and folder metadata.")
-        self.project_cleared.emit()
-
-    def update_device(self, old_name: str, new_config: DeviceConfig):
-        """Updates a device configuration."""
-        if old_name in self._devices:
-            device = self._devices[old_name]
-            
-            # If name changed, update dictionary
-            if old_name != new_config.name:
-                del self._devices[old_name]
-                if old_name in self._protocols:
-                    proto = self._protocols.pop(old_name)
-                    self._protocols[new_config.name] = proto
-                self._devices[new_config.name] = device
-                # We need to signal that the device was renamed
-                # Simplified: remove and re-add or just emit updated
-                self.device_removed.emit(old_name)
-                device.config = new_config
-                self.device_added.emit(device)
-            else:
-                device.config = new_config
-            
-            logger.info(f"Device updated: {new_config.name}")
-            self.save_configuration()
 
     def set_discovery_mode(self, device_name: str, use_scd: bool):
         """Switches between SCD and Online discovery for a device."""
@@ -437,14 +435,30 @@ class DeviceManager(QObject):
         if self.event_logger:
             self.event_logger.debug("DeviceManager", f"Delegating read for {signal.address} to protocol")
         
+        # If an IEC worker is available for this device, enqueue to it (non-blocking)
+        try:
+            worker = self.iec_workers.get(device_name)
+        except Exception:
+            worker = None
+
+        if worker is not None:
+            try:
+                worker.enqueue({
+                    'action': 'read',
+                    'signal': signal
+                })
+                return None
+            except Exception as e:
+                logger.debug(f"Failed to enqueue read to IEC worker for {device_name}: {e}")
+
         try:
             updated_signal = protocol.read_signal(signal)
-            
+
             # Sync connection status if protocol has it
             if hasattr(protocol, 'connected'):
                 if protocol.connected != self._devices[device_name].connected:
                     self.update_connection_status(device_name, protocol.connected)
-            
+
             return updated_signal
         except Exception as e:
             logger.warning(f"Failed to read signal {signal.address} from {device_name}: {e}")

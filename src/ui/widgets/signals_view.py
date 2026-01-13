@@ -3,6 +3,8 @@ from PySide6.QtGui import QStandardItemModel, QStandardItem, QPainter
 from PySide6.QtCharts import QChart, QChartView, QLineSeries
 from PySide6.QtCore import Qt
 from src.ui.models.signal_table_model import SignalTableModel
+from PySide6.QtCore import QRegularExpression
+from PySide6.QtCore import QSortFilterProxyModel
 
 class SignalsViewWidget(QWidget):
     """
@@ -45,6 +47,19 @@ class SignalsViewWidget(QWidget):
         self.chk_auto_refresh.setChecked(True)
         self.chk_auto_refresh.stateChanged.connect(self._on_auto_refresh_toggled)
         toolbar.addWidget(self.chk_auto_refresh)
+
+        # Filter controls: column selector + text
+        from PySide6.QtWidgets import QLineEdit, QComboBox, QLabel
+        self.cmb_filter_col = QComboBox()
+        # Populate columns from model
+        self.cmb_filter_col.addItems(SignalTableModel.COLUMNS)
+        self.cmb_filter_col.setFixedWidth(160)
+        toolbar.addWidget(QLabel("Filter:"))
+        self.txt_filter = QLineEdit()
+        self.txt_filter.setPlaceholderText("Filter live data...")
+        self.txt_filter.setFixedWidth(220)
+        toolbar.addWidget(self.cmb_filter_col)
+        toolbar.addWidget(self.txt_filter)
         
         toolbar.addStretch()
         layout.addLayout(toolbar)
@@ -60,9 +75,17 @@ class SignalsViewWidget(QWidget):
         self.table_view.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table_view.customContextMenuRequested.connect(self._on_table_context_menu)
         
-        # Init Model
+        # Init Model and Proxy (for filtering)
         self.table_model = SignalTableModel()
-        self.table_view.setModel(self.table_model)
+        self._proxy_model = QSortFilterProxyModel(self)
+        self._proxy_model.setSourceModel(self.table_model)
+        self._proxy_model.setFilterCaseSensitivity(Qt.CaseInsensitive)
+        self._proxy_model.setFilterKeyColumn(0)
+        self.table_view.setModel(self._proxy_model)
+
+        # Wire filter events
+        self.txt_filter.textChanged.connect(self._on_filter_text_changed)
+        self.cmb_filter_col.currentIndexChanged.connect(self._on_filter_column_changed)
         
         layout.addWidget(self.table_view)
         
@@ -87,6 +110,21 @@ class SignalsViewWidget(QWidget):
         else:
             self.refresh_timer.stop()
 
+    def _on_filter_column_changed(self, idx):
+        # Map visible column selection to proxy column
+        self._proxy_model.setFilterKeyColumn(idx)
+        # Reapply filter text to update
+        self._on_filter_text_changed(self.txt_filter.text())
+
+    def _on_filter_text_changed(self, text: str):
+        # Use fixed string for substring matching; case-insensitive already set
+        if not text:
+            self._proxy_model.setFilterRegularExpression(QRegularExpression())
+        else:
+            # Build simple escaped regex to match substring
+            rx = QRegularExpression(text, QRegularExpression.CaseInsensitiveOption)
+            self._proxy_model.setFilterRegularExpression(rx)
+
     def _on_refresh_clicked(self):
         """Manually trigger a refresh for the currently shown signals."""
         # Check if we have a current node, if not try to set one
@@ -105,20 +143,28 @@ class SignalsViewWidget(QWidget):
         devices = self.device_manager.get_all_devices()
         for device in devices:
             if device.root_node:
-                self.set_filter_node(device.root_node)
-                self.current_device_name = device.config.name
+                self.set_filter_node(device.root_node, device.config.name)
                 return
 
-    def set_filter_node(self, node):
-        """Updates the view to show signals from the given node."""
+    def set_filter_node(self, node, device_name=None):
+        """Updates the view to show signals from the given node.
+
+        Accepts optional device_name to scope live reads and UI labels.
+        """
         self.current_node = node
-        if node is None:
+        if device_name:
+            self.current_device_name = device_name
+        elif node is None:
             self.current_device_name = None
+
+        self.table_model.set_node_filter(node)
+        self.table_view.resizeColumnsToContents()
+        # Toggle Overlay
+        if self.table_model.rowCount() == 0:
+            self.lbl_no_signals.show()
+            self.lbl_no_signals.resize(self.table_view.size())
         else:
-            # Try to determine device name from node
-            # This is tricky if node doesn't have backlinks.
-            # We rely on _get_current_device_name heuristic or explicit set
-            pass
+            self.lbl_no_signals.hide()
 
     def resizeEvent(self, event):
         """Ensure overlay stays centered."""
@@ -127,34 +173,29 @@ class SignalsViewWidget(QWidget):
              self.lbl_no_signals.move(0, 0) # Relative to table view if parented? 
              # Actually parent is table_view, so 0,0 covers it.
         super().resizeEvent(event)
-
-    def set_filter_node(self, node):
-        """Updates the view to show signals from the given node."""
-        self.current_node = node
-        if node is None:
-            self.current_device_name = None
-        
-        self.table_model.set_node_filter(node)
-        self.table_view.resizeColumnsToContents()
-        
-        # Toggle Overlay
-        if self.table_model.rowCount() == 0:
-            self.lbl_no_signals.show()
-            self.lbl_no_signals.resize(self.table_view.size())
-        else:
-            self.lbl_no_signals.hide()
-        
-        # Auto-trigger disabled per user request
-        # self._on_refresh_clicked()
+    # Note: `set_filter_node(node, device_name=None)` above is the canonical
+    # method to set the current node and device. Avoid redefining it.
 
     def _trigger_background_read(self, device_name, signals):
         """Execute signal reads in a background thread to prevent UI freeze."""
+        # If an IEC worker is present on the device manager, enqueue reads to it
+        try:
+            iec_worker = None
+            try:
+                iec_worker = self.device_manager.iec_workers.get(device_name)
+            except Exception:
+                iec_worker = None
+
+            if iec_worker:
+                for sig in signals:
+                    iec_worker.enqueue({'action': 'read', 'signal': sig})
+                return
+        except Exception:
+            pass
+
+        # Fallback: use BulkReadWorker in a background thread
         import threading
         from src.core.workers import BulkReadWorker
-        
-        # Cancel previous if needed? 
-        # For valid keep-it-simple, just fire and forget, but maybe verify worker not already running?
-        
         worker = BulkReadWorker(self.device_manager, device_name, signals)
         t = threading.Thread(target=worker.run)
         t.daemon = True
@@ -168,9 +209,16 @@ class SignalsViewWidget(QWidget):
         index = self.table_view.indexAt(position)
         if not index.isValid():
             return
-        
+
+        # Map proxy index to source model index
+        try:
+            src_index = self._proxy_model.mapToSource(index)
+            row = src_index.row()
+        except Exception:
+            row = index.row()
+
         # Get the signal from the model
-        signal = self.table_model.get_signal_at_row(index.row())
+        signal = self.table_model.get_signal_at_row(row)
         if not signal:
             return
         
