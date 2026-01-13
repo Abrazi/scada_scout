@@ -1114,82 +1114,190 @@ class IEC61850Adapter(BaseProtocol):
     def select(self, signal: Signal) -> bool:
         """
         Select-Before-Operate (SBO).
+        Uses ControlObjectClient for higher-level abstraction.
         """
         if not self.connected:
             return False
             
-        # TODO: Implement real SBO using ControlObject
-        # For now, we assume Direct Operate or SBO is handled by the library's write/operate functions if we use the high-level API
-        return True
+        object_ref = self._get_control_object_reference(signal.address)
+        if not object_ref:
+            if self.event_logger:
+                self.event_logger.error("IEC61850", f"SELECT: Could not determine Control Object from {signal.address}")
+            return False
+
+        if self.event_logger:
+            self.event_logger.transaction("IEC61850", f"→ SELECT {object_ref}")
+
+        try:
+            client = iec61850.ControlObjectClient_create(object_ref, self.connection)
+            if not client:
+                 if self.event_logger:
+                     self.event_logger.error("IEC61850", "Failed to create ControlObjectClient")
+                 return False
+            
+            success = iec61850.ControlObjectClient_select(client)
+            iec61850.ControlObjectClient_destroy(client)
+            
+            if success:
+                if self.event_logger:
+                    self.event_logger.transaction("IEC61850", "← SELECT SUCCESS")
+                return True
+            else:
+                if self.event_logger:
+                    self.event_logger.error("IEC61850", "← SELECT FAILED")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Select failed: {e}")
+            if self.event_logger:
+                self.event_logger.error("IEC61850", f"SELECT EXCEPTION: {e}")
+            return False
 
     def operate(self, signal: Signal, value: Any) -> bool:
         """
         Operate (Control) on a signal.
+        Supports Direct Operate and SBO Operate phases.
         """
+        # 1. Determine if this is a Control Operation or a simple Data Attribute Write
+        # Controls typically target DOs with CDC of SPC, DPC, INC, ENC, BSC, ISC, APC.
+        # Addresses often look like ".../GGIO1.SPCSO1.Oper.ctlVal" or just ".../GGIO1.SPCSO1"
+        
+        object_ref = self._get_control_object_reference(signal.address)
+        
+        # If we successfully identified a Control Object Reference, use ControlObjectClient
+        if object_ref and ("Oper" in signal.address or "ctlVal" in signal.address or getattr(signal, "access", "") == "RW"):
+             return self._operate_control(object_ref, value, signal)
+             
+        # Otherwise, fall back to direct DataAttribute write (Configuration, Settings, etc.)
+        return self.write_signal(signal, value)
+
+    def _operate_control(self, object_ref: str, value: Any, signal: Signal) -> bool:
+        """Handle standard IEC 61850 Control Model operation."""
         if self.event_logger:
-            self.event_logger.transaction("IEC61850", f"→ OPERATE {signal.address} = {value}")
+            self.event_logger.transaction("IEC61850", f"→ OPERATE {object_ref} = {value}")
             
         if not self.connected:
-            if self.event_logger:
-                self.event_logger.error("IEC61850", "Cannot operate: Not connected")
             return False
 
         try:
-            # 1. Convert value to MmsValue
+            client = iec61850.ControlObjectClient_create(object_ref, self.connection)
+            if not client:
+                 return False
+            
+            # Create MmsValue for the control value
             mms_value = self._create_mms_value(value, signal)
             if not mms_value:
+                iec61850.ControlObjectClient_destroy(client)
+                return False
+
+            success = iec61850.ControlObjectClient_operate(client, mms_value, 0) # 0 = no test
+            
+            iec61850.MmsValue_delete(mms_value)
+            iec61850.ControlObjectClient_destroy(client)
+            
+            if success:
                 if self.event_logger:
-                    self.event_logger.error("IEC61850", f"Failed to create MMS value for {value}")
+                    self.event_logger.transaction("IEC61850", "← OPERATE SUCCESS")
+                return True
+            else:
+                if self.event_logger:
+                    self.event_logger.error("IEC61850", "← OPERATE FAILED")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Operate failed: {e}")
+            if self.event_logger:
+                self.event_logger.error("IEC61850", f"OPERATE EXCEPTION: {e}")
+            return False
+
+    def write_signal(self, signal: Signal, value: Any) -> bool:
+        """
+        Generic write to a Data Attribute (non-control).
+        Use this for setting configuration parameters (FC=CF, SP, SE).
+        """
+        if not self.connected:
+            return False
+            
+        # Check if it's actually a control
+        object_ref = self._get_control_object_reference(signal.address)
+        if object_ref and ("Oper" in signal.address or "ctlVal" in signal.address):
+            return self._operate_control(object_ref, value, signal)
+
+        if self.event_logger:
+            self.event_logger.transaction("IEC61850", f"→ WRITE {signal.address} = {value}")
+
+        try:
+            mms_value = self._create_mms_value(value, signal)
+            if not mms_value:
                 return False
             
-            # 2. Perform Write / Operate
-            # We need to determine if we should use writeObject or operate methods.
-            # operate methods are for Control Models (SBO, Direct).
-            # writeObject is for setting data attributes directly.
-            
-            # If address ends with .Oper.ctlVal, it's a control.
-            # If address ends with .setVal, it's a setting.
-            
-            # For simplicity, we try writeObject first which covers many cases.
-            # But for controls, we might need ControlObjectClient.
-            
-            # Let's try generic writeObject first.
-            # We need the FC. For controls it is usually CO or SP.
-            # For settings it is CF or SP.
-            
-            fc = iec61850.IEC61850_FC_CO # Default for controls
-            if "setVal" in signal.address or "sbo" in signal.address.lower():
-                 fc = iec61850.IEC61850_FC_CF
-            elif "stVal" in signal.address: # Simulation/Testing
-                 fc = iec61850.IEC61850_FC_ST
-            
-            # Override if signal has FC
+            # Determine FC
+            fc = iec61850.IEC61850_FC_CF # Default for settings
             if getattr(signal, 'fc', None):
-                 # Map string to constant
-                 pass 
-            
+                # Map logical FC to int
+                pass # TODO: Implement mapping if needed, relies on heuristics often
+            elif "setVal" in signal.address:
+                fc = iec61850.IEC61850_FC_SP
+                
             err = iec61850.IedConnection_writeObject(self.connection, signal.address, fc, mms_value)
             
             iec61850.MmsValue_delete(mms_value)
             
             if err == iec61850.IED_ERROR_OK:
                 if self.event_logger:
-                    self.event_logger.transaction("IEC61850", "← OPERATE SUCCESS")
+                    self.event_logger.transaction("IEC61850", "← WRITE SUCCESS")
                 return True
             else:
                 if self.event_logger:
-                    self.event_logger.error("IEC61850", f"← OPERATE FAILED: Error {err}")
+                    self.event_logger.error("IEC61850", f"← WRITE FAILED: Error {err}")
                 return False
-                
+
         except Exception as e:
-            logger.error(f"Operate failed: {e}")
-            if self.event_logger:
-                self.event_logger.error("IEC61850", f"← OPERATE EXCEPTION: {e}")
+            logger.error(f"Write failed: {e}")
             return False
 
     def cancel(self, signal: Signal) -> bool:
-        return True
-    
+        """Cancel selection."""
+        if not self.connected:
+            return False
+            
+        object_ref = self._get_control_object_reference(signal.address)
+        if not object_ref:
+            return False
+            
+        try:
+            client = iec61850.ControlObjectClient_create(object_ref, self.connection)
+            if not client: return False
+            
+            success = iec61850.ControlObjectClient_cancel(client)
+            iec61850.ControlObjectClient_destroy(client)
+            return success
+        except Exception as e:
+            return False
+
+    def _get_control_object_reference(self, address: str) -> str:
+        """
+        Extract the Control Object Reference (DO path) from a detailed signal address.
+        E.g. "IED/LD.GGIO1.SPCSO1.Oper.ctlVal" -> "IED/LD.GGIO1.SPCSO1"
+        """
+        # Common suffixes for control attributes
+        suffixes = [".Oper.ctlVal", ".Oper", ".SBO.ctlVal", ".SBO", ".SBOw.ctlVal", ".SBOw", ".Cancel.ctlVal", ".Cancel", ".ctlVal"]
+        
+        # Try to strip known control suffixes
+        for suffix in suffixes:
+            if address.endswith(suffix):
+                return address[:-len(suffix)]
+        
+        # Heuristic: If it has at least one dot, and we think it's a control
+        if "." in address:
+            # Maybe the user selected the DO node directly?
+            # Check if last part looks like a DA (start with lowercase generally, except Oper/SBO)
+            pass
+            
+        # Fallback: Assume the address IS the object reference if it doesn't end in typical attribute names
+        # But most Signals in the list will be leaf nodes (attributes).
+        return None
+
     def _create_mms_value(self, value: Any, signal: Signal):
         """Create MmsValue from Python value."""
         try:
@@ -1198,8 +1306,6 @@ class IEC61850Adapter(BaseProtocol):
             elif isinstance(value, float):
                 return iec61850.MmsValue_newFloat(value)
             elif isinstance(value, int):
-                # Check if it should be Integer or Unsigned?
-                # Default to Int32
                 return iec61850.MmsValue_newInt32(value)
             elif isinstance(value, str):
                 return iec61850.MmsValue_newVisibleString(value)
@@ -1208,4 +1314,4 @@ class IEC61850Adapter(BaseProtocol):
             return None
 
     def _detect_vendor_pre_connect(self):
-        pass # Keep cleanup
+        pass

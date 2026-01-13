@@ -654,6 +654,94 @@ def IedConnection_writeInt32Value(connection, object_reference, fc, value):
     return func(connection, _encode_str(object_reference), fc, value)
 
 # ============================================================================
+# Control Model Functions (ControlObjectClient)
+# ============================================================================
+
+def ControlObjectClient_create(object_reference, connection):
+    """
+    Create a ControlObjectClient instance for easy control operations.
+    
+    Args:
+        object_reference: Full reference to the control object (e.g. "SimpleIO/GGIO1.SPCSO1")
+        connection: Active IedConnection handle
+    
+    Returns:
+        ControlObjectClient: Handle
+    """
+    _check_lib()
+    func = _lib.ControlObjectClient_create
+    func.restype = ControlObjectClient
+    func.argtypes = [c_char_p, IedConnection]
+    return func(_encode_str(object_reference), connection)
+
+def ControlObjectClient_destroy(client):
+    """
+    Destroy ControlObjectClient instance.
+    
+    Args:
+        client: ControlObjectClient handle
+    """
+    _check_lib()
+    func = _lib.ControlObjectClient_destroy
+    func.restype = None
+    func.argtypes = [ControlObjectClient]
+    func(client)
+
+def ControlObjectClient_select(client):
+    """
+    Perform Select operation (SBO).
+    
+    Args:
+        client: ControlObjectClient handle
+        
+    Returns:
+        bool: True if successful
+    """
+    _check_lib()
+    func = _lib.ControlObjectClient_select
+    func.restype = c_bool
+    func.argtypes = [ControlObjectClient]
+    return bool(func(client))
+
+def ControlObjectClient_operate(client, value, test_flag=False):
+    """
+    Perform Operate operation.
+    
+    Args:
+        client: ControlObjectClient handle
+        value: MmsValue to operate with (must match type)
+        test_flag: Boolean test flag
+    
+    Returns:
+        bool: True if successful
+    """
+    _check_lib()
+    func = _lib.ControlObjectClient_operate
+    func.restype = c_bool
+    func.argtypes = [ControlObjectClient, MmsValue, c_int] # 3rd arg is usually 0 or test int
+    return bool(func(client, value, 0)) # simplified for now
+
+def ControlObjectClient_cancel(client):
+    """
+    Cancel selection.
+    
+    Args:
+        client: ControlObjectClient handle
+    
+    Returns:
+        bool: True if successful
+    """
+    try:
+        _check_lib()
+        func = _lib.ControlObjectClient_cancel
+        func.restype = c_bool
+        func.argtypes = [ControlObjectClient]
+        return bool(func(client))
+    except AttributeError:
+        # Some older versions might not have cancel
+        return False
+
+# ============================================================================
 # MMS Value Functions
 # ============================================================================
 

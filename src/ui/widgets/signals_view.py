@@ -38,12 +38,19 @@ class SignalsViewWidget(QWidget):
         self.btn_refresh.setFixedWidth(100)
         self.btn_refresh.clicked.connect(self._on_refresh_clicked)
         toolbar.addWidget(self.btn_refresh)
+        
+        # Auto-Refresh Checkbox
+        from PySide6.QtWidgets import QCheckBox
+        self.chk_auto_refresh = QCheckBox("Auto-Refresh (3s)")
+        self.chk_auto_refresh.setChecked(True)
+        self.chk_auto_refresh.stateChanged.connect(self._on_auto_refresh_toggled)
+        toolbar.addWidget(self.chk_auto_refresh)
+        
         toolbar.addStretch()
         layout.addLayout(toolbar)
         
         self.table_view = QTableView()
         self.table_view.setAlternatingRowColors(True)
-        # Allow user to resize columns and auto-fit to contents initially
         header = self.table_view.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.Interactive)
         header.setStretchLastSection(True) 
@@ -60,9 +67,25 @@ class SignalsViewWidget(QWidget):
         layout.addWidget(self.table_view)
         
         self.tabs.addTab(self.table_tab, "Live Data")
+        
+        # Timer for Auto-Refresh
+        from PySide6.QtCore import QTimer
+        self.refresh_timer = QTimer(self)
+        self.refresh_timer.timeout.connect(self._on_refresh_clicked)
+        self.refresh_timer.start(3000)
+
+    def _on_auto_refresh_toggled(self, state):
+        if state == Qt.Checked:
+            self.refresh_timer.start(3000)
+        else:
+            self.refresh_timer.stop()
 
     def _on_refresh_clicked(self):
         """Manually trigger a refresh for the currently shown signals."""
+        # Check if we have a current node, if not try to set one
+        if not self.current_node:
+            self._try_auto_select_node()
+            
         if self.current_node:
             device_name = self._get_current_device_name()
             if device_name:
@@ -70,22 +93,41 @@ class SignalsViewWidget(QWidget):
                 if signals:
                     self._trigger_background_read(device_name, signals)
 
+    def _try_auto_select_node(self):
+        """Attempt to select the first available device if nothing is selected."""
+        devices = self.device_manager.get_all_devices()
+        for device in devices:
+            if device.root_node:
+                self.set_filter_node(device.root_node)
+                self.current_device_name = device.config.name
+                return
+
     def set_filter_node(self, node):
         """Updates the view to show signals from the given node."""
         self.current_node = node
         if node is None:
             self.current_device_name = None
-        
+        else:
+            # Try to determine device name from node
+            # This is tricky if node doesn't have backlinks.
+            # We rely on _get_current_device_name heuristic or explicit set
+            pass
+
         self.table_model.set_node_filter(node)
         self.table_view.resizeColumnsToContents()
+        
+        # Trigger immediate refresh when node changes
+        self._on_refresh_clicked()
 
     def _trigger_background_read(self, device_name, signals):
         """Execute signal reads in a background thread to prevent UI freeze."""
         import threading
         from src.core.workers import BulkReadWorker
         
+        # Cancel previous if needed? 
+        # For valid keep-it-simple, just fire and forget, but maybe verify worker not already running?
+        
         worker = BulkReadWorker(self.device_manager, device_name, signals)
-        # Use a simple thread for now. In a larger app, use QThreadPool.
         t = threading.Thread(target=worker.run)
         t.daemon = True
         t.start()
@@ -101,25 +143,28 @@ class SignalsViewWidget(QWidget):
         
         # Get the signal from the model
         signal = self.table_model.get_signal_at_row(index.row())
-        if not signal or not self.watch_list_manager:
+        if not signal:
             return
         
         # We need device_name - try to get from current context
-        # This is a limitation - we need to track which device's signals are shown
-        # For now, try to get from first connected device or require explicit tracking
         device_name = self._get_current_device_name()
         if not device_name:
             return
         
         menu = QMenu()
-        add_action = QAction("Add to Watch List", self)
-        add_action.triggered.connect(lambda: self.watch_list_manager.add_signal(device_name, signal))
-        menu.addAction(add_action)
+        if self.watch_list_manager:
+            add_action = QAction("Add to Watch List", self)
+            add_action.triggered.connect(lambda: self.watch_list_manager.add_signal(device_name, signal))
+            menu.addAction(add_action)
         
         # Control option
         menu.addSeparator()
         control_action = QAction("Control...", self)
-        if getattr(signal, 'access', 'RO') == "RW":
+        
+        # Enable if RW or explicitly controllable
+        is_controllable = getattr(signal, 'access', 'RO') == "RW" or ".Oper" in signal.address or ".ctlVal" in signal.address
+        
+        if is_controllable:
             control_action.setEnabled(True)
             control_action.triggered.connect(lambda: self._on_control_clicked(device_name, signal))
         else:
@@ -140,6 +185,11 @@ class SignalsViewWidget(QWidget):
         for device in devices:
             if device.connected:
                 return device.config.name
+        
+        # Fallback 2: get any device
+        if devices:
+            return devices[0].config.name
+            
         return None
 
     def _on_control_clicked(self, device_name, signal):

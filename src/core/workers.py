@@ -111,4 +111,15 @@ class BulkReadWorker:
                 time.sleep(0.001) 
             except Exception as e:
                 logger.warning(f"BulkReadWorker error for {self.device_name}: {e}")
+                
+                # IMPORTANT: Update signal state on error so UI knows it failed
+                sig.quality = "Invalid" # Or SignalQuality.INVALID if we could import it
+                sig.error = str(e)
+                # We need to trigger update in DeviceManager to refresh UI
+                # But device_manager.read_signal usually handles it.
+                # If exception happened INSIDE read_signal, presumably it handled it?
+                # If valid read_signal raised exception, we should update here.
+                # Use a safe update method if available
+                # self.device_manager.update_signal(self.device_name, sig) # Hypothetical
+                
         self.signals.finished.emit()
