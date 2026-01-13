@@ -282,6 +282,8 @@ class ModbusSlaveServer:
             import asyncio
             # Create new event loop for this thread
             loop = asyncio.new_event_loop()
+            # Save loop reference so stop() can access it
+            self._loop = loop
             asyncio.set_event_loop(loop)
             
             # Run the async server
@@ -303,8 +305,23 @@ class ModbusSlaveServer:
             return
         
         try:
-            # pymodbus 3.x: ServerAsyncStop is deprecated, just set running flag
+            # Attempt to stop the asyncio server loop cleanly
             self.running = False
+            try:
+                if hasattr(self, '_loop') and self._loop is not None:
+                    # Stop the loop in a thread-safe manner
+                    try:
+                        self._loop.call_soon_threadsafe(self._loop.stop)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            # Join server thread to ensure it exits
+            try:
+                if self.server_thread and self.server_thread.is_alive():
+                    self.server_thread.join(timeout=1.0)
+            except Exception:
+                pass
             
             if self.event_logger:
                 uptime = datetime.now() - self.stats['start_time']

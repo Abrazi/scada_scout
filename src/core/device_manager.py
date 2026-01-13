@@ -215,6 +215,39 @@ class DeviceManager(QObject):
     def get_all_devices(self) -> List[Device]:
         return list(self._devices.values())
 
+    def clear_all_devices(self):
+        """Remove all devices and cleanup protocols and workers."""
+        # Make a list of device names to avoid mutation during iteration
+        names = list(self._devices.keys())
+        for name in names:
+            try:
+                self.remove_device(name)
+            except Exception:
+                logger.exception(f"Error removing device during clear_all_devices: {name}")
+
+        # Ensure protocols and workers cleared
+        try:
+            self._protocols.clear()
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self, 'iec_workers'):
+                for wk in list(self.iec_workers.values()):
+                    try:
+                        wk.stop()
+                    except Exception:
+                        pass
+                self.iec_workers.clear()
+        except Exception:
+            pass
+
+        # Emit project cleared signal for UI to refresh
+        try:
+            self.project_cleared.emit()
+        except Exception:
+            pass
+
     def save_configuration(self, path: Optional[str] = None):
         """Saves current state to a JSON file."""
         target_path = path or self.config_path
@@ -425,6 +458,13 @@ class DeviceManager(QObject):
     
     def read_signal(self, device_name: str, signal: Signal) -> Optional[Signal]:
         """Read a single signal value from a device."""
+        # Debug: log known protocol keys to help diagnose missing adapters
+        try:
+            known = list(self._protocols.keys())
+        except Exception:
+            known = []
+        logger.debug(f"DeviceManager.read_signal: device_name={device_name}, known_protocols={known}")
+
         protocol = self._protocols.get(device_name)
         if not protocol:
             logger.warning(f"No protocol found for device {device_name}")

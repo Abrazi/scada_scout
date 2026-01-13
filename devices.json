@@ -1,14 +1,41 @@
 {
     "devices": [
         {
-            "name": "IED_172_16_11_18",
-            "ip_address": "172.16.11.18",
-            "port": 102,
+            "name": "IED_127_0_0_1",
+            "ip_address": "127.0.0.1",
+            "port": 5020,
             "folder": "",
             "description": "",
-            "device_type": "IEC 61850 IED",
+            "device_type": "Modbus Slave Server",
             "enabled": true,
             "scd_file_path": null,
+            "use_scd_discovery": true,
+            "protocol_params": {},
+            "polling_enabled": true,
+            "poll_interval": 1.0,
+            "modbus_unit_id": 1,
+            "modbus_timeout": 3.0,
+            "modbus_register_maps": [],
+            "modbus_slave_mappings": [],
+            "modbus_slave_blocks": [
+                {
+                    "name": "Block 1",
+                    "register_type": "holding",
+                    "start_address": 0,
+                    "count": 100,
+                    "description": ""
+                }
+            ]
+        },
+        {
+            "name": "J01J50",
+            "ip_address": "172.16.1.1",
+            "port": 102,
+            "folder": "",
+            "description": "J01J50",
+            "device_type": "IEC 61850 IED",
+            "enabled": true,
+            "scd_file_path": "C:/Users/majid/Downloads/IEC station 1.scd",
             "use_scd_discovery": true,
             "protocol_params": {},
             "polling_enabled": false,

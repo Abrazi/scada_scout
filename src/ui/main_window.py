@@ -431,8 +431,13 @@ class MainWindow(QMainWindow):
         """Updates the signals view based on selected tree node."""
         import logging
         logger = logging.getLogger("MainWindow")
-        logger.info(f"MainWindow: Selection received for {device_name}. Node: {node}")
-        self.signals_view.set_filter_node(node, device_name)
+        logger.debug(f"MainWindow: Selection received for {device_name}. Node type: {type(node)}")
+        # Instead of replacing the live data, append the selected node's signals
+        try:
+            self.signals_view.add_node_to_live(node, device_name)
+        except Exception:
+            # Fallback to replacing the filter
+            self.signals_view.set_filter_node(node, device_name)
 
     def _on_device_updated(self, device_name):
         """Called when a device configuration or internal model changes."""

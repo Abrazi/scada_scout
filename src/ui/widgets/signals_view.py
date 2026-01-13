@@ -41,6 +41,19 @@ class SignalsViewWidget(QWidget):
         self.btn_refresh.clicked.connect(self._on_refresh_clicked)
         toolbar.addWidget(self.btn_refresh)
         
+        # Refresh only selected node
+        self.btn_refresh_selected = QPushButton("Refresh Selected")
+        self.btn_refresh_selected.setFixedWidth(130)
+        self.btn_refresh_selected.clicked.connect(self._on_refresh_selected_clicked)
+        self.btn_refresh_selected.setEnabled(False)
+        toolbar.addWidget(self.btn_refresh_selected)
+
+        # Clear Live Data
+        self.btn_clear = QPushButton("Clear Live Data")
+        self.btn_clear.setFixedWidth(120)
+        self.btn_clear.clicked.connect(self._on_clear_clicked)
+        toolbar.addWidget(self.btn_clear)
+        
         # Auto-Refresh Checkbox
         from PySide6.QtWidgets import QCheckBox
         self.chk_auto_refresh = QCheckBox("Auto-Refresh (3s)")
@@ -138,6 +151,36 @@ class SignalsViewWidget(QWidget):
                 if signals:
                     self._trigger_background_read(device_name, signals)
 
+    def _on_refresh_selected_clicked(self):
+        """Refresh only the currently selected node/subbranch (does not auto-select)."""
+        if not self.current_node:
+            return
+
+        device_name = self._get_current_device_name()
+        if not device_name:
+            return
+
+        signals = self._collect_signals(self.current_node)
+        if signals:
+            self._trigger_background_read(device_name, signals)
+
+    def _on_clear_clicked(self):
+        """Clear all live data currently shown in the table."""
+        try:
+            self.table_model.clear_signals()
+        except Exception:
+            # Fallback: reset node filter to None
+            try:
+                self.table_model.set_node_filter(None)
+            except Exception:
+                pass
+
+        # Update UI state
+        self.lbl_no_signals.show()
+        self.lbl_no_signals.resize(self.table_view.size())
+        if hasattr(self, 'btn_refresh_selected'):
+            self.btn_refresh_selected.setEnabled(False)
+
     def _try_auto_select_node(self):
         """Attempt to select the first available device if nothing is selected."""
         devices = self.device_manager.get_all_devices()
@@ -159,12 +202,57 @@ class SignalsViewWidget(QWidget):
 
         self.table_model.set_node_filter(node)
         self.table_view.resizeColumnsToContents()
+        # Enable/disable selected refresh button based on whether there are signals
+        try:
+            has_signals = bool(self._collect_signals(node))
+        except Exception:
+            has_signals = False
+        if hasattr(self, 'btn_refresh_selected'):
+            self.btn_refresh_selected.setEnabled(has_signals)
         # Toggle Overlay
         if self.table_model.rowCount() == 0:
             self.lbl_no_signals.show()
             self.lbl_no_signals.resize(self.table_view.size())
         else:
             self.lbl_no_signals.hide()
+
+    def add_node_to_live(self, node, device_name=None):
+        """Add signals from `node` into the live data table (append, no dedupe)."""
+        if not node:
+            return
+
+        # Track device name for background reads
+        if device_name:
+            self.current_device_name = device_name
+        # Track current node so "Refresh Selected" knows what to refresh
+        self.current_node = node
+
+        signals = self._collect_signals(node)
+        import logging
+        logger = logging.getLogger("SignalsView")
+        try:
+            logger.info(f"add_node_to_live: collected {len(signals)} signals from node type {type(node)}")
+        except Exception:
+            logger.info("add_node_to_live: collected signals (count unknown)")
+        if not signals:
+            return
+
+        try:
+            self.table_model.add_signals(signals)
+        except Exception:
+            import logging
+            logging.getLogger("SignalsView").exception("Failed to add signals to model, falling back to set_node_filter")
+            # Fallback: reset to node filter
+            try:
+                self.table_model.set_node_filter(node)
+            except Exception:
+                pass
+
+        # Update UI elements
+        self.table_view.resizeColumnsToContents()
+        self.lbl_no_signals.hide()
+        if hasattr(self, 'btn_refresh_selected'):
+            self.btn_refresh_selected.setEnabled(True)
 
     def resizeEvent(self, event):
         """Ensure overlay stays centered."""
@@ -269,8 +357,17 @@ class SignalsViewWidget(QWidget):
         return None
 
     def _on_control_clicked(self, device_name, signal):
+        # For Modbus devices, open Modbus-specific control dialog
+        from src.models.device_models import DeviceType
+        device = self.device_manager.get_device(device_name)
+        if device and device.config.device_type in (DeviceType.MODBUS_TCP, DeviceType.MODBUS_SERVER):
+            from src.ui.dialogs.modbus_control_dialog import ModbusControlDialog
+            dlg = ModbusControlDialog(device_name, self.device_manager, self)
+            dlg.exec()
+            return
+
+        # Fallback to generic IEC control dialog
         from src.ui.dialogs.control_dialog import ControlDialog
-        
         dialog = ControlDialog(device_name, signal, self.device_manager, self)
         dialog.exec()
 

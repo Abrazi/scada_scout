@@ -902,7 +902,18 @@ class ModbusSlaveWidget(QWidget):
         self.txt_stats.setText(text)
     
     def closeEvent(self, event):
-        """Stop server on widget close"""
-        if self.server and self.server.running:
-            self._stop_server()
-        event.accept()
+        """Stop server on widget close.
+
+        Do not stop the server if it is managed externally via `server_adapter`.
+        Closing the editor should not disconnect a device that is owned by
+        the larger application or a shared adapter.
+        """
+        try:
+            # Only stop the server if this widget created/owns it (no external adapter)
+            if not self.server_adapter:
+                if self.server and self.server.running:
+                    self._stop_server()
+        except Exception:
+            logger.exception("Error during ModbusSlaveWidget.closeEvent")
+        finally:
+            event.accept()

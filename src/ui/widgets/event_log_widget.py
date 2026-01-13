@@ -128,6 +128,11 @@ class EventLogWidget(QWidget):
         
     def _display_event(self, event):
         """Displays a singe event if it matches criteria."""
+        # Normalize event fields early to avoid UnboundLocalError
+        level = event.get('level') if isinstance(event, dict) else getattr(event, 'level', None)
+        source = event.get('source') if isinstance(event, dict) else getattr(event, 'source', None)
+        message = event.get('message') if isinstance(event, dict) else getattr(event, 'message', None)
+
         # Filter logic:
         # If "Verbose" is OFF, hide TRANSACTION and detailed READ events unless it's a change or error
         if not self.chk_verbose.isChecked():
@@ -135,28 +140,24 @@ class EventLogWidget(QWidget):
             if level == 'TRANSACTION':
                 return
             # Hide generic cyclic reads if not error
-            if source == 'WatchList' and 'Read' in message and level == 'INFO':
-                 # Keep it only if it looks like a value update or error?
-                 pass 
-        
+            if source == 'WatchList' and isinstance(message, str) and 'Read' in message and level == 'INFO':
+                # Keep it only if it looks like a value update or error? Currently skip
+                return
+
         # Source Filtering
         if self.source_filter == "All Sources":
             pass # Show all
         elif self.source_filter == "Application":
             # Show specific sources
-            if source not in ["Main", "AppController", "DeviceManager", "IEC61850Adapter", "EventLog", "SCDImport"]:
-                 # If source is likely a device name (not in this list), skip
-                 if "Manager" not in source and "Main" not in source:
-                     return
+            app_sources = ["Main", "AppController", "DeviceManager", "IEC61850Adapter", "EventLog", "SCDImport"]
+            if source not in app_sources:
+                # If source is likely a device name (not in this list), skip
+                if not any(k in str(source) for k in ("Manager", "Main")):
+                    return
         else:
-             # Specific Device selected
-             if source != self.source_filter:
-                 return 
-        
-        # Color code by level
-        level = event['level']
-        source = event['source']
-        message = event['message']
+            # Specific Device selected
+            if source != self.source_filter:
+                return
         if level == "ERROR":
             color = "#f48771"
         elif level == "WARNING":

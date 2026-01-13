@@ -638,7 +638,8 @@ class DeviceTreeWidget(QWidget):
         # Check if it's a device node (string) or signal node (Signal object)
         from src.models.device_models import Signal, DeviceType
         
-        logger.info(f"Context menu on item: {type(data)} - {data}")
+        # Avoid noisy logging of full node/signal objects on right-click
+        logger.debug(f"Context menu invoked on item type: {type(data)}")
         
         if isinstance(data, str):
             # Device node
@@ -711,6 +712,15 @@ class DeviceTreeWidget(QWidget):
                 copy_action = QAction("Copy Device Name", self)
                 copy_action.triggered.connect(lambda: self._copy_to_clipboard(device_name))
                 menu.addAction(copy_action)
+                # Expand/Collapse subtree
+                menu.addSeparator()
+                expand_action = QAction("Expand All", self)
+                expand_action.triggered.connect(lambda: self._expand_subtree(root_item))
+                menu.addAction(expand_action)
+
+                collapse_action = QAction("Collapse All", self)
+                collapse_action.triggered.connect(lambda: self._collapse_subtree(root_item))
+                menu.addAction(collapse_action)
         
         elif isinstance(data, Signal) or (hasattr(data, 'name') and hasattr(data, 'address')):
             # Signal node (strict check or duck typing)
@@ -767,6 +777,15 @@ class DeviceTreeWidget(QWidget):
                 copy_action = QAction("Copy node Address", self)
                 copy_action.triggered.connect(lambda: self._copy_to_clipboard(full_address))
                 menu.addAction(copy_action)
+                # Expand/Collapse for generic node
+                menu.addSeparator()
+                expand_action = QAction("Expand All", self)
+                expand_action.triggered.connect(lambda: self._expand_subtree(root_item))
+                menu.addAction(expand_action)
+
+                collapse_action = QAction("Collapse All", self)
+                collapse_action.triggered.connect(lambda: self._collapse_subtree(root_item))
+                menu.addAction(collapse_action)
         
         if menu.actions():
             menu.exec(self.tree_view.viewport().mapToGlobal(position))
@@ -823,9 +842,17 @@ class DeviceTreeWidget(QWidget):
     def _invoke_control_dialog(self, device_name, signal):
         """Open control dialog for a signal (separated to avoid lambda closure issues)."""
         try:
-            from src.ui.dialogs.control_dialog import ControlDialog
-            dlg = ControlDialog(device_name, signal, self.device_manager, self)
-            dlg.exec()
+            # Use Modbus-specific control UI for Modbus devices
+            from src.models.device_models import DeviceType
+            device = self.device_manager.get_device(device_name)
+            if device and device.config.device_type in (DeviceType.MODBUS_TCP, DeviceType.MODBUS_SERVER):
+                from src.ui.dialogs.modbus_control_dialog import ModbusControlDialog
+                dlg = ModbusControlDialog(device_name, self.device_manager, self)
+                dlg.exec()
+            else:
+                from src.ui.dialogs.control_dialog import ControlDialog
+                dlg = ControlDialog(device_name, signal, self.device_manager, self)
+                dlg.exec()
         except Exception:
             logger.exception("Failed to open control dialog")
 
@@ -866,6 +893,44 @@ class DeviceTreeWidget(QWidget):
         dlg.show()
         self._slave_dialogs = getattr(self, '_slave_dialogs', {})
         self._slave_dialogs[device_name] = dlg
+
+    def _expand_subtree(self, item: QStandardItem):
+        """Recursively expand the given QStandardItem and all its children in the view."""
+        if item is None:
+            return
+
+        def recurse(it: QStandardItem):
+            try:
+                idx = it.index()
+                if idx.isValid():
+                    self.tree_view.expand(idx)
+            except Exception:
+                pass
+            for i in range(it.rowCount()):
+                child = it.child(i)
+                if child:
+                    recurse(child)
+
+        recurse(item)
+
+    def _collapse_subtree(self, item: QStandardItem):
+        """Recursively collapse the given QStandardItem and all its children in the view."""
+        if item is None:
+            return
+
+        def recurse(it: QStandardItem):
+            for i in range(it.rowCount()):
+                child = it.child(i)
+                if child:
+                    recurse(child)
+            try:
+                idx = it.index()
+                if idx.isValid():
+                    self.tree_view.collapse(idx)
+            except Exception:
+                pass
+
+        recurse(item)
 
     def _show_modbus_inspector(self, device_name):
         """Show the Modbus Data Inspector dialog"""

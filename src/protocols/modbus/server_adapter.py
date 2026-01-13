@@ -34,6 +34,14 @@ class ModbusServerAdapter(BaseProtocol):
         """Starts the Modbus Server."""
         if not self.server:
             return False
+
+        # If already running, report success without attempting to start again
+        try:
+            if getattr(self.server, 'running', False):
+                logger.info("Modbus Server already running, connect() no-op")
+                return True
+        except Exception:
+            pass
             
         try:
             # Re-apply config in case it changed in UI before connect

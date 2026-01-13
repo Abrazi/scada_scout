@@ -214,3 +214,38 @@ class SignalTableModel(QAbstractTableModel):
     def _get_key(self, signal: Signal) -> str:
         """Generates a unique key for the signal (Address is usually unique per device)."""
         return signal.address
+
+    def clear_signals(self):
+        """Clear all signals from the model."""
+        self.beginResetModel()
+        self._signals = []
+        self._signal_map = {}
+        self.endResetModel()
+
+    def add_signals(self, signals: List[Signal]):
+        """Append signals to the model, avoiding duplicates.
+
+        Emits the appropriate rowsInserted signals for views.
+        """
+        if not signals:
+            return
+
+        # Filter out duplicates based on key
+        new_signals = []
+        for s in signals:
+            key = self._get_key(s)
+            if key not in self._signal_map:
+                new_signals.append(s)
+
+        if not new_signals:
+            return
+
+        start_row = len(self._signals)
+        end_row = start_row + len(new_signals) - 1
+        self.beginInsertRows(QModelIndex(), start_row, end_row)
+        for s in new_signals:
+            self._signals.append(s)
+        # Rebuild map incrementally
+        for i in range(start_row, len(self._signals)):
+            self._signal_map[self._get_key(self._signals[i])] = i
+        self.endInsertRows()
