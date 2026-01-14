@@ -1,32 +1,38 @@
-from PySide6.QtCore import QObject, Signal
+import logging
+import queue
+import threading
+import time
+import traceback
+from typing import Any, Dict, Optional
 
-class WorkerSignals(QObject):
-    progress = Signal(str, str, int)
-    status_changed = Signal(str, bool)
-    device_updated = Signal(str, str) # old_name, new_name (if changed)
-    finished = Signal()
+from src.core.events import EventEmitter
+from src.models.device_models import Device
 
-class ConnectionWorker:
-    def __init__(self, device_name, device, protocol):
+logger = logging.getLogger(__name__)
+
+class Worker(EventEmitter):
+    """Base class for workers with event capabilities."""
+    def __init__(self):
+        super().__init__()
+
+class ConnectionWorker(Worker):
+    def __init__(self, device_name: str, device: Device, protocol):
+        super().__init__()
         self.device_name = device_name
         self.device = device
         self.protocol = protocol
-        self.signals = WorkerSignals()
 
     def run(self):
-        import logging
-        logger = logging.getLogger(__name__)
-        
         try:
             device_name = self.device_name
-            self.signals.progress.emit(device_name, f"Connecting to {self.device.config.ip_address}...", 20)
+            self.emit("progress", device_name, f"Connecting to {self.device.config.ip_address}...", 20)
             
             if self.protocol.connect():
-                self.signals.progress.emit(device_name, "Connected successfully", 40)
-                self.signals.status_changed.emit(device_name, True)
+                self.emit("progress", device_name, "Connected successfully", 40)
+                self.emit("status_changed", device_name, True)
                 
                 # Auto-Discover
-                self.signals.progress.emit(device_name, "Discovering device structure...", 50)
+                self.emit("progress", device_name, "Discovering device structure...", 50)
                 try:
                     root_node = self.protocol.discover()
                     self.device.root_node = root_node
@@ -34,34 +40,31 @@ class ConnectionWorker:
                     # Check for name change
                     new_name = root_node.name if root_node and root_node.name else device_name
                     
-                    self.signals.progress.emit(device_name, "Discovery complete", 90)
+                    self.emit("progress", device_name, "Discovery complete", 90)
                     
                     # Signal both old and new name
                     # If new_name is different, DeviceManager will handle the rename
-                    self.signals.device_updated.emit(device_name, new_name)
+                    self.emit("device_updated", device_name, new_name)
                     
                 except Exception as e:
                     logger.error(f"Discovery failed: {e}")
-                    self.signals.progress.emit(device_name, "Discovery failed", 90)
+                    self.emit("progress", device_name, "Discovery failed", 90)
                 
-                self.signals.progress.emit(device_name, "Ready", 100)
+                self.emit("progress", device_name, "Ready", 100)
             else:
-                self.signals.progress.emit(device_name, "Connection failed", 0)
-                self.signals.status_changed.emit(device_name, False)
+                self.emit("progress", device_name, "Connection failed", 0)
+                self.emit("status_changed", device_name, False)
                 
         except Exception as e:
              logger.error(f"Connection worker error: {e}")
-             self.signals.progress.emit(self.device_name, f"Error: {e}", 0)
-             self.signals.status_changed.emit(self.device_name, False)
+             self.emit("progress", self.device_name, f"Error: {e}", 0)
+             self.emit("status_changed", self.device_name, False)
         finally:
-            self.signals.finished.emit()
+            self.emit("finished")
 
-from PySide6.QtCore import QThread, Signal
-
-class SCDParseWorker(QThread):
+class SCDParseWorker(Worker):
     """Worker to parse SCD file in background thread."""
-    progress = Signal(str, int) # message, percent
-    finished_parsing = Signal(list, str) # result (list of ieds), error_msg (if any)
+    # Events: progress(msg, percent), finished_parsing(ieds, error_msg)
     
     def __init__(self, file_path):
         super().__init__()
@@ -69,40 +72,36 @@ class SCDParseWorker(QThread):
 
     def run(self):
         try:
-            self.progress.emit("Reading SCD file...", 10)
+            self.emit("progress", "Reading SCD file...", 10)
             
-            # Heavy import moved here to ensure it runs in thread if not already loaded
+            # Helper to defer import
             from src.core.scd_parser import SCDParser
             
-            self.progress.emit("Parsing XML structure...", 30)
+            self.emit("progress", "Parsing XML structure...", 30)
             parser = SCDParser(self.file_path)
             
             if parser.root is None:
-                self.finished_parsing.emit([], "Failed to parse XML root.")
+                self.emit("finished_parsing", [], "Failed to parse XML root.")
                 return
 
-            self.progress.emit("Extracting IED information...", 60)
+            self.emit("progress", "Extracting IED information...", 60)
             ieds = parser.extract_ieds_info()
             
-            self.progress.emit("Finalizing...", 90)
-            self.finished_parsing.emit(ieds, "")
+            self.emit("progress", "Finalizing...", 90)
+            self.emit("finished_parsing", ieds, "")
             
         except Exception as e:
-            self.finished_parsing.emit([], str(e))
+            self.emit("finished_parsing", [], str(e))
 
-class BulkReadWorker:
+class BulkReadWorker(Worker):
     """Worker to read multiple signals in a background thread."""
     def __init__(self, device_manager, device_name, signals):
+        super().__init__()
         self.device_manager = device_manager
         self.device_name = device_name
         self.signals_to_read = signals
-        self.signals = WorkerSignals()
 
     def run(self):
-        import time
-        import logging
-        logger = logging.getLogger(__name__)
-
         for sig in self.signals_to_read:
             try:
                 # read_signal will enqueue to IEC worker if available (non-blocking)
@@ -116,26 +115,19 @@ class BulkReadWorker:
                 logger.warning(f"BulkReadWorker error for {self.device_name}: {e}")
                 
                 # IMPORTANT: Update signal state on error so UI knows it failed
-                sig.quality = "Invalid" # Or SignalQuality.INVALID if we could import it
+                sig.quality = "Invalid"
                 sig.error = str(e)
                 # We need to trigger update in DeviceManager to refresh UI
                 # self.device_manager.update_signal(self.device_manager, sig) # Hypothetical
                 
-        self.signals.finished.emit()
+        self.emit("finished")
 
-import queue
-import traceback
-from PySide6.QtCore import Slot
-
-class IEC61850Worker(QObject):
+class IEC61850Worker(Worker):
     """
     Dedicated Worker for IEC 61850 operations (Read/Write/Control).
-    Uses a thread-safe queue to process requests sequentially off the GUI thread.
-    Emits `data_ready` as (device_name, Signal)
+    Uses a thread-safe queue to process requests sequentially off the main thread.
+    Events: data_ready(device_name, Signal), error(msg), finished()
     """
-    data_ready = Signal(str, object)   # device_name, Signal
-    error = Signal(str)
-    finished = Signal()
 
     def __init__(self, iec_client, device_name: str):
         super().__init__()
@@ -144,7 +136,6 @@ class IEC61850Worker(QObject):
         self._queue = queue.Queue()
         self._running = True
 
-    @Slot()
     def run(self):
         while self._running:
             try:
@@ -172,11 +163,9 @@ class IEC61850Worker(QObject):
                             updated = signal
                         else:
                             updated = signal
-
-                    # Adapter implementations typically call the protocol data callback
-                    # via BaseProtocol._emit_update(signal). Avoid duplicating the update
-                    # here to prevent double-emits. If an adapter does not call back,
-                    # the AppController can be extended to listen to this signal.
+                    
+                    # We can emit data_ready if needed, but usually the adapter calls back.
+                    # self.emit("data_ready", self._device_name, updated)
 
                 elif action == "write":
                     signal = task.get('signal')
@@ -189,15 +178,36 @@ class IEC61850Worker(QObject):
                 elif action == "control":
                     signal = task.get('signal')
                     value = task.get('value')
+                    params = task.get('params') # Extract params
+                    
                     # Prefer operate API
                     if hasattr(self._client, 'operate'):
-                        self._client.operate(signal, value)
+                        # Pass params if supported
+                        import inspect
+                        sig = inspect.signature(self._client.operate)
+                        if 'params' in sig.parameters:
+                            self._client.operate(signal, value, params=params)
+                        else:
+                            self._client.operate(signal, value)
+                            
                     elif hasattr(self._client, 'write_signal'):
                         # Try write as fallback
                         self._client.write_signal(signal, value)
 
+                elif action == "select":
+                    signal = task.get('signal')
+                    params = task.get('params')
+                    if hasattr(self._client, 'select'):
+                        # Pass params if supported
+                        import inspect
+                        sig = inspect.signature(self._client.select)
+                        if 'params' in sig.parameters:
+                            self._client.select(signal, params=params)
+                        else:
+                            self._client.select(signal)
+
             except Exception as e:
-                self.error.emit(str(e))
+                self.emit("error", str(e))
                 traceback.print_exc()
 
     def enqueue(self, task: dict):
@@ -205,4 +215,52 @@ class IEC61850Worker(QObject):
 
     def stop(self):
         self._running = False
-        self.finished.emit()
+        self.emit("finished")
+
+class ModbusWorker(Worker):
+    """
+    Dedicated Worker for Modbus operations (Read/Write).
+    Handles blocking PyModbus calls in a background thread.
+    Events: data_ready(device_name, Signal), error(str), finished()
+    """
+
+    def __init__(self, modbus_client, device_name: str):
+        super().__init__()
+        self._client = modbus_client
+        self._device_name = device_name
+        self._queue = queue.Queue()
+        self._running = True
+
+    def run(self):
+        while self._running:
+            try:
+                task = self._queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+
+            try:
+                action = task.get("action")
+                signal = task.get('signal')
+                
+                if not signal:
+                    continue
+
+                if action == "read":
+                    if hasattr(self._client, 'read_signal'):
+                        updated = self._client.read_signal(signal)
+                        # read_signal usually emits update via base protocol
+                        
+                elif action == "write":
+                    value = task.get('value')
+                    if hasattr(self._client, 'write_signal'):
+                        self._client.write_signal(signal, value)
+
+            except Exception as e:
+                self.emit("error", str(e))
+
+    def enqueue(self, task: dict):
+        self._queue.put(task)
+
+    def stop(self):
+        self._running = False
+        self.emit("finished")

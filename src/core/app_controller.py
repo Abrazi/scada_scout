@@ -3,6 +3,7 @@ from PySide6.QtCore import QObject, Slot
 
 from src.core.device_manager import DeviceManager
 from src.core.update_engine import UpdateEngine
+from src.core.watch_list_manager import WatchListManager
 from src.models.device_models import DeviceConfig, DeviceType
 from src.ui.widgets.event_log_widget import EventLogger
 
@@ -18,9 +19,7 @@ class AppController(QObject):
         self.device_manager = device_manager
         self.update_engine = UpdateEngine(interval_ms=1000)
         self.event_logger = EventLogger()
-        # Per-device IEC worker/thread mappings
-        self.iec_threads = {}
-        self.iec_workers = {}
+        self.watch_list_manager = WatchListManager(self.device_manager)
         
         # Connect event logger to device manager
         self.device_manager.event_logger = self.event_logger
@@ -31,50 +30,13 @@ class AppController(QObject):
         self.device_manager.device_status_changed.connect(self._on_device_status_changed)
 
     def init_iec_worker(self, iec_client, device_name: str):
-        """Initialize the dedicated IEC 61850 worker thread for a specific device."""
-        from PySide6.QtCore import QThread
-        from src.core.workers import IEC61850Worker
-        # If already initialized for this device, ignore
-        if device_name in self.iec_threads and self.iec_threads[device_name].isRunning():
-            return
-
-        thread = QThread()
-        worker = IEC61850Worker(iec_client, device_name)
-        worker.moveToThread(thread)
-
-        thread.started.connect(worker.run)
-        worker.data_ready.connect(self._on_iec_data)
-        worker.error.connect(self._log_worker_error)
-
-        # Store mappings
-        self.iec_threads[device_name] = thread
-        self.iec_workers[device_name] = worker
-
-        # Expose to DeviceManager for enqueuing
-        if not hasattr(self.device_manager, 'iec_workers'):
-            self.device_manager.iec_workers = {}
-        self.device_manager.iec_workers[device_name] = worker
-
-        thread.start()
-        logger.info(f"IEC 61850 Worker thread initialized for {device_name}.")
+        """Deprecated: Worker management moved to DeviceManager."""
+        pass
 
     def _on_device_status_changed(self, device_name: str, connected: bool):
         """When a device connects, create the IEC worker for it if appropriate."""
-        try:
-            if not connected:
-                return
-
-            # Get protocol adapter
-            proto = self.device_manager.get_or_create_protocol(device_name)
-            if not proto:
-                return
-
-            # Only create worker for IEC61850Adapter instances
-            from src.protocols.iec61850.adapter import IEC61850Adapter
-            if isinstance(proto, IEC61850Adapter):
-                self.init_iec_worker(proto, device_name)
-        except Exception as e:
-            logger.debug(f"_on_device_status_changed error: {e}")
+        # Worker creation is now handled by DeviceManager.connect_device
+        pass
 
     @Slot(str, object)
     def _on_iec_data(self, ref, value):
@@ -120,7 +82,9 @@ class AppController(QObject):
 
         def _poll():
             try:
-                self.device_manager.poll_devices()
+                # self.device_manager.poll_devices() # DISABLED: Optimization
+                # Polling is now handled by self.watch_list_manager's internal timer
+                pass
             except Exception as e:
                 logger.error(f"Background poll error: {e}")
 
@@ -129,20 +93,22 @@ class AppController(QObject):
 
     def shutdown(self):
         """Gracefully stop background IEC workers and threads."""
-        logger.info("Shutting down IEC workers...")
-        try:
-            for name, worker in list(self.iec_workers.items()):
-                try:
-                    worker.stop()
-                except Exception:
-                    pass
+        logger.info("Shutting down application...")
 
-            for name, thread in list(self.iec_threads.items()):
-                try:
-                    # Ask thread to quit and wait briefly
-                    thread.quit()
-                    thread.wait(500)
-                except Exception:
-                    pass
-        except Exception as e:
-            logger.debug(f"Error during shutdown: {e}")
+        # Stop data pump first to prevent new polls
+        if self.update_engine:
+            self.update_engine.stop()
+
+        # Wait for any active polling thread
+        if hasattr(self, '_poll_thread') and self._poll_thread and self._poll_thread.is_alive():
+            try:
+                self._poll_thread.join(timeout=1.0)
+            except Exception:
+                pass
+
+        if hasattr(self.device_manager, 'clear_all_devices'):
+            self.device_manager.clear_all_devices()
+            
+        # logger.info("Shutting down IEC workers...")
+        # Legacy cleanup - can be removed if strictly using DeviceManager
+

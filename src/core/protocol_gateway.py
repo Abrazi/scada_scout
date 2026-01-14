@@ -4,7 +4,7 @@ Bridges data between different SCADA protocols
 Example: Read from IEC 61850 device and expose as Modbus slave
 """
 import logging
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 from PySide6.QtCore import QObject, Signal as QtSignal, QTimer
 
@@ -25,7 +25,8 @@ class GatewayMapping:
 
 class ProtocolGateway(QObject):
     """
-    Bridges protocols by reading from one device and writing to Modbus slave
+    Bridges protocols by listening to device updates and writing to Modbus slave.
+    Event-driven architecture: Listens to DeviceManager.signal_updated.
     """
     
     mapping_updated = QtSignal(str)  # mapping_id
@@ -38,16 +39,21 @@ class ProtocolGateway(QObject):
         self.event_logger = event_logger
         
         self.mappings: Dict[str, GatewayMapping] = {}
-        self.update_timer = QTimer()
-        self.update_timer.timeout.connect(self._update_all_mappings)
-        self.update_interval = 1000  # 1 second default
-        
         self.enabled = False
-    
+        
+        # Cache for fast lookup: (source_device, source_signal) -> list[mapping_id]
+        self._lookup_cache: Dict[Tuple[str, str], List[str]] = {}
+
     def add_mapping(self, mapping: GatewayMapping) -> str:
         """Add a new gateway mapping"""
         mapping_id = f"{mapping.source_device}::{mapping.source_signal_address}->MB:{mapping.dest_address}"
         self.mappings[mapping_id] = mapping
+        
+        # Update cache
+        key = (mapping.source_device, mapping.source_signal_address)
+        if key not in self._lookup_cache:
+            self._lookup_cache[key] = []
+        self._lookup_cache[key].append(mapping_id)
         
         if self.event_logger:
             self.event_logger.info("Gateway", f"Added mapping: {mapping_id}")
@@ -57,6 +63,16 @@ class ProtocolGateway(QObject):
     def remove_mapping(self, mapping_id: str):
         """Remove a gateway mapping"""
         if mapping_id in self.mappings:
+            mapping = self.mappings[mapping_id]
+            
+            # Remove from cache
+            key = (mapping.source_device, mapping.source_signal_address)
+            if key in self._lookup_cache:
+                if mapping_id in self._lookup_cache[key]:
+                    self._lookup_cache[key].remove(mapping_id)
+                if not self._lookup_cache[key]:
+                    del self._lookup_cache[key]
+
             del self.mappings[mapping_id]
             
             if self.event_logger:
@@ -69,57 +85,47 @@ class ProtocolGateway(QObject):
             self.error_occurred.emit("Modbus slave server must be running")
             return False
         
-        self.enabled = True
-        self.update_timer.start(self.update_interval)
-        
-        if self.event_logger:
-            self.event_logger.info("Gateway", f"Started with {len(self.mappings)} mappings")
+        if not self.enabled:
+            self.device_manager.signal_updated.connect(self._on_signal_updated)
+            self.enabled = True
+            
+            if self.event_logger:
+                self.event_logger.info("Gateway", f"Started with {len(self.mappings)} mappings")
         
         return True
     
     def stop(self):
         """Stop gateway operation"""
-        self.enabled = False
-        self.update_timer.stop()
+        if self.enabled:
+            try:
+                self.device_manager.signal_updated.disconnect(self._on_signal_updated)
+            except Exception:
+                pass
+            self.enabled = False
         
         if self.event_logger:
             self.event_logger.info("Gateway", "Stopped")
-    
-    def set_update_interval(self, interval_ms: int):
-        """Set update interval in milliseconds"""
-        self.update_interval = max(100, interval_ms)
+            
+    def _on_signal_updated(self, device_name: str, signal):
+        """Handle signal update events from DeviceManager"""
+        if not self.enabled:
+            return
+            
+        key = (device_name, signal.address)
+        ids = self._lookup_cache.get(key)
         
-        if self.update_timer.isActive():
-            self.update_timer.stop()
-            self.update_timer.start(self.update_interval)
-    
-    def _update_all_mappings(self):
-        """Update all enabled mappings"""
-        for mapping_id, mapping in self.mappings.items():
-            if mapping.enabled:
-                self._update_single_mapping(mapping_id, mapping)
-    
-    def _update_single_mapping(self, mapping_id: str, mapping: GatewayMapping):
-        """Update a single mapping"""
+        if ids:
+            for mapping_id in ids:
+                mapping = self.mappings.get(mapping_id)
+                if mapping and mapping.enabled:
+                    self._process_mapping(mapping_id, mapping, signal.value)
+
+    def _process_mapping(self, mapping_id: str, mapping: GatewayMapping, value):
+        """Process a single mapping update"""
         try:
-            # Get source device
-            device = self.device_manager.get_device(mapping.source_device)
-            if not device or not device.connected:
+            if value is None:
                 return
-            
-            # Find signal in device tree
-            signal = self._find_signal(device, mapping.source_signal_address)
-            if not signal:
-                return
-            
-            # Read current value
-            updated_signal = self.device_manager.read_signal(mapping.source_device, signal)
-            if not updated_signal or updated_signal.value is None:
-                return
-            
-            # Apply transformation
-            value = updated_signal.value
-            
+
             # Convert to numeric if needed
             if isinstance(value, bool):
                 value = 1 if value else 0
@@ -127,7 +133,7 @@ class ProtocolGateway(QObject):
                 try:
                     value = float(value)
                 except (ValueError, TypeError):
-                    logger.warning(f"Could not convert value '{value}' to float")
+                    # logger.warning(f"Could not convert value '{value}' to float")
                     return
             
             # Apply scale and offset
@@ -147,29 +153,17 @@ class ProtocolGateway(QObject):
             
         except Exception as e:
             logger.debug(f"Gateway mapping error ({mapping_id}): {e}")
+            
+    # Polling methods removed as they are no longer needed
+    
+    def set_update_interval(self, interval_ms: int):
+        """Legacy method for compatibility, no-op in event-driven mode"""
+        pass
     
     def _find_signal(self, device, address: str):
-        """Find signal by address in device tree"""
-        if not device.root_node:
-            return None
-        
-        return self._find_signal_recursive(device.root_node, address)
-    
-    def _find_signal_recursive(self, node, address: str):
-        """Recursively search for signal"""
-        # Check signals in current node
-        for signal in node.signals:
-            if signal.address == address:
-                return signal
-        
-        # Check children
-        for child in node.children:
-            found = self._find_signal_recursive(child, address)
-            if found:
-                return found
-        
-        return None
-    
+        """Legacy helper"""
+        pass
+
     def get_mapping_status(self, mapping_id: str) -> Dict:
         """Get status of a specific mapping"""
         if mapping_id not in self.mappings:
@@ -195,7 +189,7 @@ class ProtocolGateway(QObject):
             elif mapping.dest_register_type == "coils":
                 status['last_value'] = self.modbus_slave.read_coil(mapping.dest_address)
         except Exception as e:
-            logger.debug(f"Error reading status for mapping {mapping.name}: {e}")
+            logger.debug(f"Error reading status for mapping {mapping.source_signal_address}: {e}")
         
         return status
     

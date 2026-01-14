@@ -1,20 +1,19 @@
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
     QPushButton, QComboBox, QDoubleSpinBox, QSpinBox, 
-    QMessageBox, QWidget, QGroupBox, QFormLayout
+    QMessageBox, QWidget, QGroupBox, QFormLayout, QCheckBox,
+    QLineEdit, QDateTimeEdit
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QDateTime
 import logging
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
 class ControlDialog(QDialog):
     """
     Advanced Control Dialog for IEC 61850.
-    Supports:
-    - SBO (Select-Before-Operate) vs Direct Operate detection
-    - Different value types (Boolean, Integer, Float)
-    - Command Termination feedback
+    Matches the design of SboWriteDialog.cs.
     """
     def __init__(self, device_name, signal, device_manager, parent=None):
         super().__init__(parent)
@@ -22,142 +21,303 @@ class ControlDialog(QDialog):
         self.signal = signal
         self.device_manager = device_manager
         
-        self.setWindowTitle(f"Control: {signal.name}")
-        self.resize(400, 300)
+        self.setWindowTitle("IEC 61850 Control Operation")
+        self.resize(700, 720) # Match C# size
         
         self.is_sbo = False
         self.selected = False
+        self.detected_control_model = -1
         
         self._setup_ui()
+        
+        # Auto-detect on open
         self._detect_control_model()
+        self._load_current_value()
 
     def _setup_ui(self):
-        layout = QVBoxLayout(self)
+        main_layout = QVBoxLayout(self)
         
-        # Info Group
-        info_group = QGroupBox("Signal Information")
-        form = QFormLayout(info_group)
-        form.addRow("Name:", QLabel(self.signal.name))
-        form.addRow("Address:", QLabel(self.signal.address))
-        layout.addWidget(info_group)
+        # --- 1. Reference Information ---
+        info_group = QGroupBox("Reference Information")
+        info_layout = QFormLayout(info_group)
         
-        # Control Input Group
-        input_group = QGroupBox("Control Value")
-        input_layout = QVBoxLayout(input_group)
+        # Extract Object Reference (DO)
+        self.obj_ref = self.signal.address
+        if "." in self.obj_ref:
+            parts = self.obj_ref.split('.')
+            if len(parts) > 1:
+                # Basic heuristic to get DO path
+                # Remove last part if it looks like an attribute (stVal, ctlVal etc)
+                last = parts[-1]
+                if last in ["ctlVal", "Oper", "SBO", "SBOw", "Cancel", "stVal", "q", "t"]:
+                   self.obj_ref = ".".join(parts[:-1])
         
-        # Determine input type based on signal type or inference
-        # If it's a BO (Boolean), use Combo (True/False)
-        # If Float, use DoubleSpinBox
-        # If Int, use SpinBox
-        # Default to Int if unknown
+        self.lbl_ref = QLabel(self.obj_ref)
+        self.lbl_ref.setStyleSheet("font-weight: bold")
+        info_layout.addRow("Control Object:", self.lbl_ref)
         
+        self.lbl_full_ref = QLabel(self.signal.address)
+        info_layout.addRow("Full Reference:", self.lbl_full_ref)
+        
+        fc = getattr(self.signal, 'description', '')
+        self.lbl_fc = QLabel(fc if fc else "FC=CO (Assumed)")
+        info_layout.addRow("Functional Constraint:", self.lbl_fc)
+        
+        main_layout.addWidget(info_group)
+        
+        # --- 2. Control Model & Status ---
+        model_group = QGroupBox("Control Model & Current Status")
+        model_layout = QFormLayout(model_group)
+        
+        # Control Model Row
+        model_row = QHBoxLayout()
+        self.txt_control_model = QLineEdit()
+        self.txt_control_model.setReadOnly(True)
+        self.txt_control_model.setStyleSheet("background-color: lightgray")
+        model_row.addWidget(self.txt_control_model)
+        
+        self.btn_read_model = QPushButton("Read Model")
+        self.btn_read_model.clicked.connect(self._detect_control_model)
+        model_row.addWidget(self.btn_read_model)
+        model_layout.addRow("Control Model:", model_row)
+        
+        # Current Value Row
+        val_row = QHBoxLayout()
+        self.lbl_current_val = QLabel("Reading...")
+        self.lbl_current_val.setStyleSheet("color: blue")
+        val_row.addWidget(self.lbl_current_val)
+        
+        self.btn_refresh = QPushButton("Refresh")
+        self.btn_refresh.clicked.connect(self._load_current_value)
+        val_row.addWidget(self.btn_refresh)
+        model_layout.addRow("Current Status Value:", val_row)
+        
+        main_layout.addWidget(model_group)
+        
+        # --- 3. Control Parameters ---
+        params_group = QGroupBox("Control Parameters")
+        params_layout = QVBoxLayout(params_group)
+        form_params = QFormLayout()
+        
+        # Value Input
         self.input_widget = None
-        # Heuristic: Check type string or address
         sig_type = str(self.signal.signal_type).upper() if self.signal.signal_type else ""
         
-        if "BOOL" in sig_type or "SPC" in self.signal.address: # SPC = Single Point Control
+        # Determine Input Widget
+        if "BOOL" in sig_type or "SPC" in self.signal.address or "ctlVal" in self.signal.name: 
             self.input_widget = QComboBox()
-            self.input_widget.addItems(["False (Off)", "True (On)"])
-            # Default to False
+            self.input_widget.addItems(["False (0) (Off)", "True (1) (On)"])
         elif "FLOAT" in sig_type:
             self.input_widget = QDoubleSpinBox()
             self.input_widget.setRange(-1e9, 1e9)
             self.input_widget.setDecimals(4)
         else:
             self.input_widget = QSpinBox()
-            self.input_widget.setRange(-1000000, 1000000)
+            self.input_widget.setRange(-2147483648, 2147483647)
             
-        input_layout.addWidget(self.input_widget)
-        layout.addWidget(input_group)
+        form_params.addRow("Control Value (ctlVal):", self.input_widget)
+        params_layout.addLayout(form_params)
         
-        # Status Label
-        self.lbl_status = QLabel("Status: Idle")
-        self.lbl_status.setStyleSheet("font-weight: bold; color: gray;")
-        self.lbl_status.setAlignment(Qt.AlignCenter)
-        layout.addWidget(self.lbl_status)
+        # Checkboxes
+        self.chk_test = QCheckBox("Test Mode (test=TRUE) - Command will not affect equipment")
+        params_layout.addWidget(self.chk_test)
         
-        # Buttons
+        self.chk_interlock = QCheckBox("Interlock Check - Verify interlocking conditions")
+        params_layout.addWidget(self.chk_interlock)
+        
+        self.chk_synchro = QCheckBox("Synchro Check - Verify synchronization conditions")
+        params_layout.addWidget(self.chk_synchro)
+        
+        # Control Number & Timestamp
+        form_extras = QFormLayout()
+        
+        self.num_ctl_num = QSpinBox()
+        self.num_ctl_num.setRange(0, 255)
+        form_extras.addRow("Control Number (ctlNum):", self.num_ctl_num)
+        
+        # Timestamp
+        ts_layout = QHBoxLayout()
+        self.chk_use_ts = QCheckBox("Use Timestamp (T):")
+        self.chk_use_ts.toggled.connect(lambda c: self.dt_ts.setEnabled(c))
+        ts_layout.addWidget(self.chk_use_ts)
+        
+        self.dt_ts = QDateTimeEdit(QDateTime.currentDateTime())
+        self.dt_ts.setDisplayFormat("yyyy-MM-dd HH:mm:ss.zzz")
+        self.dt_ts.setEnabled(False)
+        ts_layout.addWidget(self.dt_ts)
+        
+        form_extras.addRow(ts_layout)
+        params_layout.addLayout(form_extras)
+        
+        main_layout.addWidget(params_group)
+        
+        # --- 4. Originator Information ---
+        origin_group = QGroupBox("Origin (Originator Information)")
+        origin_layout = QFormLayout(origin_group)
+        
+        self.cmb_origin_cat = QComboBox()
+        self.cmb_origin_cat.addItems([
+            "0 - Not supported", "1 - Bay control", "2 - Station control", 
+            "3 - Remote control", "4 - Automatic bay", "5 - Automatic station", 
+            "6 - Automatic remote", "7 - Maintenance", "8 - Process"
+        ])
+        self.cmb_origin_cat.setCurrentIndex(2) # Default Station Control
+        origin_layout.addRow("Originator Category:", self.cmb_origin_cat)
+        
+        self.txt_origin_ident = QLineEdit("Station")
+        origin_layout.addRow("Originator Identity:", self.txt_origin_ident)
+        
+        main_layout.addWidget(origin_group)
+        
+        # --- 5. Status & Actions ---
+        status_group = QGroupBox("Operation Status")
+        status_layout = QVBoxLayout(status_group)
+        
+        self.lbl_status = QLabel("Ready. Please read control model first.")
+        self.lbl_status.setWordWrap(True)
+        self.lbl_status.setStyleSheet("font-size: 14px; padding: 5px;")
+        status_layout.addWidget(self.lbl_status)
+        
+        main_layout.addWidget(status_group)
+        
+        # Action Buttons
         btn_layout = QHBoxLayout()
         
-        self.btn_select = QPushButton("Select")
+        self.btn_select = QPushButton("1. Select (SBO)")
+        self.btn_select.setFixedHeight(40)
         self.btn_select.clicked.connect(self._on_select)
-        self.btn_select.setEnabled(False) # Enabled only if SBO detected
+        self.btn_select.setEnabled(False)
         
-        self.btn_operate = QPushButton("Operate")
+        self.btn_operate = QPushButton("2. Operate")
+        self.btn_operate.setFixedHeight(40)
         self.btn_operate.clicked.connect(self._on_operate)
-        self.btn_operate.setEnabled(False) # Enabled after Select (if SBO) or always (if Direct)
+        self.btn_operate.setEnabled(False)
+        
+        self.btn_direct = QPushButton("Direct Control")
+        self.btn_direct.setFixedHeight(40)
+        self.btn_direct.clicked.connect(self._on_direct)
+        self.btn_direct.setEnabled(False)
         
         self.btn_cancel = QPushButton("Cancel")
-        self.btn_cancel.clicked.connect(self._on_cancel)
-        self.btn_cancel.setEnabled(False)
-        
-        self.btn_close = QPushButton("Close")
-        self.btn_close.clicked.connect(self.reject)
+        self.btn_cancel.setFixedHeight(40)
+        self.btn_cancel.clicked.connect(self._on_cancel) # Close dialog or IEC Cancel?
+        # The C# "Cancel" button closes the dialog. 
+        # But we also need an IEC Cancel operation potentially?
+        # C# "Cancel" is DialogResult.Cancel (close).
+        # We can add a separate "Abort Selection" button if SBO.
         
         btn_layout.addWidget(self.btn_select)
         btn_layout.addWidget(self.btn_operate)
-        btn_layout.addWidget(self.btn_cancel)
+        btn_layout.addWidget(self.btn_direct)
         btn_layout.addStretch()
-        btn_layout.addWidget(self.btn_close)
+        btn_layout.addWidget(self.btn_cancel)
         
-        layout.addLayout(btn_layout)
+        main_layout.addLayout(btn_layout)
+
+    def _get_adapter(self):
+        return self.device_manager.get_or_create_protocol(self.device_name)
 
     def _detect_control_model(self):
-        """Check ctlModel to enable/disable buttons."""
-        self.lbl_status.setText("Checking Control Model...")
+        """Read ctlModel from device."""
+        self.lbl_status.setText("Reading control model...")
+        self.lbl_status.setStyleSheet("color: blue")
         
-        # We need to access the adapter to read ctlModel.
-        # This is a bit hacky via device_manager but standard pattern here.
-        # Acquire protocol adapter from DeviceManager (may create or return existing)
-        adapter = self.device_manager.get_or_create_protocol(self.device_name)
-        if not adapter:
-            self.lbl_status.setText("Error: Device or adapter not available")
-            return
-
-        # Use the adapter's internal helper if possible, or just assume based on response
-        # We'll try to use the public API if we exposed it, otherwise rely on attributes
-        # Since we just added _read_ctl_model to adapter, we can't easily call it directly 
-        # unless we expose it publicly. 
-        # But wait, we didn't expose it in adapter.py as public.
-        # Let's try to assume Direct first, but if the adapter supports SBO, it handles it?
-        # Ideally this dialog *controls* the SBO flow.
-        
-        # For now, let's enable Select only if we think it's SBO.
-        # How to know? 
-        # 1. Read .ctlModel
-        # 2. Or assume SBO if explicitly requested?
-        
-        # Let's try to read it using the device manager's read if we can specifically target ctlModel
-        # But that's async usually.
-        # Let's assume Direct for UI initially, but allow Select if user wants?
-        # Better: let's try to read it.
-        
-        # NOTE: In a real app, this should be async. blocking for now for simplicity.
         try:
-            ctl_model = None
-            # Adapter may expose a helper to read ctlModel; try it if present
-            if hasattr(adapter, '_read_ctl_model'):
-                try:
-                    ctl_model = adapter._read_ctl_model(self.signal.address)
-                except Exception:
-                    ctl_model = None
+            adapter = self._get_adapter()
+            if not adapter:
+                self.lbl_status.setText("Error: No connection")
+                return
 
-            if isinstance(ctl_model, int):
-                self.is_sbo = ctl_model in (2, 4)
+            if hasattr(adapter, 'read_ctl_model'):
+                model = adapter.read_ctl_model(self.obj_ref)
+                self.detected_control_model = model
+                
+                names = {
+                    0: "Status Only (0)",
+                    1: "Direct Normal (1)",
+                    2: "SBO Normal (2)",
+                    3: "Direct Enhanced (3)",
+                    4: "SBO Enhanced (4)"
+                }
+                name = names.get(model, f"Unknown ({model})")
+                self.txt_control_model.setText(name)
+                
+                if model in [0]:
+                    self.txt_control_model.setStyleSheet("background-color: #ffcccc") # Red
+                else:
+                    self.txt_control_model.setStyleSheet("background-color: #ccffcc") # Green
+                
+                self._update_button_states()
+                self.lbl_status.setText(f"Control model detected: {name}")
+                self.lbl_status.setStyleSheet("color: green")
             else:
-                # Fallback: allow operate and enable select conservatively
-                self.is_sbo = True
+                self.lbl_status.setText("Error: Adapter does not support model detection")
 
-            self.btn_select.setEnabled(self.is_sbo)
-            self.btn_operate.setEnabled(True)
-            self.lbl_status.setText("Ready")
         except Exception as e:
-            logger.debug(f"Error detecting model: {e}")
+            self.lbl_status.setText(f"Error reading model: {e}")
+            self.lbl_status.setStyleSheet("color: red")
+
+    def _update_button_states(self):
+        model = self.detected_control_model
+        is_sbo = model in [2, 4]
+        is_direct = model in [1, 3]
+        
+        self.btn_select.setEnabled(is_sbo and not self.selected)
+        self.btn_operate.setEnabled(is_sbo and self.selected)
+        self.btn_direct.setEnabled(is_direct)
+        
+        if is_sbo:
+            if self.selected:
+                self.lbl_status.setText("Selection Successful. Ready to Operate.")
+            else:
+                self.lbl_status.setText("SBO Mode: Please Select first.")
+        elif is_direct:
+            self.lbl_status.setText("Direct Control Mode. Ready.")
+        elif model == 0:
+            self.lbl_status.setText("Status Only - Control not allowed.")
+
+    def _load_current_value(self):
+        try:
+            adapter = self._get_adapter()
+            if adapter:
+                # Determine stVal path
+                # obj_ref is DO path. stVal is usually DO.stVal
+                # But for some signals it might be different.
+                # Let's try to construct it.
+                st_path = f"{self.obj_ref}.stVal"
+                
+                # We need to do a manual read.
+                # Using lower level read if possible or create a dummy signal
+                from src.models.device_models import Signal
+                dummy = Signal(name="stVal", address=st_path)
+                res = adapter.read_signal(dummy)
+                
+                if res.value is not None:
+                    self.lbl_current_val.setText(str(res.value))
+                    self.lbl_current_val.setStyleSheet("color: blue")
+                else:
+                    self.lbl_current_val.setText("NULL (Read Failed)")
+                    self.lbl_current_val.setStyleSheet("color: red")
+        except Exception as e:
+            self.lbl_current_val.setText(str(e))
+
+    def _get_params(self):
+        params = {}
+        # Originator
+        params['originator_category'] = self.cmb_origin_cat.currentIndex()
+        params['originator_identity'] = self.txt_origin_ident.text()
+        
+        # Checks
+        params['interlock_check'] = self.chk_interlock.isChecked()
+        params['synchro_check'] = self.chk_synchro.isChecked()
+        params['test'] = self.chk_test.isChecked()
+        
+        return params
 
     def _get_value(self):
         if isinstance(self.input_widget, QComboBox):
-            return self.input_widget.currentIndex() == 1 # 0=False, 1=True
-        elif isinstance(self.input_widget, QDoubleSpinBox) or isinstance(self.input_widget, QSpinBox):
+            return self.input_widget.currentIndex() == 1
+        elif isinstance(self.input_widget, (QSpinBox, QDoubleSpinBox)):
             return self.input_widget.value()
         return 0
 
@@ -165,66 +325,51 @@ class ControlDialog(QDialog):
         self.lbl_status.setText("Selecting...")
         self.lbl_status.setStyleSheet("color: blue")
         
-        val = self._get_value()
-        # Note: Select usually doesn't take value, but SBOw (with value) does.
-        # We'll assume simple Select for now, or use the adapter's select method.
-        
         try:
-            adapter = self.device_manager.get_or_create_protocol(self.device_name)
-            if not adapter or not hasattr(adapter, 'select'):
-                self.lbl_status.setText("Adapter does not support Select")
-                return
-
-            success = adapter.select(self.signal)
+            adapter = self._get_adapter()
+            params = self._get_params()
+            
+            success = adapter.select(self.signal, params=params)
+            
             if success:
                 self.selected = True
-                self.lbl_status.setText("Selected")
+                self.lbl_status.setText("SELECT Successful!")
                 self.lbl_status.setStyleSheet("color: green")
-                self.btn_select.setEnabled(False)
-                self.btn_operate.setEnabled(True)
-                self.btn_cancel.setEnabled(True)
+                self._update_button_states()
             else:
-                self.lbl_status.setText("Select Failed")
+                self.lbl_status.setText("SELECT Failed.")
                 self.lbl_status.setStyleSheet("color: red")
+                
         except Exception as e:
             self.lbl_status.setText(f"Error: {e}")
 
     def _on_operate(self):
         self.lbl_status.setText("Operating...")
-        val = self._get_value()
+        self.lbl_status.setStyleSheet("color: blue")
         
         try:
-            adapter = self.device_manager.get_or_create_protocol(self.device_name)
-            if not adapter or not hasattr(adapter, 'operate'):
-                raise RuntimeError("Adapter does not support Operate")
-
-            success = adapter.operate(self.signal, val)
-
+            adapter = self._get_adapter()
+            params = self._get_params()
+            val = self._get_value()
+            
+            success = adapter.operate(self.signal, val, params=params)
+            
             if success:
-                self.lbl_status.setText("Operate Command Sent")
+                self.lbl_status.setText("OPERATE Successful!")
                 self.lbl_status.setStyleSheet("color: green")
+                self.selected = False # Reset selection after operate
+                self._update_button_states()
+                self._load_current_value()
             else:
-                self.lbl_status.setText("Operate Failed")
+                self.lbl_status.setText("OPERATE Failed.")
                 self.lbl_status.setStyleSheet("color: red")
         except Exception as e:
-            self.lbl_status.setText(f"Operate Failed: {e}")
-            self.lbl_status.setStyleSheet("color: red")
+            self.lbl_status.setText(f"Error: {e}")
+
+    def _on_direct(self):
+        # Same as operate, but without selection check (adapter handles it)
+        self._on_operate()
 
     def _on_cancel(self):
-        self.lbl_status.setText("Cancelling...")
-        try:
-            adapter = self.device_manager.get_or_create_protocol(self.device_name)
-            if not adapter or not hasattr(adapter, 'cancel'):
-                self.lbl_status.setText("Adapter does not support Cancel")
-                return
-
-            success = adapter.cancel(self.signal)
-            if success:
-                self.lbl_status.setText("Cancelled")
-                self.selected = False
-                self.btn_select.setEnabled(True)
-                self.btn_cancel.setEnabled(False)
-            else:
-                self.lbl_status.setText("Cancel Failed")
-        except Exception as e:
-            self.lbl_status.setText(f"Error: {e}")
+        # Close dialog
+        self.reject()

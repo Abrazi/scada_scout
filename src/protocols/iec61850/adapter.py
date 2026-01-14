@@ -1111,10 +1111,19 @@ class IEC61850Adapter(BaseProtocol):
             
         return signal
 
-    def select(self, signal: Signal) -> bool:
+    def select(self, signal: Signal, params: Optional[Dict[str, Any]] = None) -> bool:
         """
         Select-Before-Operate (SBO).
         Uses ControlObjectClient for higher-level abstraction.
+        
+        Args:
+            signal: The signal to select.
+            params: Optional dict with keys:
+                - originator_category (int)
+                - originator_identity (str)
+                - interlock_check (bool)
+                - synchro_check (bool)
+                - test (bool)
         """
         if not self.connected:
             return False
@@ -1135,6 +1144,10 @@ class IEC61850Adapter(BaseProtocol):
                      self.event_logger.error("IEC61850", "Failed to create ControlObjectClient")
                  return False
             
+            # Apply parameters if provided
+            if params:
+                self._apply_control_params(client, params)
+            
             success = iec61850.ControlObjectClient_select(client)
             iec61850.ControlObjectClient_destroy(client)
             
@@ -1153,11 +1166,16 @@ class IEC61850Adapter(BaseProtocol):
                 self.event_logger.error("IEC61850", f"SELECT EXCEPTION: {e}")
             return False
 
-    def operate(self, signal: Signal, value: Any) -> bool:
+    def operate(self, signal: Signal, value: Any, params: Optional[Dict[str, Any]] = None) -> bool:
         """
         Operate (Control) on a signal.
         Supports Direct Operate and SBO Operate phases.
         Enforces ctlModel checks and handles Select logic if needed.
+        
+        Args:
+            signal: The signal to operate.
+            value: The value to write.
+            params: Optional dict for advanced control parameters.
         """
         object_ref = self._get_control_object_reference(signal.address)
         
@@ -1165,7 +1183,7 @@ class IEC61850Adapter(BaseProtocol):
         if object_ref and ("Oper" in signal.address or "ctlVal" in signal.address or getattr(signal, "access", "") == "RW"):
              
              # HARDENING: Check ctlModel
-             ctl_model = self._read_ctl_model(object_ref)
+             ctl_model = self.read_ctl_model(object_ref) # Use new public method
              is_sbo = ctl_model in [2, 4] # status-only=0, direct-normal=1, sbo-normal=2, direct-enhanced=3, sbo-enhanced=4
              
              if is_sbo:
@@ -1175,12 +1193,12 @@ class IEC61850Adapter(BaseProtocol):
                  if self.event_logger:
                      self.event_logger.transaction("IEC61850", f"Autodetected SBO Model ({ctl_model}). Performing Auto-Select.")
                  
-                 if not self.select(signal):
+                 if not self.select(signal, params=params):
                      if self.event_logger:
                          self.event_logger.error("IEC61850", "Auto-Select failed. Aborting Operate.")
                      return False
              
-             result = self._operate_control(object_ref, value, signal)
+             result = self._operate_control(object_ref, value, signal, params=params)
              
              if result:
                  # HARDENING: Immediate Refresh of status
@@ -1190,6 +1208,15 @@ class IEC61850Adapter(BaseProtocol):
              
         # Otherwise, fall back to direct DataAttribute write
         return self.write_signal(signal, value)
+
+    def read_ctl_model(self, object_ref: str) -> int:
+        """Public alias for _read_ctl_model for external use."""
+        # Check if object_ref is a full address (with attributes) or just the DO
+        # If it looks like a signal address, strip last part if needed
+        # But _read_ctl_model expects DO reference.
+        # Let's try to smart resolve?
+        # If input has no dots, it's likely wrong.
+        return self._read_ctl_model(object_ref)
 
     def _read_ctl_model(self, object_ref: str) -> int:
         """
@@ -1242,7 +1269,7 @@ class IEC61850Adapter(BaseProtocol):
         # Or if we have a callback?
         pass # TODO: Full injection requires finding the Signal instance.
 
-    def _operate_control(self, object_ref: str, value: Any, signal: Signal) -> bool:
+    def _operate_control(self, object_ref: str, value: Any, signal: Signal, params: Optional[Dict[str, Any]] = None) -> bool:
         """Handle standard IEC 61850 Control Model operation."""
         if self.event_logger:
             self.event_logger.transaction("IEC61850", f"→ OPERATE {object_ref} = {value}")
@@ -1261,7 +1288,13 @@ class IEC61850Adapter(BaseProtocol):
                 iec61850.ControlObjectClient_destroy(client)
                 return False
 
-            success = iec61850.ControlObjectClient_operate(client, mms_value, 0) # 0 = no test
+            # Apply parameters
+            if params:
+                self._apply_control_params(client, params)
+
+            test_flag = params.get('test', False) if params else False
+            
+            success = iec61850.ControlObjectClient_operate(client, mms_value, 1 if test_flag else 0)
             
             # Error handling if success is False
             # Can we get the LastApplError?
@@ -1284,6 +1317,27 @@ class IEC61850Adapter(BaseProtocol):
             if self.event_logger:
                 self.event_logger.error("IEC61850", f"OPERATE EXCEPTION: {e}")
             return False
+
+    def _apply_control_params(self, client, params):
+        """Helper to apply control parameters to the client."""
+        if not params: return
+
+        # Originator
+        if 'originator_category' in params or 'originator_identity' in params:
+             cat = params.get('originator_category', 0) # 0=NotSupported
+             ident = params.get('originator_identity', "Station")
+             iec61850.ControlObjectClient_setOriginator(client, cat, ident)
+        
+        # Checks
+        if 'interlock_check' in params:
+             iec61850.ControlObjectClient_setInterlockCheck(client, params['interlock_check'])
+             
+        if 'synchro_check' in params:
+             iec61850.ControlObjectClient_setSynchroCheck(client, params['synchro_check'])
+             
+        if 'test' in params:
+             # Some libs use setTestMode, others pass it to Operate args
+             iec61850.ControlObjectClient_setTestMode(client, params['test'])
 
     def write_signal(self, signal: Signal, value: Any) -> bool:
         """

@@ -710,7 +710,7 @@ def ControlObjectClient_operate(client, value, test_flag=False):
     Args:
         client: ControlObjectClient handle
         value: MmsValue to operate with (must match type)
-        test_flag: Boolean test flag
+        test_flag: Boolean test flag (0 or non-zero)
     
     Returns:
         bool: True if successful
@@ -718,8 +718,8 @@ def ControlObjectClient_operate(client, value, test_flag=False):
     _check_lib()
     func = _lib.ControlObjectClient_operate
     func.restype = c_bool
-    func.argtypes = [ControlObjectClient, MmsValue, c_int] # 3rd arg is usually 0 or test int
-    return bool(func(client, value, 0)) # simplified for now
+    func.argtypes = [ControlObjectClient, MmsValue, c_int] 
+    return bool(func(client, value, 1 if test_flag else 0))
 
 def ControlObjectClient_cancel(client):
     """
@@ -739,6 +739,61 @@ def ControlObjectClient_cancel(client):
         return bool(func(client))
     except AttributeError:
         # Some older versions might not have cancel
+        return False
+
+def ControlObjectClient_setOriginator(client, category, identity):
+    """
+    Set Originator information.
+    
+    Args:
+        client: ControlObjectClient handle
+        category: int (0=NotSupported, 1=Bay, 2=Station, 3=Remote, etc.)
+        identity: string identification
+    """
+    try:
+        _check_lib()
+        func = _lib.ControlObjectClient_setOriginator
+        func.restype = c_bool
+        func.argtypes = [ControlObjectClient, c_int, c_char_p]
+        return bool(func(client, category, _encode_str(identity)))
+    except AttributeError:
+        return False
+
+def ControlObjectClient_setInterlockCheck(client, value):
+    """Set Interlock Check flag."""
+    try:
+        _check_lib()
+        func = _lib.ControlObjectClient_setInterlockCheck
+        func.restype = None
+        func.argtypes = [ControlObjectClient, c_bool]
+        func(client, value)
+        return True
+    except AttributeError:
+        return False
+
+def ControlObjectClient_setSynchroCheck(client, value):
+    """Set Synchro Check flag."""
+    try:
+        _check_lib()
+        func = _lib.ControlObjectClient_setSynchroCheck
+        func.restype = None
+        func.argtypes = [ControlObjectClient, c_bool]
+        func(client, value)
+        return True
+    except AttributeError:
+        return False
+
+def ControlObjectClient_setTestMode(client, value):
+    """Set Test Mode (simulates test flag without using the Operate arg)."""
+    try:
+        _check_lib()
+        func = _lib.ControlObjectClient_setTestMode
+        func.restype = None
+        func.argtypes = [ControlObjectClient, c_bool]
+        func(client, value)
+        return True
+    except AttributeError:
+        # Fallback is to use the operate argument
         return False
 
 # ============================================================================
