@@ -13,6 +13,10 @@ class QtLogHandler(logging.Handler, QObject):
 
     def emit(self, record):
         try:
+            # Check if Qt object is still valid (not deleted during shutdown)
+            if not hasattr(self, 'new_record'):
+                return
+                
             msg = self.format(record)
             level = record.levelname
             source = record.name
@@ -26,5 +30,12 @@ class QtLogHandler(logging.Handler, QObject):
                 source = source.split(".")[-1]
                 
             self.new_record.emit(level, source, msg)
+        except RuntimeError:
+            # Qt object deleted, silently ignore
+            pass
         except Exception:
-            self.handleError(record)
+            # Only call handleError if we can safely do so
+            try:
+                self.handleError(record)
+            except:
+                pass

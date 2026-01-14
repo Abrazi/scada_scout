@@ -41,6 +41,10 @@ class WatchListManager(QObject):
         self._poll_timer = QTimer()
         self._poll_timer.timeout.connect(self._poll_all_signals)
         
+        # Connect to DeviceManager updates
+        if hasattr(self.device_manager, 'signal_updated'):
+             self.device_manager.signal_updated.connect(self._on_device_signal_updated)
+        
     def add_signal(self, device_name: str, signal: Signal):
         """Add a signal to the watch list."""
         watch_id = f"{device_name}::{signal.address}"
@@ -114,20 +118,24 @@ class WatchListManager(QObject):
                 )
                 
                 if updated_signal:
-                    # Update the stored signal
+                    # Sync Result (from cache or blocking read)
                     watched.signal = updated_signal
-                    # Emit update
                     self.signal_updated.emit(watch_id, updated_signal)
                 else:
-                    # If read_signal returns None, it means serious communication failure or device missing
-                    # Update quality to NOT_CONNECTED or INVALID if not already set by protocol
-                    if watched.signal.quality == SignalQuality.GOOD:
-                        watched.signal.quality = SignalQuality.NOT_CONNECTED
-                        watched.signal.value = None
-                        self.signal_updated.emit(watch_id, watched.signal)
+                    # Async read enqueued - DO NOT invalidate signal yet.
+                    # Wait for _on_device_signal_updated to handle the result
+                    pass
                     
             except Exception as e:
                 logger.debug(f"Failed to poll {watch_id}: {e}")
+
+    def _on_device_signal_updated(self, device_name: str, signal: Signal):
+        """Handle signal updates from DeviceManager (e.g. from async workers)."""
+        watch_id = f"{device_name}::{signal.address}"
+        if watch_id in self._watched_signals:
+            watched = self._watched_signals[watch_id]
+            watched.signal = signal
+            self.signal_updated.emit(watch_id, signal)
     
     def save_to_file(self, filepath: str):
         """Save watch list to JSON file."""

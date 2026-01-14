@@ -256,6 +256,22 @@ class ModbusWorker(Worker):
                         self._client.write_signal(signal, value)
 
             except Exception as e:
+                # If an error occurs that wasn't handled by the adapter (e.g. crash in worker logic),
+                # we must ensure the signal is marked as invalid and UI is notified.
+                if signal:
+                    signal.quality = "Invalid" # Using string enum match or object
+                    # Try to set SignalQuality enum if possible, else string
+                    try:
+                         from src.models.device_models import SignalQuality
+                         signal.quality = SignalQuality.INVALID
+                    except:
+                         pass
+                         
+                    signal.error = str(e)
+                    # Force emit update if client has the mechanism
+                    if hasattr(self._client, '_emit_update'):
+                        self._client._emit_update(signal)
+                    
                 self.emit("error", str(e))
 
     def enqueue(self, task: dict):

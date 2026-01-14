@@ -69,6 +69,10 @@ class DeviceManager(QObject):
     def get_device(self, device_name: str) -> Optional[Device]:
         return self._core.get_device(device_name)
 
+    def get_protocol(self, device_name: str):
+        """Get the protocol adapter for a device."""
+        return self._core.get_protocol(device_name)
+
     def load_offline_scd(self, device_name: str):
         return self._core.load_offline_scd(device_name)
 

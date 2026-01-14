@@ -43,7 +43,9 @@ class ControlObjectRuntime:
     # Selection parameters
     sbo_timeout: int = 10000 # Default MMS timeout in ms
     originator_cat: int = 2 # Station
+    originator_cat: int = 2 # Station
     originator_id: str = "ScadaScout"
+    sbo_reference: str = "" # Path to SBO or SBOw attribute
     
     def reset(self):
         self.state = ControlState.IDLE

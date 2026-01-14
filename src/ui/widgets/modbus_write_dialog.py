@@ -220,7 +220,7 @@ class ModbusWriteDialog(QDialog):
             return
         
         # Get protocol adapter
-        protocol = self.device_manager._protocols.get(self.device_name)
+        protocol = self.device_manager.get_protocol(self.device_name)
         if not protocol:
             QMessageBox.critical(self, "Error", "Device not connected")
             return

@@ -5,7 +5,7 @@ import threading
 from typing import List, Dict, Optional, Any
 
 from src.core.events import EventEmitter
-from src.models.device_models import Device, DeviceConfig, DeviceType, Node, Signal
+from src.models.device_models import Device, DeviceConfig, DeviceType, Node, Signal, SignalQuality
 from src.protocols.base_protocol import BaseProtocol
 
 logger = logging.getLogger(__name__)
@@ -38,6 +38,8 @@ class DeviceManagerCore(EventEmitter):
         # Instantiate protocol adapter
         protocol = self._create_protocol(config)
         if protocol:
+            # CRITICAL: Set callback immediately so updates are propagated
+            protocol.set_data_callback(lambda sig: self._on_signal_update(config.name, sig))
             self._protocols[config.name] = protocol
             
         logger.info(f"Device added: {config.name} ({config.device_type.value})")
@@ -147,6 +149,10 @@ class DeviceManagerCore(EventEmitter):
     def get_device(self, device_name: str) -> Optional[Device]:
         return self._devices.get(device_name)
 
+    def get_protocol(self, device_name: str) -> Optional[BaseProtocol]:
+        """Get the protocol adapter for a device."""
+        return self._protocols.get(device_name)
+
     def load_offline_scd(self, device_name: str):
         """Triggers offline discovery from SCD file without connecting."""
         device = self._devices.get(device_name)
@@ -164,6 +170,7 @@ class DeviceManagerCore(EventEmitter):
         if device_name not in self._protocols:
              protocol = self._create_protocol(device.config)
              if protocol:
+                 protocol.set_data_callback(lambda sig: self._on_signal_update(device_name, sig))
                  self._protocols[device_name] = protocol
         
         protocol = self._protocols.get(device_name)
@@ -380,8 +387,11 @@ class DeviceManagerCore(EventEmitter):
     def read_signal(self, device_name: str, signal: Signal) -> Optional[Signal]:
         protocol = self._protocols.get(device_name)
         if not protocol:
-            logger.warning(f"No protocol found for device {device_name}")
-            return None
+            # FIX: Return signal synchronously with error if not connected, 
+            # so WatchList doesn't hang waiting for async update.
+            signal.quality = SignalQuality.NOT_CONNECTED
+            signal.error = "Device Disconnected"
+            return signal
         
         # If an Protocol worker is available for this device, enqueue to it (non-blocking)
         worker = self.protocol_workers.get(device_name)

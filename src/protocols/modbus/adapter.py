@@ -28,6 +28,19 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+MODBUS_EXCEPTIONS = {
+    1: "Illegal Function",
+    2: "Illegal Data Address",
+    3: "Illegal Data Value",
+    4: "Slave Device Failure",
+    5: "Acknowledge",
+    6: "Slave Device Busy",
+    8: "Memory Parity Error",
+    10: "Gateway Path Unavailable",
+    11: "Gateway Target Device Failed to Respond"
+}
+
+
 
 class ModbusTCPAdapter(BaseProtocol):
     """
@@ -253,6 +266,7 @@ class ModbusTCPAdapter(BaseProtocol):
         """Read a single Modbus signal"""
         if not self.connected or not self.client:
             signal.quality = SignalQuality.NOT_CONNECTED
+            self._emit_update(signal)
             return signal
         
         try:
@@ -290,11 +304,21 @@ class ModbusTCPAdapter(BaseProtocol):
                 return signal
             
             # Check for errors (pymodbus 3.x)
+            # Check for errors (pymodbus 3.x)
             if result.isError():
+                # Extract exception code
+                exc_code = getattr(result, 'exception_code', None)
+                exc_desc = MODBUS_EXCEPTIONS.get(exc_code, "Unknown Exception") if exc_code else str(result)
+                
                 signal.quality = SignalQuality.INVALID
-                signal.error = str(result)
+                signal.error = f"Modbus Error: {exc_desc} (Code {exc_code})"
+                
                 if self.event_logger:
-                    self.event_logger.error(self.config.name, f"← READ ERROR: {result}")
+                    if exc_code == 1:
+                        self.event_logger.warning(self.config.name, f"← Device returned 'Illegal Function' (FC{func_code}). This usually means the device does not support this register type. Please remove this range in 'Define Address Ranges'.")
+                    else:
+                        self.event_logger.error(self.config.name, f"← READ ERROR: {exc_desc} (Code {exc_code})")
+                
                 self._emit_update(signal)
                 return signal
             

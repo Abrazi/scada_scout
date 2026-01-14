@@ -255,6 +255,15 @@ class WatchListWidget(QWidget):
             # Single selection - show full menu
             row = selected_rows[0]
             
+            # [Added] Copy clicked cell text
+            if index.isValid():
+                clicked_text = str(index.data() or "").strip()
+                if clicked_text:
+                    copy_cell_action = QAction(f"Copy '{clicked_text}'", self)
+                    copy_cell_action.triggered.connect(lambda: self._copy_to_clipboard(clicked_text))
+                    menu.addAction(copy_cell_action)
+                    menu.addSeparator()
+
             # Get watch_id and signal info
             watch_id = self.table.item(row, 0).data(Qt.UserRole)
             
@@ -287,6 +296,11 @@ class WatchListWidget(QWidget):
                 read_action = QAction("Read Value Now", self)
                 read_action.triggered.connect(lambda: self._manual_read_signal(device_name, signal))
                 menu.addAction(read_action)
+                
+                # Inspect Data
+                inspect_action = QAction("Data Inspector...", self)
+                inspect_action.triggered.connect(lambda: self._show_data_inspector(signal, device_name))
+                menu.addAction(inspect_action)
                 
                 menu.addSeparator()
             
@@ -351,7 +365,7 @@ class WatchListWidget(QWidget):
             # If read was enqueued to IEC worker, perform a blocking read for manual request
             if updated_signal is None:
                 # Best-effort synchronous read via protocol adapter
-                proto = self.device_manager.get_or_create_protocol(device_name)
+                proto = self.device_manager.get_protocol(device_name)
                 if proto and hasattr(proto, 'read_signal'):
                     updated_signal = proto.read_signal(signal)
 
@@ -369,4 +383,11 @@ class WatchListWidget(QWidget):
         from PySide6.QtWidgets import QApplication
         clipboard = QApplication.clipboard()
         clipboard.setText(text)
+
+    def _show_data_inspector(self, signal, device_name):
+        """Shows the Data Inspector dialog."""
+        from src.ui.dialogs.data_inspector_dialog import DataInspectorDialog
+        # Pass full context so inspector can read adjacent registers
+        dlg = DataInspectorDialog(signal, device_name, self.device_manager, self)
+        dlg.exec()
 

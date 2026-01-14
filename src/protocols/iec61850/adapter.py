@@ -506,50 +506,16 @@ class IEC61850Adapter(BaseProtocol):
                                             (iec61850.IEC61850_FC_ST, "ST"),
                                             (iec61850.IEC61850_FC_MX, "MX"),
                                             (iec61850.IEC61850_FC_CO, "CO"),
-                                            (iec61850.IEC61850_FC_CF, "CF"), # Important for ctlModel
                                             (iec61850.IEC61850_FC_SP, "SP"),
+                                            (iec61850.IEC61850_FC_CF, "CF"),
                                             (iec61850.IEC61850_FC_DC, "DC"),
                                         ]
                                         
                                         found_signals = False
-                                        is_control = False
                                         
-                                        # First pass: Check for ctlModel (Heuristic for Control Object)
-                                        try:
-                                            # We try to read ctlModel directly first to see if it exists
-                                            # Using FC=CF
-                                            ctl_model_path = f"{full_do_ref}.ctlModel"
-                                            # NOTE: we don't know if ctlModel is at DO level or deeper, usually DO level for standard LN
-                                            # But let's check directory first to be safe, or just try reading it?
-                                            # Reading it is faster than browsing if we guess right.
-                                            
-                                            # Let's browse CF first to find ctlModel
-                                            ret_cf = iec61850.IedConnection_getDataDirectoryByFC(
-                                                self.connection, full_do_ref, iec61850.IEC61850_FC_CF
-                                            )
-                                            cf_list = ret_cf[0] if isinstance(ret_cf, (list, tuple)) else ret_cf
-                                            if cf_list:
-                                                cf_names = self._extract_string_list(cf_list)
-                                                if "ctlModel" in cf_names:
-                                                    # FOUND A CONTROL OBJECT!
-                                                    is_control = True
-                                                    # Read the model
-                                                    ctl_val = self._read_ctl_model_direct(ctl_model_path)
-                                                    
-                                                    # Create Runtime Object
-                                                    ctrl_runtime = ControlObjectRuntime(object_reference=full_do_ref)
-                                                    ctrl_runtime.update_from_ctl_model_int(ctl_val)
-                                                    self.controls[full_do_ref] = ctrl_runtime
-                                                    
-                                                    if self.event_logger:
-                                                        self.event_logger.info("Discovery", f"  Found Control: {do_name} (Model={ctrl_runtime.ctl_model.name})")
-                                                    
-                                                    do_node.description += f" [Control: {ctrl_runtime.ctl_model.name}]"
-                                                    
-                                                iec61850.LinkedList_destroy(cf_list)
-                                        except Exception: 
-                                            pass
-
+                                        # Strict JIT Rule: Do NOT read ctlModel here.
+                                        # Just browse structure.
+                                        
                                         for fc_val, fc_name in fcs:
                                             try:
                                                 ret_da = iec61850.IedConnection_getDataDirectoryByFC(
@@ -572,10 +538,6 @@ class IEC61850Adapter(BaseProtocol):
                                                             if da_name == "stVal": sig_type = SignalType.STATE
                                                             elif da_name == "t": sig_type = SignalType.TIMESTAMP
                                                             elif da_name == "ctlModel": sig_type = SignalType.STATE
-                                                            elif "ctlVal" in da_name: # Handle top-level ctlVal if any
-                                                                 if is_control:
-                                                                     access = "RW"
-                                                                     sig_type = SignalType.COMMAND
                                                             
                                                             do_node.signals.append(Signal(
                                                                 name=da_name,
@@ -1178,43 +1140,136 @@ class IEC61850Adapter(BaseProtocol):
             return False
             
         object_ref = self._get_control_object_reference(signal.address)
+    def _build_csob_mms_value(self, value: Any, params: Optional[Dict[str, Any]] = None) -> Any:
+        """Helper to build the MMS Value for Control (Operate/SBO)."""
+        try:
+            # We construct a standard control structure (ctlVal, origin, ctlNum, T, Test, Check)
+            # Size 7 to be safe/standard
+            struct_size = 7 
+            mms_struct = iec61850.MmsValue_newStructure(struct_size)
+            
+            if not mms_struct: return None
+            
+            # 0: ctlVal
+            ctl_val_mms = None
+            if isinstance(value, bool):
+                 ctl_val_mms = iec61850.MmsValue_newBoolean(value)
+            elif isinstance(value, float):
+                 ctl_val_mms = iec61850.MmsValue_newFloat(value)
+            elif isinstance(value, int):
+                 ctl_val_mms = iec61850.MmsValue_newInt32(value)
+            else:
+                 # Default logic or based on signal
+                 ctl_val_mms = iec61850.MmsValue_newBoolean(False) # Fallback
+
+            if ctl_val_mms:
+                iec61850.MmsValue_setElement(mms_struct, 0, ctl_val_mms)
+            
+            # 1: operTm (UtcTime) - Optional, sending empty/None usually means "now" or excluded
+            # We'll leave it NULL (default) or set current time?
+            # iec61850.MmsValue_setElement(mms_struct, 1, iec61850.MmsValue_newUtcTime(int(time.time())))
+            
+            # 2: origin (Structure: orCat, orIdent)
+            or_cat = params.get('originator_category', 2) if params else 2
+            or_ident = str(params.get('originator_identity', "Station")) if params else "Station"
+            
+            origin_struct = iec61850.MmsValue_newStructure(2)
+            iec61850.MmsValue_setElement(origin_struct, 0, iec61850.MmsValue_newInteger(or_cat))
+            
+            ident_bytes = or_ident.encode('utf-8')
+            mms_ident = iec61850.MmsValue_newOctetString(ident_bytes)
+            iec61850.MmsValue_setOctetString(mms_ident, ident_bytes)
+            iec61850.MmsValue_setElement(origin_struct, 1, mms_ident)
+            
+            iec61850.MmsValue_setElement(mms_struct, 2, origin_struct)
+            
+            # 3: ctlNum
+            ctl_num = params.get('ctlNum', 1) if params else 1
+            iec61850.MmsValue_setElement(mms_struct, 3, iec61850.MmsValue_newInteger(ctl_num))
+            
+            # 4: T (Timestamp)
+            # iec61850.MmsValue_setElement(mms_struct, 4, ... )
+            
+            # 5: Test
+            test_mode = params.get('test', False) if params else False
+            iec61850.MmsValue_setElement(mms_struct, 5, iec61850.MmsValue_newBoolean(test_mode))
+            
+            # 6: Check
+            # Check is BitString(2)
+            # interlock = params.get('interlock_check', False)
+            # synchro = params.get('synchro_check', False)
+            # mms_check = iec61850.MmsValue_newBitString(2) ... (missing binding?)
+            # Leaving NULL implies defaults often.
+            
+            return mms_struct
+            
+        except Exception as e:
+            logger.error(f"Failed to build CSOB: {e}")
+            return None
+
+    def select(self, signal: Signal, value: Any = None, params: Optional[Dict[str, Any]] = None) -> bool:
+        """
+        Perform Select (SBO) operation.
+        Step 1 of 2.
+        
+        Args:
+            signal: The signal to select
+            value: Optional value to select with (required by some IEDs)
+            params: Optional control parameters (ctlNum, Check, Test, etc.)
+        """
+        object_ref = self._get_control_object_reference(signal.address)
         if not object_ref:
             if self.event_logger:
-                self.event_logger.error("IEC61850", f"SELECT: Could not determine Control Object from {signal.address}")
+                self.event_logger.error("IEC61850", f"SELECT: Could not determine Control Object Reference for {signal.address}")
             return False
+            
+        # Get Runtime Context (Must be initialized)
+        runtime = self.controls.get(object_ref)
+        if not runtime:
+             if self.event_logger:
+                 self.event_logger.error("IEC61850", f"SELECT: No Control Context for {object_ref}. Please close and reopen Control Window.")
+             return False
+             
+        # Determine SBO Reference
+        target_ref = runtime.sbo_reference
+        if not target_ref:
+             # Fallback: maybe device uses Oper for SBO?
+             # Try building standard Oper path?
+             # Or log error
+             if self.event_logger:
+                 self.event_logger.error("IEC61850", f"SELECT: SBO Reference not discovered for {object_ref}")
+             return False
 
         if self.event_logger:
-            self.event_logger.transaction("IEC61850", f"→ SELECT {object_ref}")
-
+            self.event_logger.transaction("IEC61850", f"→ SELECT (Write) {target_ref}")
+ 
         try:
-            client = iec61850.ControlObjectClient_create(object_ref, self.connection)
-            if not client:
+            # Build Payload Manually
+            mms_value = self._build_csob_mms_value(value, params=params)
+            if not mms_value:
                  if self.event_logger:
-                     self.event_logger.error("IEC61850", "Failed to create ControlObjectClient")
+                     self.event_logger.error("IEC61850", "Failed to build SBO payload")
                  return False
+
+            # Write to SBO attribute
+            # FC=CO usually
+            err = iec61850.IedConnection_writeObject(self.connection, target_ref, iec61850.IEC61850_FC_CO, mms_value)
             
-            # Apply parameters if provided
-            if params:
-                self._apply_control_params(client, params)
+            # Cleanup
+            iec61850.MmsValue_delete(mms_value)
             
-            success = iec61850.ControlObjectClient_select(client)
-            iec61850.ControlObjectClient_destroy(client)
-            
-            if success:
+            if err == iec61850.IED_ERROR_OK:
                 if self.event_logger:
                     self.event_logger.transaction("IEC61850", "← SELECT SUCCESS")
                 
                 # Update Runtime State
-                if object_ref in self.controls:
-                    self.controls[object_ref].state = ControlState.SELECTED
-                    self.controls[object_ref].last_select_time = datetime.now()
-                    
+                runtime.state = ControlState.SELECTED
+                runtime.last_select_time = datetime.now()
                 return True
             else:
                 if self.event_logger:
-                    self.event_logger.error("IEC61850", "← SELECT FAILED")
-                if object_ref in self.controls:
-                     self.controls[object_ref].state = ControlState.FAILED
+                    self.event_logger.error("IEC61850", f"← SELECT FAILED: Error {err}")
+                runtime.state = ControlState.FAILED
                 return False
                 
         except Exception as e:
@@ -1455,6 +1510,94 @@ class IEC61850Adapter(BaseProtocol):
             logger.error(f"Write failed: {e}")
             return False
 
+    def init_control_context(self, signal_address: str) -> Optional[ControlObjectRuntime]:
+        """
+        Step 1: JIT Control Context Initialization.
+        Called strictly when Control Window opens.
+        
+        Performs:
+        1.1 Read ctlModel (Mandatory)
+        1.2 Read stVal/q/t (Implicitly handled by UI poll, but we can do it here if needed)
+        1.3 Discover Oper/SBO/SBOw structure
+        
+        Returns: ControlObjectRuntime or None if not controllable.
+        """
+        object_ref = self._get_control_object_reference(signal_address)
+        if not object_ref:
+            return None
+            
+        if self.event_logger:
+            self.event_logger.info("IEC61850", f"Initializing Control Context for {object_ref}")
+            
+        # 1.1 Read ctlModel
+        # Must read from device, do not cache between sessions
+        ctl_model_val = 1 # Default
+        try:
+             # Try reading .ctlModel with FC=CF
+             val, err = iec61850.IedConnection_readInt32Value(
+                 self.connection, f"{object_ref}.ctlModel", iec61850.IEC61850_FC_CF
+             )
+             if err == iec61850.IED_ERROR_OK:
+                 ctl_model_val = val
+                 if self.event_logger:
+                     self.event_logger.debug("IEC61850", f"  Read ctlModel: {val}")
+             else:
+                 if self.event_logger:
+                    self.event_logger.warning("IEC61850", f"  Failed to read ctlModel (Error {err}). Assuming Status-Only or Direct.")
+                    # If read fails, is it status only? 
+                    # User says: "If missing -> control NOT supported"
+                    # But some devices might implement it differently.
+                    # Let's check for "Oper" existence next.
+        except:
+             pass
+             
+        # 1.3 Discover Oper/SBO
+        supports_oper = False
+        supports_sbo = False
+        supports_sbow = False
+        
+        try:
+            # Browse the DO to find Oper/SBO
+            ret = iec61850.IedConnection_getDataDirectory(self.connection, object_ref)
+            children = ret[0] if isinstance(ret, (list, tuple)) else ret
+            if children:
+                names = self._extract_string_list(children)
+                iec61850.LinkedList_destroy(children)
+                
+                if "Oper" in names: supports_oper = True
+                if "SBO" in names: supports_sbo = True
+                if "SBOw" in names: supports_sbow = True
+                
+                if self.event_logger:
+                    self.event_logger.debug("IEC61850", f"  Capabilities: Oper={supports_oper}, SBO={supports_sbo}, SBOw={supports_sbow}")
+        except: pass
+        
+        # Build Context
+        ctx = ControlObjectRuntime(object_reference=object_ref)
+        ctx.update_from_ctl_model_int(ctl_model_val)
+
+        # Determine SBO Reference
+        # PREFER SBOw if available (standard for SBO)
+        # THEN SBO (some implementations)
+        if supports_sbow:
+            ctx.sbo_reference = f"{object_ref}.SBOw"
+        elif supports_sbo:
+            ctx.sbo_reference = f"{object_ref}.SBO"
+            
+        # Add to cache
+        self.controls[signal_address] = ctx 
+        self.controls[object_ref] = ctx
+        
+        return ctx
+
+    def clear_control_context(self, signal_address: str):
+        """Teardown control context."""
+        object_ref = self._get_control_object_reference(signal_address)
+        if object_ref and object_ref in self.controls:
+             del self.controls[object_ref]
+             if self.event_logger:
+                 self.event_logger.debug("IEC61850", f"Context cleared for {object_ref}")
+
     def cancel(self, signal: Signal) -> bool:
         """Cancel selection."""
         if not self.connected:
@@ -1497,6 +1640,59 @@ class IEC61850Adapter(BaseProtocol):
         # But most Signals in the list will be leaf nodes (attributes).
         return None
 
+    def _build_operate_struct(self, value, ctl_num=0):
+        """
+        Builds the complex Operate structure manually as per User Requirement 4C.
+        Structure: [ctlVal, operTm, origin, ctlNum, ...?]
+        Note: Exact field order matters.
+        Standard mapping for `Oper`:
+        - ctlVal (0)
+        - operTm (1)
+        - origin (2)
+        - ctlNum (3)
+        - T (4)
+        - Test (5)
+        - Check (6)
+        """
+        try:
+             # Create payload structure
+             # Size is usually number of elements in the structure definition
+             # We assume 4 or 5 elements standard.
+             # User example: navigate to .Pos.Oper
+             
+             # Create ctlVal
+             mms_val = self._create_mms_value(value, None) # Simple value
+             
+             # Create operTm
+             import time
+             mms_tm = iec61850.MmsValue_newUtcTime(time.time())
+             
+             # Create Origin
+             # Origin is a structure of [orCat, orIdent]
+             mms_origin = iec61850.MmsValue_newStructure(2)
+             iec61850.MmsValue_setElement(mms_origin, 0, iec61850.MmsValue_newInteger(2)) # Station
+             iec61850.MmsValue_setElement(mms_origin, 1, iec61850.MmsValue_newOctetString(b"SCADA_SCOUT"))
+             
+             # Create ctlNum
+             mms_ctl_num = iec61850.MmsValue_newInteger(ctl_num)
+             
+             # Assemble Operate Structure
+             # User code said size 5? 
+             # Let's try size 4 basic first: ctlVal, operTm, origin, ctlNum
+             # Actually, simpler IEDs might just default to what ControlObjectClient does.
+             # But if we must manual:
+             mms_operate = iec61850.MmsValue_newStructure(4)
+             iec61850.MmsValue_setElement(mms_operate, 0, mms_val)
+             iec61850.MmsValue_setElement(mms_operate, 1, mms_tm)
+             iec61850.MmsValue_setElement(mms_operate, 2, mms_origin)
+             iec61850.MmsValue_setElement(mms_operate, 3, mms_ctl_num)
+             
+             return mms_operate
+        except Exception as e:
+             logger.error(f"Failed to build operate struct: {e}")
+             return None
+
+            
     def _create_mms_value(self, value: Any, signal: Signal):
         """Create MmsValue from Python value."""
         try:

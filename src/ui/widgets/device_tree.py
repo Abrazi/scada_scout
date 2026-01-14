@@ -602,6 +602,14 @@ class DeviceTreeWidget(QWidget):
         index = self.tree_view.indexAt(position)
         
         if not index.isValid():
+            # Background click (kept existing logic but moved into a block if needed, 
+            # or we can check index validity for copy first)
+            pass
+
+        # === NEW: Get clicked text ===
+        clicked_text = str(index.data() or "").strip()
+        
+        if not index.isValid():
             # Background click
             menu = QMenu()
             add_dev_action = QAction("Add New Device...", self)
@@ -623,6 +631,14 @@ class DeviceTreeWidget(QWidget):
         folder_marker = root_item.data(Qt.UserRole + 1)
         if folder_marker == "FOLDER":
             menu = QMenu()
+            
+            # [Added] Copy option
+            if clicked_text:
+                copy_action = QAction(f"Copy '{clicked_text}'", self)
+                copy_action.triggered.connect(lambda: self._copy_to_clipboard(clicked_text))
+                menu.addAction(copy_action)
+                menu.addSeparator()
+
             add_dev_action = QAction("Add Device to this Folder...", self)
             add_dev_action.triggered.connect(lambda: self._add_new_device(folder=root_item.text()))
             menu.addAction(add_dev_action)
@@ -635,6 +651,13 @@ class DeviceTreeWidget(QWidget):
             return
 
         menu = QMenu()
+        
+        # [Added] Copy option for regular items
+        if clicked_text:
+            copy_action = QAction(f"Copy '{clicked_text}'", self)
+            copy_action.triggered.connect(lambda: self._copy_to_clipboard(clicked_text))
+            menu.addAction(copy_action)
+            menu.addSeparator()
         
         # Check if it's a device node (string) or signal node (Signal object)
         from src.models.device_models import Signal, DeviceType
@@ -788,6 +811,13 @@ class DeviceTreeWidget(QWidget):
                     # Single connection only (avoid duplicate triggers causing dialog to reopen)
                     read_action.triggered.connect(lambda: self._manual_read_signal(device_name, signal))
                     menu.addAction(read_action)
+                    
+                    # Data Inspector (for Modbus signals only)
+                    device = self.device_manager.get_device(device_name)
+                    if device and device.config.device_type in (DeviceType.MODBUS_TCP, DeviceType.MODBUS_SERVER):
+                        inspector_action = QAction("Data Inspector...", self)
+                        inspector_action.triggered.connect(lambda: self._show_data_inspector(signal, device_name))
+                        menu.addAction(inspector_action)
 
                     # Enumeration Inspection
                     enum_action = QAction("Show Enumeration", self)
@@ -888,7 +918,7 @@ class DeviceTreeWidget(QWidget):
         """Shows the Modbus Slave configuration dialog (register editor)."""
         device = self.device_manager.get_device(device_name)
         # Ensure protocol exists even if not "connected" (started)
-        protocol = self.device_manager.get_or_create_protocol(device_name)
+        protocol = self.device_manager.get_protocol(device_name)
         
         if not device or not protocol:
             logger.error(f"Cannot configure registers: Device or Protocol missing for {device_name}")
@@ -964,7 +994,7 @@ class DeviceTreeWidget(QWidget):
         """Show the Modbus Data Inspector dialog"""
         from src.protocols.modbus.adapter import ModbusTCPAdapter
         
-        adapter = self.device_manager.get_or_create_protocol(device_name)
+        adapter = self.device_manager.get_protocol(device_name)
         if not adapter or not isinstance(adapter, ModbusTCPAdapter):
             from PySide6.QtWidgets import QMessageBox
             QMessageBox.warning(self, "Error", "Inspector only available for Modbus TCP devices.")
@@ -989,7 +1019,7 @@ class DeviceTreeWidget(QWidget):
             device.config.modbus_register_maps = dialog.get_register_maps()
             self.device_manager.save_configuration()
             # Re-discover (it's internal for Modbus, just rebuilds nodes)
-            protocol = self.device_manager._protocols.get(device_name)
+            protocol = self.device_manager.get_protocol(device_name)
             if protocol:
                 device.root_node = protocol.discover()
                 self._refresh_device_node(device_name)
@@ -1091,7 +1121,7 @@ class DeviceTreeWidget(QWidget):
             # If read was enqueued to IEC worker, perform a blocking read for manual request
             if updated_signal is None:
                 # Best-effort synchronous read via protocol adapter
-                proto = self.device_manager.get_or_create_protocol(device_name)
+                proto = self.device_manager.get_protocol(device_name)
                 if proto and hasattr(proto, 'read_signal'):
                     updated_signal = proto.read_signal(signal)
 
@@ -1104,6 +1134,12 @@ class DeviceTreeWidget(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "Read Error", f"Error reading signal: {e}")
 
+    def _show_data_inspector(self, signal, device_name):
+        """Shows the Data Inspector dialog for a Modbus signal."""
+        from src.ui.dialogs.data_inspector_dialog import DataInspectorDialog
+        dlg = DataInspectorDialog(signal, device_name, self.device_manager, self)
+        dlg.exec()
+    
     def _show_enumeration_dialog(self, signal):
         """Shows the enumeration mapping for a signal."""
         from PySide6.QtWidgets import QDialog, QTableWidget, QTableWidgetItem, QVBoxLayout, QPushButton, QLabel

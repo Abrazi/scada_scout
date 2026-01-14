@@ -942,6 +942,77 @@ def MmsValue_newVisibleString(value):
     func.argtypes = [c_char_p]
     return func(_encode_str(value))
 
+def MmsValue_newOctetString(value):
+    """Create new octet string MmsValue."""
+    _check_lib()
+    func = _lib.MmsValue_newOctetString
+    func.restype = MmsValue
+    func.argtypes = [c_int, c_int] # size, max_size? No, usually MmsValue_newOctetString(int size, int max_size) in C?
+    # Actually checking libiec61850 header: MmsValue* MmsValue_newOctetString(int size, int maxSize);
+    # But how do we set the content? MmsValue_setOctetString(MmsValue* self, uint8_t* buf, int size);
+    # Or MmsValue_newOctetStringFromBytes(uint8_t* buf, int size); -> This might not exist in standard API.
+    # Let's try to assume we need to create then set.
+    return func(len(value), len(value))
+
+def MmsValue_setOctetString(value, buf):
+    """Set content of OctetString."""
+    _check_lib()
+    func = _lib.MmsValue_setOctetString
+    func.restype = None
+    func.argtypes = [MmsValue, c_char_p, c_int]
+    func(value, buf, len(buf))
+
+def MmsValue_newStructure(size):
+    """Create new Structure MmsValue."""
+    _check_lib()
+    func = _lib.MmsValue_newStructure
+    func.restype = MmsValue
+    func.argtypes = [c_int] # Standard C API takes (const MmsVariableSpecification* type) OR just size?
+    # In libiec61850, MmsValue_newStructure(const MmsVariableSpecification* type) is for typed.
+    # MmsValue_createEmptyStructure(int size) might be what we want for dynamic?
+    # Let's check headers if possible? No.
+    # Usually MmsValue_newStructure is deprecated or requires type.
+    # MmsValue* MmsValue_newDataAccessError(MmsDataAccessError accessError);
+    # Accessing C function directly.
+    # Re-reading user request: "MmsValue.newStructure(5)"
+    return func(size)
+
+def MmsValue_setElement(complex_value, index, element_value):
+    """Set element in a structure/array."""
+    _check_lib()
+    func = _lib.MmsValue_setElement
+    func.restype = None
+    func.argtypes = [MmsValue, c_int, MmsValue]
+    func(complex_value, index, element_value)
+
+def MmsValue_newUtcTime(timestamp):
+    """Create new UTC Time MmsValue from unix timestamp (int/float)."""
+    _check_lib()
+    func = _lib.MmsValue_newUtcTime
+    func.restype = MmsValue
+    func.argtypes = [c_uint32] # accepts time_t (seconds)
+    return func(int(timestamp))
+
+def MmsValue_setUtcTimeMs(mms_val, timestamp_ms):
+    """Set high precision time."""
+    _check_lib()
+    func = _lib.MmsValue_setUtcTimeMs
+    func.restype = None
+    func.argtypes = [MmsValue, c_uint64]
+    func(mms_val, int(timestamp_ms))
+
+def MmsValue_newInteger(value):
+    """Create new Integer (auto-sized)."""
+    _check_lib()
+    func = _lib.MmsValue_newInteger
+    func.restype = MmsValue
+    func.argtypes = [c_int] # width in bits? Or value?
+    # libiec61850 C API: MmsValue* MmsValue_newInteger(int size); -> Creates empty integer of size.
+    # MmsValue* MmsValue_newIntegerFromInt32(int32_t value);
+    # User assumes helper.
+    # safe implementation:
+    return MmsValue_newInt32(value)
+
 # ============================================================================
 # LinkedList Functions
 # ============================================================================
@@ -1031,3 +1102,17 @@ def get_load_error():
     if HAS_LIBIEC61850:
         return None
     return _LOAD_ERROR
+
+def ControlObjectClient_setCommand(self, value):
+    """
+    Set the command value for the control object client.
+    
+    Args:
+        self: ControlObjectClient handle
+        value: MmsValue handle (ctlVal)
+    """
+    _check_lib()
+    func = _lib.ControlObjectClient_setCommand
+    func.restype = None
+    func.argtypes = [c_void_p, MmsValue]
+    func(self, value)

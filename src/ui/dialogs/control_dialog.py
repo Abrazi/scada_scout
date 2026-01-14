@@ -2,7 +2,7 @@ from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
     QPushButton, QComboBox, QDoubleSpinBox, QSpinBox, 
     QMessageBox, QWidget, QGroupBox, QFormLayout, QCheckBox,
-    QLineEdit, QDateTimeEdit
+    QLineEdit, QDateTimeEdit, QApplication
 )
 from PySide6.QtCore import Qt, QDateTime
 import logging
@@ -47,10 +47,12 @@ class ControlDialog(QDialog):
             parts = self.obj_ref.split('.')
             if len(parts) > 1:
                 # Basic heuristic to get DO path
-                # Remove last part if it looks like an attribute (stVal, ctlVal etc)
-                last = parts[-1]
-                if last in ["ctlVal", "Oper", "SBO", "SBOw", "Cancel", "stVal", "q", "t"]:
-                   self.obj_ref = ".".join(parts[:-1])
+                # Recursively remove last part if it looks like an attribute (stVal, ctlVal, Oper, etc)
+                # This ensures we get to the DO (e.g. CSWI1.Pos) even from Pos.Oper.ctlVal
+                while parts and parts[-1] in ["ctlVal", "Oper", "SBO", "SBOw", "Cancel", "stVal", "q", "t"]:
+                    parts.pop()
+                
+                self.obj_ref = ".".join(parts)
         
         self.lbl_ref = QLabel(self.obj_ref)
         self.lbl_ref.setStyleSheet("font-weight: bold")
@@ -215,11 +217,15 @@ class ControlDialog(QDialog):
         main_layout.addLayout(btn_layout)
 
     def _get_adapter(self):
-        return self.device_manager.get_or_create_protocol(self.device_name)
+        """Get the protocol adapter for this device."""
+        return self.device_manager.get_protocol(self.device_name)
 
     def _detect_control_model(self):
-        """Read ctlModel from device."""
-        self.lbl_status.setText("Reading control model...")
+        """
+        JIT Initialization: Calls adapter.init_control_context().
+        Step 1 of the strict control lifecycle.
+        """
+        self.lbl_status.setText("Initializing control context...")
         self.lbl_status.setStyleSheet("color: blue")
         
         try:
@@ -228,33 +234,39 @@ class ControlDialog(QDialog):
                 self.lbl_status.setText("Error: No connection")
                 return
 
-            if hasattr(adapter, 'read_ctl_model'):
-                model = adapter.read_ctl_model(self.obj_ref)
-                self.detected_control_model = model
+            if hasattr(adapter, 'init_control_context'):
+                # JIT Initialize
+                ctx = adapter.init_control_context(self.signal.address)
                 
-                names = {
-                    0: "Status Only (0)",
-                    1: "Direct Normal (1)",
-                    2: "SBO Normal (2)",
-                    3: "Direct Enhanced (3)",
-                    4: "SBO Enhanced (4)"
-                }
-                name = names.get(model, f"Unknown ({model})")
-                self.txt_control_model.setText(name)
-                
-                if model in [0]:
-                    self.txt_control_model.setStyleSheet("background-color: #ffcccc") # Red
+                if ctx:
+                    self.detected_control_model = ctx.ctl_model.value
+                    
+                    names = {
+                        0: "Status Only (0)",
+                        1: "Direct Normal (1)",
+                        2: "SBO Normal (2)",
+                        3: "Direct Enhanced (3)",
+                        4: "SBO Enhanced (4)"
+                    }
+                    name = names.get(self.detected_control_model, f"Unknown ({self.detected_control_model})")
+                    self.txt_control_model.setText(name)
+                    
+                    if self.detected_control_model == 0:
+                        self.txt_control_model.setStyleSheet("background-color: #ffcccc") # Red
+                    else:
+                        self.txt_control_model.setStyleSheet("background-color: #ccffcc") # Green
+                    
+                    self._update_button_states()
+                    self.lbl_status.setText(f"Context Initialized: {name}")
+                    self.lbl_status.setStyleSheet("color: green")
                 else:
-                    self.txt_control_model.setStyleSheet("background-color: #ccffcc") # Green
-                
-                self._update_button_states()
-                self.lbl_status.setText(f"Control model detected: {name}")
-                self.lbl_status.setStyleSheet("color: green")
+                    self.lbl_status.setText("Error: Failed to initialize context (Not a control?)")
+                    self.txt_control_model.setText("Error")
             else:
-                self.lbl_status.setText("Error: Adapter does not support model detection")
+                self.lbl_status.setText("Error: Adapter does not support JIT Context")
 
         except Exception as e:
-            self.lbl_status.setText(f"Error reading model: {e}")
+            self.lbl_status.setText(f"Error initializing context: {e}")
             self.lbl_status.setStyleSheet("color: red")
 
     def _update_button_states(self):
@@ -322,26 +334,35 @@ class ControlDialog(QDialog):
         return 0
 
     def _on_select(self):
-        self.lbl_status.setText("Selecting...")
-        self.lbl_status.setStyleSheet("color: blue")
-        
+        """Submit Select command."""
         try:
             adapter = self._get_adapter()
-            params = self._get_params()
+            if not adapter: return
+
+            params = self._get_params() # Use existing param builder
             
-            success = adapter.select(self.signal, params=params)
+            # Get value for SBO (required by JIT/Strict IEDs)
+            val = self._get_value()
+            # _get_value might not be enough if we need to handle "None" cases explicitly
+            # But the logic above seems mostly safe.
             
-            if success:
-                self.selected = True
-                self.lbl_status.setText("SELECT Successful!")
+            self.lbl_status.setText("Selecting...")
+            self.lbl_status.setStyleSheet("color: blue")
+            QApplication.processEvents()
+
+            if adapter.select(self.signal, value=val, params=params):
+                self.lbl_status.setText("Selection Successful (Selected)")
                 self.lbl_status.setStyleSheet("color: green")
-                self._update_button_states()
+                self.selected = True # Track state locally as fallback
+                self.btn_select.setEnabled(False)
+                self.btn_operate.setEnabled(True)
+                self.btn_cancel.setEnabled(True)
             else:
-                self.lbl_status.setText("SELECT Failed.")
+                self.lbl_status.setText("Selection Failed")
                 self.lbl_status.setStyleSheet("color: red")
-                
         except Exception as e:
-            self.lbl_status.setText(f"Error: {e}")
+            self.lbl_status.setText(f"Select Error: {e}")
+            self.lbl_status.setStyleSheet("color: red")
 
     def _on_operate(self):
         self.lbl_status.setText("Operating...")
@@ -371,5 +392,15 @@ class ControlDialog(QDialog):
         self._on_operate()
 
     def _on_cancel(self):
-        # Close dialog
+        # Close handles cleanup
         self.reject()
+
+    def done(self, result):
+        """Override done to ensure context is cleared when dialog closes."""
+        try:
+            adapter = self._get_adapter()
+            if adapter and hasattr(adapter, 'clear_control_context'):
+                adapter.clear_control_context(self.signal.address)
+        except Exception:
+            pass
+        super().done(result)
