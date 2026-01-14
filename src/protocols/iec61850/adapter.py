@@ -10,6 +10,7 @@ from src.core.scd_parser import SCDParser
 
 # Import the ctypes wrapper for libiec61850
 from . import iec61850_wrapper as iec61850
+from .control_models import ControlObjectRuntime, ControlModel, ControlState
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,7 @@ class IEC61850Adapter(BaseProtocol):
         if self.event_logger:
             self.event_logger.info("IEC61850Adapter", f"Initialized for {config.ip_address}:{config.port}")
         self._last_read_times = {}
+        self.controls: Dict[str, ControlObjectRuntime] = {} # Key: DO Object Reference
         
     def connect(self) -> bool:
         """Establish connection to the IED with comprehensive diagnostics."""
@@ -504,12 +506,50 @@ class IEC61850Adapter(BaseProtocol):
                                             (iec61850.IEC61850_FC_ST, "ST"),
                                             (iec61850.IEC61850_FC_MX, "MX"),
                                             (iec61850.IEC61850_FC_CO, "CO"),
+                                            (iec61850.IEC61850_FC_CF, "CF"), # Important for ctlModel
                                             (iec61850.IEC61850_FC_SP, "SP"),
-                                            (iec61850.IEC61850_FC_CF, "CF"),
                                             (iec61850.IEC61850_FC_DC, "DC"),
                                         ]
                                         
                                         found_signals = False
+                                        is_control = False
+                                        
+                                        # First pass: Check for ctlModel (Heuristic for Control Object)
+                                        try:
+                                            # We try to read ctlModel directly first to see if it exists
+                                            # Using FC=CF
+                                            ctl_model_path = f"{full_do_ref}.ctlModel"
+                                            # NOTE: we don't know if ctlModel is at DO level or deeper, usually DO level for standard LN
+                                            # But let's check directory first to be safe, or just try reading it?
+                                            # Reading it is faster than browsing if we guess right.
+                                            
+                                            # Let's browse CF first to find ctlModel
+                                            ret_cf = iec61850.IedConnection_getDataDirectoryByFC(
+                                                self.connection, full_do_ref, iec61850.IEC61850_FC_CF
+                                            )
+                                            cf_list = ret_cf[0] if isinstance(ret_cf, (list, tuple)) else ret_cf
+                                            if cf_list:
+                                                cf_names = self._extract_string_list(cf_list)
+                                                if "ctlModel" in cf_names:
+                                                    # FOUND A CONTROL OBJECT!
+                                                    is_control = True
+                                                    # Read the model
+                                                    ctl_val = self._read_ctl_model_direct(ctl_model_path)
+                                                    
+                                                    # Create Runtime Object
+                                                    ctrl_runtime = ControlObjectRuntime(object_reference=full_do_ref)
+                                                    ctrl_runtime.update_from_ctl_model_int(ctl_val)
+                                                    self.controls[full_do_ref] = ctrl_runtime
+                                                    
+                                                    if self.event_logger:
+                                                        self.event_logger.info("Discovery", f"  Found Control: {do_name} (Model={ctrl_runtime.ctl_model.name})")
+                                                    
+                                                    do_node.description += f" [Control: {ctrl_runtime.ctl_model.name}]"
+                                                    
+                                                iec61850.LinkedList_destroy(cf_list)
+                                        except Exception: 
+                                            pass
+
                                         for fc_val, fc_name in fcs:
                                             try:
                                                 ret_da = iec61850.IedConnection_getDataDirectoryByFC(
@@ -520,21 +560,22 @@ class IEC61850Adapter(BaseProtocol):
                                                 if da_list:
                                                     da_names = self._extract_string_list(da_list)
                                                     for da_name in da_names:
-                                                        # Use recursive browse for each DA
-                                                        # We create a sub-node for the DA if it's complex?
-                                                        # Or just pass the DO node?
-                                                        # The DA returned here is the top-level attribute in the DO for that FC.
-                                                        # It could be 'stVal' (leaf) or 'mag' (struct).
-                                                        
                                                         full_da_path = f"{full_do_ref}.{da_name}"
                                                         
-                                                        # Check if it's a leaf to avoid unnecessary recursion overhead
-                                                        if da_name in ["stVal", "q", "t", "ctlVal"]:
-                                                            # Fast path
-                                                            access = "RW" if "ctlVal" in da_name else "RO"
+                                                        # Special handling for ctlModel - we already handled it, but let's show it in tree
+                                                        
+                                                        # Check if leaf
+                                                        if da_name in ["stVal", "q", "t", "ctlVal", "ctlModel"]:
+                                                            access = "RO"
                                                             sig_type = None
+                                                            
                                                             if da_name == "stVal": sig_type = SignalType.STATE
                                                             elif da_name == "t": sig_type = SignalType.TIMESTAMP
+                                                            elif da_name == "ctlModel": sig_type = SignalType.STATE
+                                                            elif "ctlVal" in da_name: # Handle top-level ctlVal if any
+                                                                 if is_control:
+                                                                     access = "RW"
+                                                                     sig_type = SignalType.COMMAND
                                                             
                                                             do_node.signals.append(Signal(
                                                                 name=da_name,
@@ -545,16 +586,12 @@ class IEC61850Adapter(BaseProtocol):
                                                             ))
                                                         else:
                                                             # Recurse
-                                                            # Create a node for it?
-                                                            # If we want "mag.f", we can create a Node "mag" and put "f" in it.
                                                             sub_node = Node(name=da_name, description=f"FC={fc_name}")
                                                             do_node.children.append(sub_node)
                                                             self._recursive_browse_da(full_da_path, sub_node, fc_name)
                                                             
-                                                            # Cleanup empty nodes
                                                             if not sub_node.children and not sub_node.signals:
                                                                 do_node.children.remove(sub_node)
-                                                                # Add as signal if it was a leaf after all
                                                                 do_node.signals.append(Signal(
                                                                     name=da_name,
                                                                     address=full_da_path,
@@ -603,6 +640,18 @@ class IEC61850Adapter(BaseProtocol):
             logger.error(f"Online discovery failed: {e}")
             root.children.append(Node(name="Error", description=str(e)))
             return root
+
+    def _read_ctl_model_direct(self, ctl_model_path: str) -> int:
+        """Helper to read ctlModel during discovery."""
+        try:
+             val, err = iec61850.IedConnection_readInt32Value(
+                 self.connection, ctl_model_path, iec61850.IEC61850_FC_CF
+             )
+             if err == iec61850.IED_ERROR_OK:
+                 return val
+        except Exception:
+            pass
+        return 1 # Default to Direct Normal if cannot read
 
     def _extract_string_list(self, linked_list) -> list:
         """
@@ -1154,10 +1203,18 @@ class IEC61850Adapter(BaseProtocol):
             if success:
                 if self.event_logger:
                     self.event_logger.transaction("IEC61850", "← SELECT SUCCESS")
+                
+                # Update Runtime State
+                if object_ref in self.controls:
+                    self.controls[object_ref].state = ControlState.SELECTED
+                    self.controls[object_ref].last_select_time = datetime.now()
+                    
                 return True
             else:
                 if self.event_logger:
                     self.event_logger.error("IEC61850", "← SELECT FAILED")
+                if object_ref in self.controls:
+                     self.controls[object_ref].state = ControlState.FAILED
                 return False
                 
         except Exception as e:
@@ -1170,41 +1227,54 @@ class IEC61850Adapter(BaseProtocol):
         """
         Operate (Control) on a signal.
         Supports Direct Operate and SBO Operate phases.
-        Enforces ctlModel checks and handles Select logic if needed.
-        
-        Args:
-            signal: The signal to operate.
-            value: The value to write.
-            params: Optional dict for advanced control parameters.
+        Uses cached ControlObjectRuntime if available.
         """
         object_ref = self._get_control_object_reference(signal.address)
         
-        # If we successfully identified a Control Object Reference, usage ControlObjectClient
-        if object_ref and ("Oper" in signal.address or "ctlVal" in signal.address or getattr(signal, "access", "") == "RW"):
+        # If we successfully identified a Control Object Reference
+        if object_ref and object_ref in self.controls:
+             ctrl_runtime = self.controls[object_ref]
              
-             # HARDENING: Check ctlModel
-             ctl_model = self.read_ctl_model(object_ref) # Use new public method
-             is_sbo = ctl_model in [2, 4] # status-only=0, direct-normal=1, sbo-normal=2, direct-enhanced=3, sbo-enhanced=4
-             
-             if is_sbo:
-                 # Ensure we Select first (Auto-Select strategy for simple UI)
-                 # Ideally we should check if already selected, but stateless wrapper makes this hard.
-                 # We'll try to Select, then Operate.
-                 if self.event_logger:
-                     self.event_logger.transaction("IEC61850", f"Autodetected SBO Model ({ctl_model}). Performing Auto-Select.")
+             # SBO Logic
+             if ctrl_runtime.ctl_model.is_sbo:
+                 # Check if we are already selected
+                 # Since this adapter is stateless regarding MmsConnection (mostly), we assume we need to select.
+                 # Optimization: If we just selected it, we might be good? 
+                 # But for safety, we often re-select or assume the UI button called select() separately?
+                 # USER REQUIREMENT: "Auto-Select strategy for simple UI" is what I had before.
+                 # Let's keep Auto-Select if state is IDLE.
                  
+                 if self.event_logger:
+                     self.event_logger.transaction("IEC61850", f"Operating SBO Control ({ctrl_runtime.ctl_model.name})")
+
+                 # If we haven't selected recently, do it now
+                 # TODO: Check ctrl_runtime.state == SELECTED?
+                 # For now, simplistic auto-select safety:
                  if not self.select(signal, params=params):
-                     if self.event_logger:
-                         self.event_logger.error("IEC61850", "Auto-Select failed. Aborting Operate.")
-                     return False
+                      return False
              
              result = self._operate_control(object_ref, value, signal, params=params)
              
              if result:
-                 # HARDENING: Immediate Refresh of status
+                 ctrl_runtime.state = ControlState.OPERATED
+                 ctrl_runtime.last_operate_time = datetime.now()
                  self._force_refresh_stval(object_ref)
+             else:
+                 ctrl_runtime.state = ControlState.FAILED
                  
              return result
+             
+        # Fallback for legacy/heuristics if not in discovery cache
+        if object_ref and ("Oper" in signal.address or "ctlVal" in signal.address or getattr(signal, "access", "") == "RW"):
+             # Original legacy logic
+             ctl_model = self.read_ctl_model(object_ref) 
+             is_sbo = ctl_model in [2, 4]
+             
+             if is_sbo:
+                 if not self.select(signal, params=params):
+                     return False
+             
+             return self._operate_control(object_ref, value, signal, params=params)
              
         # Otherwise, fall back to direct DataAttribute write
         return self.write_signal(signal, value)
