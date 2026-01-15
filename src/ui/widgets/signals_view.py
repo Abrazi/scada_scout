@@ -280,30 +280,196 @@ class SignalsViewWidget(QWidget):
     # Note: `set_filter_node(node, device_name=None)` above is the canonical
     # method to set the current node and device. Avoid redefining it.
 
+    def add_signal(self, signal_def: dict):
+        """
+        Adds signals to the live view based on a definition payload.
+        Payload can be a single signal or a full node (recursive).
+        
+        Args:
+            signal_def (dict): {
+                'device': str,
+                'address': str, # optional (single)
+                'fc': str,      # optional
+                'node_type': 'Single' | 'Node' | 'Device', # optional hint
+                'node': object  # Logic Node object (if recursive)
+            }
+        """
+        device_name = signal_def.get('device')
+        if not device_name:
+            return
+
+        # Check for recursive add (Payload from DeviceTree usually has 'node' object now on Context Menu?)
+        # Actually, in the plan, I said DeviceTree will emit a dict.
+        # Let's support both the old single-signal payload and a new one.
+        
+        # If signal_def has a 'node' object, we use it for recursion
+        node_obj = signal_def.get('node')
+        if node_obj:
+            self._add_node_recursive(device_name, node_obj)
+            return
+
+        # Single signal fallback
+        address = signal_def.get('address')
+        fc = signal_def.get('fc', '')
+        
+        if not address:
+             return
+
+        # 1. Validation
+        if fc in ['CO', 'CF', 'SG', 'SE']:
+            import logging
+            logging.getLogger("SignalsView").warning(f"Ignored non-monitoring signal: {address} (FC={fc})")
+            return
+
+        # 2. Subscribe via Manager (Authoritative)
+        from src.models.subscription_models import IECSubscription, SubscriptionMode
+        
+        sub = IECSubscription(
+            device=device_name,
+            mms_path=address,
+            fc=fc,
+            mode=SubscriptionMode.READ_POLLING,
+            source="live_data"
+        )
+        
+        # Subscribe!
+        self.device_manager.subscription_manager.subscribe(sub)
+
+        # 3. Add to Display (Table)
+        # We need the Signal object to display it.
+        # Fetch it from device manager
+        device = self.device_manager.get_device(device_name)
+        if device and device.root_node:
+             # Fast find or reconstruct
+             found = self._find_signal_in_device(device, address)
+             if found:
+                 self.table_model.add_signals([found])
+             else:
+                 # Fallback ad-hoc
+                 from src.models.device_models import Signal
+                 s = Signal(name=signal_def.get('signal_name',''), address=address, description="Live Add")
+                 self.table_model.add_signals([s])
+                 
+        self.lbl_no_signals.hide()
+
+    def _add_node_recursive(self, device_name, node):
+        """Recursively subscribe to all ST/MX signals under this node."""
+        signals_to_add = []
+        
+        def _recurse(n):
+            # Add signals in this node
+            if hasattr(n, 'signals') and n.signals:
+                for sig in n.signals:
+                    # Filter
+                    fc = getattr(sig, 'fc', getattr(sig, 'access', ''))
+                    # strict filter: must be ST or MX
+                    if fc not in ['ST', 'MX']:
+                        # Try to handle empty FC if it looks like measurement?
+                        # Keep strict for now as per user request
+                        continue
+                    
+                    signals_to_add.append(sig)
+            
+            # Recurse
+            if hasattr(n, 'children'):
+                for child in n.children:
+                    _recurse(child)
+            
+            if hasattr(n, 'root_node'): # Device object case
+                 _recurse(n.root_node)
+
+        _recurse(node)
+        
+        if not signals_to_add:
+            return
+
+        # Bulk Subscribe
+        from src.models.subscription_models import IECSubscription, SubscriptionMode
+        count = 0
+        for sig in signals_to_add:
+            fc = getattr(sig, 'fc', getattr(sig, 'access', ''))
+            sub = IECSubscription(
+                device=device_name,
+                mms_path=sig.address,
+                fc=fc,
+                mode=SubscriptionMode.READ_POLLING,
+                source="live_data"
+            )
+            self.device_manager.subscription_manager.subscribe(sub)
+            count += 1
+            
+        # Add to Table
+        self.table_model.add_signals(signals_to_add)
+        self.lbl_no_signals.hide()
+        
+        import logging
+        logging.getLogger("SignalsView").info(f"Recursively added {count} signals from {node.name}")
+
+    def _find_signal_in_device(self, device, address):
+        # ... helper ...
+        def _search(n):
+            if hasattr(n, 'signals'):
+                for s in n.signals:
+                    if s.address == address: return s
+            if hasattr(n, 'children'):
+                for c in n.children:
+                     r = _search(c)
+                     if r: return r
+            return None
+        if device.root_node:
+            return _search(device.root_node)
+        return None
+
     def _trigger_background_read(self, device_name, signals):
-        """Execute signal reads in a background thread to prevent UI freeze."""
-        # If an IEC worker is present on the device manager, enqueue reads to it
-        try:
-            iec_worker = None
-            try:
-                iec_worker = self.device_manager.iec_workers.get(device_name)
-            except Exception:
-                iec_worker = None
+        """DEPRECATED: Worker now polls automatically based on subscription."""
+        pass 
+        
+    def _on_clear_clicked(self):
+        """Clear all live data currently shown in the table."""
+        # Unsubscribe authoritative source
+        
+        # We need to know which devices we are watching.
+        # Since we might have signals from multiple, or just current.
+        # Simplest: Unsubscribe 'live_data' from ALL devices?
+        # Or just the current one?
+        # The user view usually mixes? Or is per tab?
+        # Current UI seems single-device focused (current_device_name).
+        
+        # If we want to accept the user's "Clear Live Data" as a global clear:
+        devices = self.device_manager.get_all_devices()
+        for dev in devices:
+             self.device_manager.subscription_manager.unsubscribe_all(dev.config.name, source="live_data")
+        
+        # Clear UI
+        self.table_model.clear_signals()
+        self.lbl_no_signals.show()
+        
+    def _on_refresh_clicked(self):
+         # This button is somewhat redundant with Auto-Polling.
+         # But maybe forces a One-Shot read via ON_DEMAND mode?
+         # Or just ignored.
+         pass
+         
+    def _on_refresh_selected_clicked(self):
+         pass
 
-            if iec_worker:
-                for sig in signals:
-                    iec_worker.enqueue({'action': 'read', 'signal': sig})
-                return
-        except Exception:
-            pass
-
-        # Fallback: use BulkReadWorker in a background thread
-        import threading
-        from src.core.workers import BulkReadWorker
-        worker = BulkReadWorker(self.device_manager, device_name, signals)
-        t = threading.Thread(target=worker.run)
-        t.daemon = True
-        t.start()
+    def _get_current_device_name(self):
+        """Get the device name for current signals view."""
+        # Try to use tracked device name
+        if hasattr(self, 'current_device_name') and self.current_device_name:
+            return self.current_device_name
+        
+        # Fallback: get first connected device
+        devices = self.device_manager.get_all_devices()
+        for device in devices:
+            if device.connected:
+                return device.config.name
+        
+        # Fallback 2: get any device
+        if devices:
+            return devices[0].config.name
+            
+        return None
 
     def _on_table_context_menu(self, position):
         """Handle right-click context menu in signals table."""
@@ -332,10 +498,32 @@ class SignalsViewWidget(QWidget):
             return
         
         menu = QMenu()
-        if self.watch_list_manager:
-            add_action = QAction("Add to Watch List", self)
-            add_action.triggered.connect(lambda: self.watch_list_manager.add_signal(device_name, signal))
-            menu.addAction(add_action)
+        # Deprecated: WatchListManager is being phased out, but context menu is nice.
+        # Maybe "Remove from Live Data" (Unsubscribe)?
+        
+        remove_action = QAction("Remove from Live Data", self)
+        def remove_signal():
+             from src.models.subscription_models import IECSubscription, SubscriptionMode
+             # We need to construct the exact subscription to remove it.
+             # Or we can add an unsubscribe_by_path in manager.
+             # For now, let's create a matching subscription object.
+             fc = getattr(signal, 'fc', getattr(signal, 'access', ''))
+             sub = IECSubscription(
+                device=device_name,
+                mms_path=signal.address,
+                fc=fc,
+                mode=SubscriptionMode.READ_POLLING,
+                source="live_data"
+            )
+             self.device_manager.subscription_manager.unsubscribe(sub)
+             # Also remove from table?
+             # Subscription removal stops polling.
+             # Ideally manager emits change -> we react.
+             # But for now manual removal from table.
+             self.table_model.remove_signal(signal) # Need to verify this exists or use clear/refresh
+             
+        remove_action.triggered.connect(remove_signal)
+        menu.addAction(remove_action)
         
         # Control option
         menu.addSeparator()
@@ -353,24 +541,6 @@ class SignalsViewWidget(QWidget):
         menu.addAction(control_action)
         
         menu.exec(self.table_view.viewport().mapToGlobal(position))
-    
-    def _get_current_device_name(self):
-        """Get the device name for current signals view."""
-        # Try to use tracked device name
-        if hasattr(self, 'current_device_name') and self.current_device_name:
-            return self.current_device_name
-        
-        # Fallback: get first connected device
-        devices = self.device_manager.get_all_devices()
-        for device in devices:
-            if device.connected:
-                return device.config.name
-        
-        # Fallback 2: get any device
-        if devices:
-            return devices[0].config.name
-            
-        return None
 
     def _on_control_clicked(self, device_name, signal):
         # For Modbus devices, open Modbus-specific control dialog

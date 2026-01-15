@@ -17,6 +17,7 @@ class DeviceTreeWidget(QWidget):
     # Emits the selected Node object (or list of signals if we want)
     # For now, let's emit the Node object so the SignalsView can filter.
     selection_changed = QtSignal(object, str) # Node or Device or Signal, device_name
+    add_to_live_data_requested = QtSignal(dict) # Emits signal definition payload
 
     def __init__(self, device_manager, watch_list_manager=None, parent=None):
         super().__init__(parent)
@@ -632,7 +633,7 @@ class DeviceTreeWidget(QWidget):
         if folder_marker == "FOLDER":
             menu = QMenu()
             
-            # [Added] Copy option
+            # ... folder actions ...
             if clicked_text:
                 copy_action = QAction(f"Copy '{clicked_text}'", self)
                 copy_action.triggered.connect(lambda: self._copy_to_clipboard(clicked_text))
@@ -652,21 +653,50 @@ class DeviceTreeWidget(QWidget):
 
         menu = QMenu()
         
-        # [Added] Copy option for regular items
+        # Identify what data object we have
+        # data could be: str (Device), Signal, or Node (Generic container)
+        
+        is_device_node = isinstance(data, str)
+        from src.models.device_models import Signal, Node, DeviceType
+        is_signal_node = isinstance(data, Signal) or (hasattr(data, 'name') and hasattr(data, 'address') and not hasattr(data, 'children'))
+        is_container_node = isinstance(data, Node) or (hasattr(data, 'children') and not is_device_node)
+
+        # Common actions
         if clicked_text:
             copy_action = QAction(f"Copy '{clicked_text}'", self)
             copy_action.triggered.connect(lambda: self._copy_to_clipboard(clicked_text))
             menu.addAction(copy_action)
             menu.addSeparator()
-        
-        # Check if it's a device node (string) or signal node (Signal object)
-        from src.models.device_models import Signal, DeviceType
-        
-        # Avoid noisy logging of full node/signal objects on right-click
-        logger.debug(f"Context menu invoked on item type: {type(data)}")
-        
-        if isinstance(data, str):
-            # Device node
+
+        # RECURSIVE ADD FOR CONTAINERS (Device or Node)
+        if is_device_node or is_container_node:
+            add_recursive_action = QAction("Add All to Live Data", self)
+            
+            def request_add_recursive():
+                # For Device Node (str), we need the object
+                if is_device_node:
+                    device_name = data
+                    device = self.device_manager.get_device(device_name)
+                    target_node = device.root_node if device else None
+                else:
+                    # Generic Node
+                    # Find device name
+                    device_name = self._find_device_for_item(root_item)
+                    target_node = data
+                
+                if target_node:
+                    payload = {
+                        "device": device_name,
+                        "node": target_node
+                    }
+                    self.add_to_live_data_requested.emit(payload)
+            
+            add_recursive_action.triggered.connect(request_add_recursive)
+            menu.addAction(add_recursive_action)
+            menu.addSeparator()
+
+        if is_device_node:
+             # Device specific actions
             device_name = data
             device = self.device_manager.get_device(device_name)
             if device:
@@ -778,7 +808,24 @@ class DeviceTreeWidget(QWidget):
                     watch_action.triggered.connect(add_multiple_watch)
                     menu.addAction(watch_action)
                 else:
-                    watch_action = QAction("Add to Watch List", self)
+                    # Generic "Add to Live Data" (New Implementation)
+                    add_live_action = QAction("Add to Live Data", self)
+                    def request_add_live():
+                        # Construct payload
+                        payload = {
+                            "device": device_name,
+                            "signal_name": signal.name,
+                            "address": signal.address, # This is the key unique identifier
+                            "description": signal.description,
+                            "fc": getattr(signal, 'fc', getattr(signal, 'access', '')) 
+                        }
+                        self.add_to_live_data_requested.emit(payload)
+
+                    add_live_action.triggered.connect(request_add_live)
+                    menu.addAction(add_live_action)
+
+                    # Legacy Direct Watch List Add (keep for now as backup/alternative)
+                    watch_action = QAction("Add to Watch List (Legacy)", self)
                     # Use closure to capture variables
                     def add_watch():
                         self.watch_list_manager.add_signal(device_name, signal)

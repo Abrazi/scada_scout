@@ -50,6 +50,10 @@ class DeviceManager(QObject):
     def config_path(self, value):
         self._core.config_path = value
 
+    @property
+    def subscription_manager(self):
+        return self._core.subscription_manager
+
     # Delegate methods to Core
     def add_device(self, config: DeviceConfig):
         return self._core.add_device(config)

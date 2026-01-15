@@ -188,6 +188,7 @@ class MainWindow(QMainWindow):
         
         # Connect signals_view to device_tree for "Add to Live Data" functionality
         self.device_tree.signals_view = self.signals_view
+        self.device_tree.add_to_live_data_requested.connect(self.signals_view.add_signal)
         
         # Watch List panel  
         self.dock_bottom = QDockWidget("Watch List", self)

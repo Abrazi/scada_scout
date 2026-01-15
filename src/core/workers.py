@@ -122,27 +122,92 @@ class BulkReadWorker(Worker):
                 
         self.emit("finished")
 
+from src.models.subscription_models import SubscriptionMode
+
 class IEC61850Worker(Worker):
     """
     Dedicated Worker for IEC 61850 operations (Read/Write/Control).
     Uses a thread-safe queue to process requests sequentially off the main thread.
-    Events: data_ready(device_name, Signal), error(msg), finished()
+    
+    NEW: Adheres to IECSubscriptionManager for polling.
     """
 
-    def __init__(self, iec_client, device_name: str):
+    def __init__(self, iec_client, device_name: str, subscription_manager):
         super().__init__()
         self._client = iec_client
         self._device_name = device_name
+        self._subscription_manager = subscription_manager
         self._queue = queue.Queue()
         self._running = True
+        
+        # Poll throttling (e.g. 1 sec default)
+        self._poll_interval = 1.0  
+        self._last_poll_time = 0
 
     def run(self):
         while self._running:
             try:
+                # Use a timeout to allow "tick" logic if queue is empty
+                # We aim for ~1s polling cycle
                 task = self._queue.get(timeout=0.1)
+                self._handle_task(task)
             except queue.Empty:
-                continue
+                # No high-priority tasks, check if we should poll
+                self._check_polling()
+            except Exception as e:
+                logger.error(f"Worker Loop Error: {e}")
+                
+    def _check_polling(self):
+        """Execute READ_POLLING subscriptions if interval elapsed."""
+        now = time.time()
+        if now - self._last_poll_time >= self._poll_interval:
+            self._last_poll_time = now
+            self._execute_polling()
+            
+    def _execute_polling(self):
+        """Poll all signals subscribed with READ_POLLING."""
+        subs = self._subscription_manager.get_subscriptions(
+            self._device_name, 
+            SubscriptionMode.READ_POLLING
+        )
+        
+        if not subs:
+            return
 
+        # Optimization: We could group by FC or Dataset here if adapter supports it.
+        # For now, simplistic iteration.
+        for sub in subs:
+            try:
+                # Construct a logical signal object from the subscription
+                # We need a Signal object to pass to the adapter/client
+                # We can't easily reconstruct the full object, but we have the address.
+                # Assuming adapter.read(address) works or we fake a Signal.
+                
+                # Create a minimal Signal wrapper
+                # Ideally, we should fetch the real Signal object from DeviceManager
+                # BUT DeviceManager is in another thread.
+                # The adapter usually needs: address, fc (optional), type (optional)
+                
+                # Check strict filter: double check if still subscribed (redundant but safe)
+                if not self._subscription_manager.is_subscribed(self._device_name, sub.mms_path):
+                    continue
+
+                if hasattr(self._client, 'read'):
+                    # Direct read by address
+                    val = self._client.read(sub.mms_path)
+                    # The adapter handles updating its internal cache and emitting signal_update
+                    # via the callback registered in DeviceManager.add_device
+                elif hasattr(self._client, 'read_signal'):
+                    # Legacy: needs object. 
+                    # Use a dummy signal
+                    from src.models.device_models import Signal
+                    dummy = Signal(name="Poll", address=sub.mms_path)
+                    self._client.read_signal(dummy)
+            
+            except Exception as e:
+                logger.debug(f"Poll fail {self._device_name} {sub.mms_path}: {e}")
+
+    def _handle_task(self, task):
             try:
                 action = task.get("action")
 
@@ -150,7 +215,7 @@ class IEC61850Worker(Worker):
                     # Expect a Signal object in task['signal']
                     signal = task.get('signal')
                     if signal is None:
-                        continue
+                        return
 
                     # Adapter's read_signal returns an updated Signal
                     if hasattr(self._client, 'read_signal'):

@@ -7,6 +7,7 @@ from typing import List, Dict, Optional, Any
 from src.core.events import EventEmitter
 from src.models.device_models import Device, DeviceConfig, DeviceType, Node, Signal, SignalQuality
 from src.protocols.base_protocol import BaseProtocol
+from src.core.subscription_manager import IECSubscriptionManager
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,9 @@ class DeviceManagerCore(EventEmitter):
         self.config_path = config_path
         self.folder_descriptions: Dict[str, str] = {} # folder_name -> description
         self._active_workers = []
+        
+        # Authoritative Subscription Manager
+        self.subscription_manager = IECSubscriptionManager()
 
     def add_device(self, config: DeviceConfig):
         """Creates a new device from config and registers it."""
@@ -299,7 +303,8 @@ class DeviceManagerCore(EventEmitter):
         # Instantiate dedicated protocol worker for runtime operations
         if device.config.device_type == DeviceType.IEC61850_IED:
             if hasattr(protocol, 'client'): 
-                iec_worker = IEC61850Worker(protocol, device_name)
+                # Create IEC Worker with Subscription Manager
+                iec_worker = IEC61850Worker(protocol, device_name, self.subscription_manager)
                 # iec_worker.on("data_ready", lambda dn, sig: self.emit("signal_updated", dn, sig))
                 iec_worker.on("error", lambda msg: logger.error(f"IEC Worker Error: {msg}"))
                 
