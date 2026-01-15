@@ -3,6 +3,7 @@ from enum import Enum
 from datetime import datetime
 import logging
 import time
+import threading
 
 from src.protocols.base_protocol import BaseProtocol
 from src.models.device_models import DeviceConfig, Node, Signal, SignalType, SignalQuality
@@ -24,14 +25,6 @@ class VendorProfile(Enum):
     GE = "GE"
     NR_ELECTRIC = "NRElectric"
 
-# Internal Mock Connection (reused)
-class IedConnection:
-    def __init__(self):
-        self._connected = False
-
-    def Connect(self, ip, port):
-        self._connected = True
-
 class IEC61850Adapter(BaseProtocol):
     """
     Real implementation using libiec61850 (via pyiec61850 bindings).
@@ -47,6 +40,13 @@ class IEC61850Adapter(BaseProtocol):
             self.event_logger.info("IEC61850Adapter", f"Initialized for {config.ip_address}:{config.port}")
         self._last_read_times = {}
         self.controls: Dict[str, ControlObjectRuntime] = {} # Key: DO Object Reference
+        self._lock = threading.Lock() # libiec61850 connection is not thread-safe
+        
+        # Diagnostic check for UTC time binding
+        if not hasattr(iec61850, 'MmsValue_newUtcTimeMs'):
+            logger.warning("iec61850_wrapper is missing MmsValue_newUtcTimeMs attribute!")
+        else:
+            logger.debug("iec61850_wrapper has MmsValue_newUtcTimeMs.")
         
     def connect(self) -> bool:
         """Establish connection to the IED with comprehensive diagnostics."""
@@ -281,7 +281,8 @@ class IEC61850Adapter(BaseProtocol):
 
         try:
             # Try to get children
-            ret = iec61850.IedConnection_getDataDirectory(self.connection, parent_path)
+            with self._lock:
+                ret = iec61850.IedConnection_getDataDirectory(self.connection, parent_path)
             children = None
             if isinstance(ret, (list, tuple)):
                 children = ret[0]
@@ -409,7 +410,8 @@ class IEC61850Adapter(BaseProtocol):
         
         try:
             # Get the server directory (Logical Devices)
-            ret = iec61850.IedConnection_getLogicalDeviceList(self.connection)
+            with self._lock:
+                ret = iec61850.IedConnection_getLogicalDeviceList(self.connection)
             
             ld_list = None
             if isinstance(ret, (list, tuple)):
@@ -460,7 +462,8 @@ class IEC61850Adapter(BaseProtocol):
                 # Usually LD/LLN0.NamPlt.vendor
                 try:
                     vendor_path = f"{ld_name}/LLN0.NamPlt.vendor"
-                    vendor_res = iec61850.IedConnection_readStringValue(self.connection, vendor_path, iec61850.IEC61850_FC_DC)
+                    with self._lock:
+                        vendor_res = iec61850.IedConnection_readStringValue(self.connection, vendor_path, iec61850.IEC61850_FC_DC)
                     if isinstance(vendor_res, (list, tuple)) and vendor_res[1] == iec61850.IED_ERROR_OK:
                         vendor = vendor_res[0]
                         root.description = f"IED: {vendor}"
@@ -472,7 +475,8 @@ class IEC61850Adapter(BaseProtocol):
 
                 # Get Logical Nodes for this LD
                 try:
-                    ret_ln = iec61850.IedConnection_getLogicalDeviceDirectory(self.connection, ld_name)
+                    with self._lock:
+                        ret_ln = iec61850.IedConnection_getLogicalDeviceDirectory(self.connection, ld_name)
                     ln_list = ret_ln[0] if isinstance(ret_ln, (list, tuple)) else ret_ln
                     
                     if ln_list:
@@ -485,11 +489,12 @@ class IEC61850Adapter(BaseProtocol):
                             
                             # Get Data Objects for this LN
                             try:
-                                ret_do = iec61850.IedConnection_getLogicalNodeDirectory(
-                                    self.connection,
-                                    full_ln_ref,
-                                    iec61850.ACSI_CLASS_DATA_OBJECT
-                                )
+                                with self._lock:
+                                    ret_do = iec61850.IedConnection_getLogicalNodeDirectory(
+                                        self.connection,
+                                        full_ln_ref,
+                                        iec61850.ACSI_CLASS_DATA_OBJECT
+                                    )
                                 do_list = ret_do[0] if isinstance(ret_do, (list, tuple)) else ret_do
                                 
                                 if do_list:
@@ -518,9 +523,10 @@ class IEC61850Adapter(BaseProtocol):
                                         
                                         for fc_val, fc_name in fcs:
                                             try:
-                                                ret_da = iec61850.IedConnection_getDataDirectoryByFC(
-                                                    self.connection, full_do_ref, fc_val
-                                                )
+                                                with self._lock:
+                                                    ret_da = iec61850.IedConnection_getDataDirectoryByFC(
+                                                        self.connection, full_do_ref, fc_val
+                                                    )
                                                 da_list = ret_da[0] if isinstance(ret_da, (list, tuple)) else ret_da
                                                 
                                                 if da_list:
@@ -648,14 +654,14 @@ class IEC61850Adapter(BaseProtocol):
         if self.event_logger:
             self.event_logger.transaction("IEC61850", f"→ READ {signal.address}")
             
-        if not self.connected:
+        if not self.connected or not self.connection:
             signal.quality = SignalQuality.NOT_CONNECTED
             if self.event_logger:
                 self.event_logger.warning("IEC61850", f"← NOT CONNECTED (Internal State)")
             self._emit_update(signal) # Emit even if failed
             return signal
 
-        if self.connection:
+        with self._lock:
             # Check actual connection state
             state = iec61850.IedConnection_getState(self.connection)
             if state != iec61850.IED_STATE_CONNECTED:
@@ -1064,521 +1070,211 @@ class IEC61850Adapter(BaseProtocol):
             return signal
             
         except Exception as e:
-            logger.error(f"Exception reading signal {signal.address}: {e}")
-            if self.event_logger:
-                self.event_logger.error("IEC61850", f"← EXCEPTION: {e}")
-            import traceback
-            traceback.print_exc()
-            signal.quality = SignalQuality.INVALID
-            signal.value = None
-            self._emit_update(signal)
-            return signal
-
-        # Real Read
-        # We need the Object Reference (address)
-        # Assuming signal.address is the full object reference e.g. "IED1_LD0/LLN0.Health.stVal"
-        # Note: libiec61850 readValue expects functional constraint usually if not part of name?
-        # Actually IedConnection_readFloatValue takes "objectReference" and "fc" (FunctionalConstraint)
-        # But our Address string might contain it?
-        # Usually address is "LD/LN.DO.DA". We need FC.
-        # For now, let's assume FC is MX (Measurements) or ST (Status).
-        
-        # We need to map SignalType to correct read function
-        
-        fc = iec61850.IEC61850_FC_MX # Default to MX
-        if signal.signal_type in [SignalType.BINARY, SignalType.DOUBLE_BINARY]:
-             fc = iec61850.IEC61850_FC_ST
-        
-        # We might need to split address or pass it directly.
-        # If address is "LD/LN.DO.DA", we also need to pass FC separately.
-        
-        try:
-            val = None
-            err = iec61850.IedConnection_readFloatValue(self.connection, signal.address, fc)
-            # Checking err is tricky if it returns value directly or via pointer.
-            # In pyiec61850, it often returns the value, or None on error?
-            # Creating a MmsValue is safer.
-            
-            mms_value = iec61850.IedConnection_readObject(self.connection, signal.address, fc, 0)
-            if mms_value:
-                # Extract value
-                val_type = iec61850.MmsValue_getType(mms_value)
-                if val_type == iec61850.MMS_FLOAT:
-                    signal.value = iec61850.MmsValue_toFloat(mms_value)
-                elif val_type == iec61850.MMS_BOOLEAN:
-                     signal.value = iec61850.MmsValue_getBoolean(mms_value)
-                # ... handle other types
-                
-                signal.quality = SignalQuality.GOOD
-                signal.timestamp = datetime.now()
-                
-                iec61850.MmsValue_delete(mms_value)
-            else:
-                 signal.quality = SignalQuality.INVALID
-
-        except Exception as e:
             logger.debug(f"Read failed for {signal.address}: {e}")
             signal.quality = SignalQuality.INVALID
             
         return signal
+            
+        return signal
 
-    def select(self, signal: Signal, params: Optional[Dict[str, Any]] = None) -> bool:
-        """
-        Select-Before-Operate (SBO).
-        Uses ControlObjectClient for higher-level abstraction.
-        
-        Args:
-            signal: The signal to select.
-            params: Optional dict with keys:
-                - originator_category (int)
-                - originator_identity (str)
-                - interlock_check (bool)
-                - synchro_check (bool)
-                - test (bool)
-        """
-        if not self.connected:
-            return False
-            
-        object_ref = self._get_control_object_reference(signal.address)
-    def _build_csob_mms_value(self, value: Any, params: Optional[Dict[str, Any]] = None) -> Any:
-        """Helper to build the MMS Value for Control (Operate/SBO)."""
-        try:
-            # We construct a standard control structure (ctlVal, origin, ctlNum, T, Test, Check)
-            # Size 7 to be safe/standard
-            struct_size = 7 
-            mms_struct = iec61850.MmsValue_newStructure(struct_size)
-            
-            if not mms_struct: return None
-            
-            # 0: ctlVal
-            ctl_val_mms = None
-            if isinstance(value, bool):
-                 ctl_val_mms = iec61850.MmsValue_newBoolean(value)
-            elif isinstance(value, float):
-                 ctl_val_mms = iec61850.MmsValue_newFloat(value)
-            elif isinstance(value, int):
-                 ctl_val_mms = iec61850.MmsValue_newInt32(value)
-            else:
-                 # Default logic or based on signal
-                 ctl_val_mms = iec61850.MmsValue_newBoolean(False) # Fallback
-
-            if ctl_val_mms:
-                iec61850.MmsValue_setElement(mms_struct, 0, ctl_val_mms)
-            
-            # 1: operTm (UtcTime) - Optional, sending empty/None usually means "now" or excluded
-            # We'll leave it NULL (default) or set current time?
-            # iec61850.MmsValue_setElement(mms_struct, 1, iec61850.MmsValue_newUtcTime(int(time.time())))
-            
-            # 2: origin (Structure: orCat, orIdent)
-            or_cat = params.get('originator_category', 2) if params else 2
-            or_ident = str(params.get('originator_identity', "Station")) if params else "Station"
-            
-            origin_struct = iec61850.MmsValue_newStructure(2)
-            iec61850.MmsValue_setElement(origin_struct, 0, iec61850.MmsValue_newInteger(or_cat))
-            
-            ident_bytes = or_ident.encode('utf-8')
-            mms_ident = iec61850.MmsValue_newOctetString(ident_bytes)
-            iec61850.MmsValue_setOctetString(mms_ident, ident_bytes)
-            iec61850.MmsValue_setElement(origin_struct, 1, mms_ident)
-            
-            iec61850.MmsValue_setElement(mms_struct, 2, origin_struct)
-            
-            # 3: ctlNum
-            ctl_num = params.get('ctlNum', 1) if params else 1
-            iec61850.MmsValue_setElement(mms_struct, 3, iec61850.MmsValue_newInteger(ctl_num))
-            
-            # 4: T (Timestamp)
-            # iec61850.MmsValue_setElement(mms_struct, 4, ... )
-            
-            # 5: Test
-            test_mode = params.get('test', False) if params else False
-            iec61850.MmsValue_setElement(mms_struct, 5, iec61850.MmsValue_newBoolean(test_mode))
-            
-            # 6: Check
-            # Check is BitString(2)
-            # interlock = params.get('interlock_check', False)
-            # synchro = params.get('synchro_check', False)
-            # mms_check = iec61850.MmsValue_newBitString(2) ... (missing binding?)
-            # Leaving NULL implies defaults often.
-            
-            return mms_struct
-            
-        except Exception as e:
-            logger.error(f"Failed to build CSOB: {e}")
-            return None
-
-    def select(self, signal: Signal, value: Any = None, params: Optional[Dict[str, Any]] = None) -> bool:
-        """
-        Perform Select (SBO) operation.
-        Step 1 of 2.
-        
-        Args:
-            signal: The signal to select
-            value: Optional value to select with (required by some IEDs)
-            params: Optional control parameters (ctlNum, Check, Test, etc.)
-        """
-        object_ref = self._get_control_object_reference(signal.address)
-        if not object_ref:
-            if self.event_logger:
-                self.event_logger.error("IEC61850", f"SELECT: Could not determine Control Object Reference for {signal.address}")
-            return False
-            
-        # Get Runtime Context (Must be initialized)
-        runtime = self.controls.get(object_ref)
-        if not runtime:
-             if self.event_logger:
-                 self.event_logger.error("IEC61850", f"SELECT: No Control Context for {object_ref}. Please close and reopen Control Window.")
-             return False
-             
-        # Determine SBO Reference
-        target_ref = runtime.sbo_reference
-        if not target_ref:
-             # Fallback: maybe device uses Oper for SBO?
-             # Try building standard Oper path?
-             # Or log error
-             if self.event_logger:
-                 self.event_logger.error("IEC61850", f"SELECT: SBO Reference not discovered for {object_ref}")
-             return False
-
+    def select(self, signal: Signal, value: Any = None, params: dict = None) -> bool:
+        """Perform SELECT phase (SBO)."""
         if self.event_logger:
-            self.event_logger.transaction("IEC61850", f"→ SELECT (Write) {target_ref}")
- 
-        try:
-            # Build Payload Manually
-            mms_value = self._build_csob_mms_value(value, params=params)
-            if not mms_value:
-                 if self.event_logger:
-                     self.event_logger.error("IEC61850", "Failed to build SBO payload")
-                 return False
+            self.event_logger.transaction("IEC61850", f"→ SELECT {signal.address} = {value}")
+            
+        if not self.connected or not self.connection:
+            return False
 
-            # Write to SBO attribute
-            # FC=CO usually
-            err = iec61850.IedConnection_writeObject(self.connection, target_ref, iec61850.IEC61850_FC_CO, mms_value)
+        try:
+            object_ref = self._get_control_object_reference(signal.address)
+            ctx = self.controls.get(object_ref)
+            if not ctx:
+                ctx = self.init_control_context(signal.address)
             
-            # Cleanup
-            iec61850.MmsValue_delete(mms_value)
-            
-            if err == iec61850.IED_ERROR_OK:
-                if self.event_logger:
-                    self.event_logger.transaction("IEC61850", "← SELECT SUCCESS")
                 
-                # Update Runtime State
-                runtime.state = ControlState.SELECTED
-                runtime.last_select_time = datetime.now()
-                return True
-            else:
+            if not ctx:
                 if self.event_logger:
-                    self.event_logger.error("IEC61850", f"← SELECT FAILED: Error {err}")
-                runtime.state = ControlState.FAILED
+                    self.event_logger.error("IEC61850", f"Control initialization failed for {signal.address}")
                 return False
+
+            # Root Cause Fix #2: Verify control model before SELECT
+            if ctx.ctl_model == ControlModel.STATUS_ONLY:
+                if self.event_logger:
+                    self.event_logger.error("IEC61850", f"Object {signal.address} has ctlModel=StatusOnly (0). Control not possible.")
+                return False
+
+            is_sbow = ctx.sbo_reference.endswith(".SBOw")
+            if self.event_logger:
+                self.event_logger.info("IEC61850", f"Issuing SELECT (Security: {'Enhanced' if is_sbow else 'Normal'})")
+        
+            with self._lock:
+                payload = None
+                if is_sbow:
+                    # Enhanced Security (Select Before Operate with value)
+                    # Requires full 7-element Operate structure
+                    payload = self._build_operate_struct(value, ctx)
+                else:
+                    # Normal Security (Select Before Operate)
+                    # Root Cause Fix #2: Explicit MMS Boolean typing
+                    payload = self._create_mms_value(value, signal)
+
+                if not payload:
+                    if self.event_logger:
+                        self.event_logger.error("IEC61850", "Failed to build SELECT payload (NULL MmsValue)")
+                    return False
+
+                # Write to SBO/SBOw object using FC=CO
+                if self.event_logger:
+                     self.event_logger.debug("IEC61850", f"Writing payload to {ctx.sbo_reference}...")
+                
+                err = iec61850.IedConnection_writeObject(self.connection, ctx.sbo_reference, iec61850.IEC61850_FC_CO, payload)
+                
+                # Root Cause Fix #4 & #5: Safety cleanup
+                if payload:
+                    iec61850.MmsValue_delete(payload)
+                
+                if err == iec61850.IED_ERROR_OK:
+                    ctx.state = ControlState.SELECTED
+                    ctx.last_select_time = datetime.now()
+                    if self.event_logger:
+                        self.event_logger.transaction("IEC61850", "← SELECT SUCCESS")
+                    return True
+                else:
+                    if self.event_logger:
+                        self.event_logger.error("IEC61850", f"← SELECT FAILED (Error {err})")
+                    return False
                 
         except Exception as e:
             logger.error(f"Select failed: {e}")
-            if self.event_logger:
-                self.event_logger.error("IEC61850", f"SELECT EXCEPTION: {e}")
             return False
 
-    def operate(self, signal: Signal, value: Any, params: Optional[Dict[str, Any]] = None) -> bool:
-        """
-        Operate (Control) on a signal.
-        Supports Direct Operate and SBO Operate phases.
-        Uses cached ControlObjectRuntime if available.
-        """
-        object_ref = self._get_control_object_reference(signal.address)
-        
-        # If we successfully identified a Control Object Reference
-        if object_ref and object_ref in self.controls:
-             ctrl_runtime = self.controls[object_ref]
-             
-             # SBO Logic
-             if ctrl_runtime.ctl_model.is_sbo:
-                 # Check if we are already selected
-                 # Since this adapter is stateless regarding MmsConnection (mostly), we assume we need to select.
-                 # Optimization: If we just selected it, we might be good? 
-                 # But for safety, we often re-select or assume the UI button called select() separately?
-                 # USER REQUIREMENT: "Auto-Select strategy for simple UI" is what I had before.
-                 # Let's keep Auto-Select if state is IDLE.
-                 
-                 if self.event_logger:
-                     self.event_logger.transaction("IEC61850", f"Operating SBO Control ({ctrl_runtime.ctl_model.name})")
-
-                 # If we haven't selected recently, do it now
-                 # TODO: Check ctrl_runtime.state == SELECTED?
-                 # For now, simplistic auto-select safety:
-                 if not self.select(signal, params=params):
-                      return False
-             
-             result = self._operate_control(object_ref, value, signal, params=params)
-             
-             if result:
-                 ctrl_runtime.state = ControlState.OPERATED
-                 ctrl_runtime.last_operate_time = datetime.now()
-                 self._force_refresh_stval(object_ref)
-             else:
-                 ctrl_runtime.state = ControlState.FAILED
-                 
-             return result
-             
-        # Fallback for legacy/heuristics if not in discovery cache
-        if object_ref and ("Oper" in signal.address or "ctlVal" in signal.address or getattr(signal, "access", "") == "RW"):
-             # Original legacy logic
-             ctl_model = self.read_ctl_model(object_ref) 
-             is_sbo = ctl_model in [2, 4]
-             
-             if is_sbo:
-                 if not self.select(signal, params=params):
-                     return False
-             
-             return self._operate_control(object_ref, value, signal, params=params)
-             
-        # Otherwise, fall back to direct DataAttribute write
-        return self.write_signal(signal, value)
-
-    def read_ctl_model(self, object_ref: str) -> int:
-        """Public alias for _read_ctl_model for external use."""
-        # Check if object_ref is a full address (with attributes) or just the DO
-        # If it looks like a signal address, strip last part if needed
-        # But _read_ctl_model expects DO reference.
-        # Let's try to smart resolve?
-        # If input has no dots, it's likely wrong.
-        return self._read_ctl_model(object_ref)
-
-    def _read_ctl_model(self, object_ref: str) -> int:
-        """
-        Read the ctlModel attribute of the control object.
-        Returns:
-            0: status-only
-            1: direct-with-normal-security (default fallback)
-            2: sbo-with-normal-security
-            3: direct-with-enhanced-security
-            4: sbo-with-enhanced-security
-        """
-        ctl_model_path = f"{object_ref}.CF.ctlModel"
-        # Often just .ctlModel if reading DO? But usually it's a structural DA. 
-        # But we need specific reference.
-        # Try constructing path: object + ".ctlModel" is NOT sufficient usually for ReadValue unless using CF FC.
-        # Let's try object_ref + ".ctlModel" with FC=CF
-        
-        try:
-             # Try standard path
-             path = f"{object_ref}.ctlModel"
-             val, err = iec61850.IedConnection_readInt32Value(
-                 self.connection, path, iec61850.IEC61850_FC_CF
-             )
-             if err == iec61850.IED_ERROR_OK:
-                 return val
-             
-             # Fallback: Maybe generic CDCu structure?
-             pass 
-        except Exception:
-             pass
-             
-        return 1 # Assume Direct if read fails to avoid blocking compatible devices
-
-    def _force_refresh_stval(self, object_ref: str):
-        """Try to find and read the stVal associated with this control to update UI instantly."""
-        # Heuristic: Replace control parts with stVal
-        # object_ref is usually ".../GGIO1.SPCSO1"
-        st_path = f"{object_ref}.stVal"
-        
-        # Create a dummy signal to reuse read_signal logic which handles parsing etc
-        # But read_signal needs a 'signal' object from the model is best.
-        # We'll just do a raw read and if we can find the signal in our cache, update it?
-        # Better: Just read it raw and log it? 
-        # The user wants the UI to update. The UI updates via DeviceManager polling or manual refresh.
-        # If we read it here, we need to inject it into the system.
-        
-        # We can try to use read_signal if we can find the Signal object in device path.
-        # This is expensive to search.
-        # Simpler: Just read value and log it for now.
-        # Or if we have a callback?
-        pass # TODO: Full injection requires finding the Signal instance.
-
-    def _operate_control(self, object_ref: str, value: Any, signal: Signal, params: Optional[Dict[str, Any]] = None) -> bool:
-        """Handle standard IEC 61850 Control Model operation."""
+    def operate(self, signal: Signal, value: Any, params: dict = None) -> bool:
+        """Perform OPERATE phase (Direct or SBO)."""
         if self.event_logger:
-            self.event_logger.transaction("IEC61850", f"→ OPERATE {object_ref} = {value}")
+            self.event_logger.transaction("IEC61850", f"→ OPERATE {signal.address} = {value}")
             
-        if not self.connected:
+        if not self.connected or not self.connection:
             return False
 
         try:
-            client = iec61850.ControlObjectClient_create(object_ref, self.connection)
-            if not client:
-                 return False
-            
-            # Create MmsValue for the control value
-            mms_value = self._create_mms_value(value, signal)
-            if not mms_value:
-                iec61850.ControlObjectClient_destroy(client)
+            object_ref = self._get_control_object_reference(signal.address)
+            ctx = self.controls.get(object_ref)
+            if not ctx:
+                ctx = self.init_control_context(signal.address)
+                
+            if not ctx:
+                if self.event_logger:
+                    self.event_logger.error("IEC61850", f"Control initialization failed for {signal.address}")
                 return False
 
-            # Apply parameters
-            if params:
-                self._apply_control_params(client, params)
+            # Root Cause Fix #2: Verify control model before OPERATE
+            if ctx.ctl_model == ControlModel.STATUS_ONLY:
+                if self.event_logger:
+                    self.event_logger.error("IEC61850", f"Object {signal.address} has ctlModel=StatusOnly (0). Control not possible.")
+                return False
 
-            test_flag = params.get('test', False) if params else False
+            # Increment control number
+            ctx.ctl_num = (ctx.ctl_num + 1) % 256
             
-            success = iec61850.ControlObjectClient_operate(client, mms_value, 1 if test_flag else 0)
+            with self._lock:
+                # Build full Operate struct (7 elements)
+                oper_struct = self._build_operate_struct(value, ctx)
+                if not oper_struct:
+                    if self.event_logger:
+                        self.event_logger.error("IEC61850", "Failed to build OPERATE payload (NULL MmsValue)")
+                    return False
+
+                # Write to .Oper object using FC=CO
+                oper_path = f"{object_ref}.Oper"
+                if self.event_logger:
+                     self.event_logger.debug("IEC61850", f"Writing payload to {oper_path}...")
+                
+                err = iec61850.IedConnection_writeObject(self.connection, oper_path, iec61850.IEC61850_FC_CO, oper_struct)
+                
+                iec61850.MmsValue_delete(oper_struct)
             
-            # Error handling if success is False
-            # Can we get the LastApplError?
-            # libiec61850 often prints to stderr, but we can't easily capture it via ctypes without callback.
-            
-            iec61850.MmsValue_delete(mms_value)
-            iec61850.ControlObjectClient_destroy(client)
-            
-            if success:
+            if err == iec61850.IED_ERROR_OK:
+                ctx.state = ControlState.OPERATED
+                ctx.last_operate_time = datetime.now()
                 if self.event_logger:
                     self.event_logger.transaction("IEC61850", "← OPERATE SUCCESS")
                 return True
             else:
                 if self.event_logger:
-                    self.event_logger.error("IEC61850", "← OPERATE FAILED")
+                    self.event_logger.error("IEC61850", f"← OPERATE FAILED (Error {err})")
                 return False
                 
         except Exception as e:
             logger.error(f"Operate failed: {e}")
-            if self.event_logger:
-                self.event_logger.error("IEC61850", f"OPERATE EXCEPTION: {e}")
-            return False
-
-    def _apply_control_params(self, client, params):
-        """Helper to apply control parameters to the client."""
-        if not params: return
-
-        # Originator
-        if 'originator_category' in params or 'originator_identity' in params:
-             cat = params.get('originator_category', 0) # 0=NotSupported
-             ident = params.get('originator_identity', "Station")
-             iec61850.ControlObjectClient_setOriginator(client, cat, ident)
-        
-        # Checks
-        if 'interlock_check' in params:
-             iec61850.ControlObjectClient_setInterlockCheck(client, params['interlock_check'])
-             
-        if 'synchro_check' in params:
-             iec61850.ControlObjectClient_setSynchroCheck(client, params['synchro_check'])
-             
-        if 'test' in params:
-             # Some libs use setTestMode, others pass it to Operate args
-             iec61850.ControlObjectClient_setTestMode(client, params['test'])
-
-    def write_signal(self, signal: Signal, value: Any) -> bool:
-        """
-        Generic write to a Data Attribute (non-control).
-        Use this for setting configuration parameters (FC=CF, SP, SE).
-        """
-        if not self.connected:
-            return False
-            
-        # Check if it's actually a control
-        object_ref = self._get_control_object_reference(signal.address)
-        if object_ref and ("Oper" in signal.address or "ctlVal" in signal.address):
-            return self._operate_control(object_ref, value, signal)
-
-        if self.event_logger:
-            self.event_logger.transaction("IEC61850", f"→ WRITE {signal.address} = {value}")
-
-        try:
-            mms_value = self._create_mms_value(value, signal)
-            if not mms_value:
-                return False
-            
-            # Determine FC
-            fc = iec61850.IEC61850_FC_CF # Default for settings
-            if getattr(signal, 'fc', None):
-                # Map logical FC to int
-                pass # TODO: Implement mapping if needed, relies on heuristics often
-            elif "setVal" in signal.address:
-                fc = iec61850.IEC61850_FC_SP
-                
-            err = iec61850.IedConnection_writeObject(self.connection, signal.address, fc, mms_value)
-            
-            iec61850.MmsValue_delete(mms_value)
-            
-            if err == iec61850.IED_ERROR_OK:
-                if self.event_logger:
-                    self.event_logger.transaction("IEC61850", "← WRITE SUCCESS")
-                return True
-            else:
-                if self.event_logger:
-                    self.event_logger.error("IEC61850", f"← WRITE FAILED: Error {err}")
-                return False
-
-        except Exception as e:
-            logger.error(f"Write failed: {e}")
             return False
 
     def init_control_context(self, signal_address: str) -> Optional[ControlObjectRuntime]:
         """
-        Step 1: JIT Control Context Initialization.
-        Called strictly when Control Window opens.
-        
-        Performs:
-        1.1 Read ctlModel (Mandatory)
-        1.2 Read stVal/q/t (Implicitly handled by UI poll, but we can do it here if needed)
-        1.3 Discover Oper/SBO/SBOw structure
-        
-        Returns: ControlObjectRuntime or None if not controllable.
+        Step 1: JIT Control Context Initialization with Standard-Compliant Redirection.
         """
+        if not self.connected or not self.connection:
+            return None
+            
         object_ref = self._get_control_object_reference(signal_address)
         if not object_ref:
             return None
+
+        # Standard-Compliant CB Control Chain Fix:
+        # If user targets XCBR/Pos, redirect to CSWI/Pos (Control Interface)
+        if "XCBR" in object_ref and "Pos" in object_ref:
+            cswi_ref = object_ref.replace("XCBR", "CSWI")
+            if self.event_logger:
+                self.event_logger.info("IEC61850", f"Redirecting Control Chain from {object_ref} to {cswi_ref} (CSWI)")
+            object_ref = cswi_ref
             
         if self.event_logger:
             self.event_logger.info("IEC61850", f"Initializing Control Context for {object_ref}")
             
         # 1.1 Read ctlModel
-        # Must read from device, do not cache between sessions
-        ctl_model_val = 1 # Default
-        try:
-             # Try reading .ctlModel with FC=CF
-             val, err = iec61850.IedConnection_readInt32Value(
-                 self.connection, f"{object_ref}.ctlModel", iec61850.IEC61850_FC_CF
-             )
-             if err == iec61850.IED_ERROR_OK:
-                 ctl_model_val = val
-                 if self.event_logger:
-                     self.event_logger.debug("IEC61850", f"  Read ctlModel: {val}")
-             else:
-                 if self.event_logger:
-                    self.event_logger.warning("IEC61850", f"  Failed to read ctlModel (Error {err}). Assuming Status-Only or Direct.")
-                    # If read fails, is it status only? 
-                    # User says: "If missing -> control NOT supported"
-                    # But some devices might implement it differently.
-                    # Let's check for "Oper" existence next.
-        except:
-             pass
-             
-        # 1.3 Discover Oper/SBO
+        ctl_model_val = 0
         supports_oper = False
         supports_sbo = False
         supports_sbow = False
         
-        try:
-            # Browse the DO to find Oper/SBO
-            ret = iec61850.IedConnection_getDataDirectory(self.connection, object_ref)
-            children = ret[0] if isinstance(ret, (list, tuple)) else ret
-            if children:
-                names = self._extract_string_list(children)
-                iec61850.LinkedList_destroy(children)
-                
-                if "Oper" in names: supports_oper = True
-                if "SBO" in names: supports_sbo = True
-                if "SBOw" in names: supports_sbow = True
-                
-                if self.event_logger:
-                    self.event_logger.debug("IEC61850", f"  Capabilities: Oper={supports_oper}, SBO={supports_sbo}, SBOw={supports_sbow}")
-        except: pass
+        with self._lock:
+            try:
+                 # Try reading .ctlModel with FC=CF
+                 val, err = iec61850.IedConnection_readInt32Value(
+                     self.connection, f"{object_ref}.ctlModel", iec61850.IEC61850_FC_CF
+                 )
+                 if err == iec61850.IED_ERROR_OK:
+                     ctl_model_val = val
+                     if self.event_logger:
+                         self.event_logger.debug("IEC61850", f"  Read ctlModel: {ctl_model_val}")
+                 else:
+                     if self.event_logger:
+                         self.event_logger.warning("IEC61850", f"  Failed to read ctlModel (Error: {err}). Defaulting to 0 (status-only)")
+            except Exception as e:
+                 if self.event_logger:
+                     self.event_logger.warning("IEC61850", f"  Exception reading ctlModel: {e}")
+            
+            # 1.3 Discover Oper/SBO
+            try:
+                # Browse the DO to find Oper/SBO
+                ret = iec61850.IedConnection_getDataDirectory(self.connection, object_ref)
+                children = ret[0] if isinstance(ret, (list, tuple)) else ret
+                if children:
+                    names = self._extract_string_list(children)
+                    iec61850.LinkedList_destroy(children)
+                    
+                    if "Oper" in names: supports_oper = True
+                    if "SBO" in names: supports_sbo = True
+                    if "SBOw" in names: supports_sbow = True
+            except: pass
         
+        if self.event_logger:
+            self.event_logger.debug("IEC61850", f"  Capabilities: Oper={supports_oper}, SBO={supports_sbo}, SBOw={supports_sbow}")
+            
         # Build Context
         ctx = ControlObjectRuntime(object_reference=object_ref)
         ctx.update_from_ctl_model_int(ctl_model_val)
 
         # Determine SBO Reference
-        # PREFER SBOw if available (standard for SBO)
-        # THEN SBO (some implementations)
         if supports_sbow:
             ctx.sbo_reference = f"{object_ref}.SBOw"
         elif supports_sbo:
@@ -1595,109 +1291,116 @@ class IEC61850Adapter(BaseProtocol):
         object_ref = self._get_control_object_reference(signal_address)
         if object_ref and object_ref in self.controls:
              del self.controls[object_ref]
-             if self.event_logger:
-                 self.event_logger.debug("IEC61850", f"Context cleared for {object_ref}")
 
     def cancel(self, signal: Signal) -> bool:
         """Cancel selection."""
-        if not self.connected:
+        if not self.connected or not self.connection:
             return False
-            
         object_ref = self._get_control_object_reference(signal.address)
-        if not object_ref:
-            return False
-            
+        if not object_ref: return False
         try:
-            client = iec61850.ControlObjectClient_create(object_ref, self.connection)
-            if not client: return False
-            
-            success = iec61850.ControlObjectClient_cancel(client)
-            iec61850.ControlObjectClient_destroy(client)
-            return success
-        except Exception as e:
+            # Cancel is usually written to .Cancel attribute or using ControlClient
+            # We'll use a simple write to .Cancel if it exists
+            with self._lock:
+                struct = iec61850.MmsValue_newStructure(1)
+                iec61850.MmsValue_setElement(struct, 0, iec61850.MmsValue_newBoolean(True))
+                err = iec61850.IedConnection_writeObject(self.connection, f"{object_ref}.Cancel", iec61850.IEC61850_FC_CO, struct)
+                iec61850.MmsValue_delete(struct)
+            return err == iec61850.IED_ERROR_OK
+        except:
             return False
 
     def _get_control_object_reference(self, address: str) -> str:
-        """
-        Extract the Control Object Reference (DO path) from a detailed signal address.
-        E.g. "IED/LD.GGIO1.SPCSO1.Oper.ctlVal" -> "IED/LD.GGIO1.SPCSO1"
-        """
-        # Common suffixes for control attributes
-        suffixes = [".Oper.ctlVal", ".Oper", ".SBO.ctlVal", ".SBO", ".SBOw.ctlVal", ".SBOw", ".Cancel.ctlVal", ".Cancel", ".ctlVal"]
-        
-        # Try to strip known control suffixes
+        """Extract the Control Object Reference (DO path)."""
+        if not address: return None
+        suffixes = [".Oper.ctlVal", ".Oper", ".SBO.ctlVal", ".SBO", ".SBOw.ctlVal", ".SBOw", 
+                    ".Cancel.ctlVal", ".Cancel", ".ctlVal", ".stVal", ".q", ".t"]
         for suffix in suffixes:
             if address.endswith(suffix):
                 return address[:-len(suffix)]
-        
-        # Heuristic: If it has at least one dot, and we think it's a control
-        if "." in address:
-            # Maybe the user selected the DO node directly?
-            # Check if last part looks like a DA (start with lowercase generally, except Oper/SBO)
-            pass
-            
-        # Fallback: Assume the address IS the object reference if it doesn't end in typical attribute names
-        # But most Signals in the list will be leaf nodes (attributes).
-        return None
+        return address
 
-    def _build_operate_struct(self, value, ctl_num=0):
-        """
-        Builds the complex Operate structure manually as per User Requirement 4C.
-        Structure: [ctlVal, operTm, origin, ctlNum, ...?]
-        Note: Exact field order matters.
-        Standard mapping for `Oper`:
-        - ctlVal (0)
-        - operTm (1)
-        - origin (2)
-        - ctlNum (3)
-        - T (4)
-        - Test (5)
-        - Check (6)
-        """
+    def _build_operate_struct(self, value, ctx: ControlObjectRuntime):
+        """Builds the complex Operate structure manually (7 elements)."""
+        struct = None
         try:
-             # Create payload structure
-             # Size is usually number of elements in the structure definition
-             # We assume 4 or 5 elements standard.
-             # User example: navigate to .Pos.Oper
+             # Standard IEC 61850 Operate structure:
+             # 0: ctlVal (BOOLEAN or INT or FLOAT)
+             # 1: operTm (TIMESTAMP) - Optional
+             # 2: origin (Originator) - [orCat, orIdent]
+             # 3: ctlNum (INT8U)
+             # 4: T (TIMESTAMP)
+             # 5: Test (BOOLEAN)
+             # 6: Check (CheckConditions / BitString)
              
-             # Create ctlVal
-             mms_val = self._create_mms_value(value, None) # Simple value
+             struct = iec61850.MmsValue_newStructure(7)
+             if not struct: 
+                 logger.error("Failed to allocate MmsValue structure.")
+                 return None
              
-             # Create operTm
-             import time
-             mms_tm = iec61850.MmsValue_newUtcTime(time.time())
+             # 0: ctlVal
+             mms_val = self._create_mms_value(value, None)
+             if not mms_val:
+                 logger.error(f"Failed to create ctlVal MmsValue for value: {value}")
+                 iec61850.MmsValue_delete(struct)
+                 return None
+             iec61850.MmsValue_setElement(struct, 0, mms_val)
              
-             # Create Origin
-             # Origin is a structure of [orCat, orIdent]
-             mms_origin = iec61850.MmsValue_newStructure(2)
-             iec61850.MmsValue_setElement(mms_origin, 0, iec61850.MmsValue_newInteger(2)) # Station
-             iec61850.MmsValue_setElement(mms_origin, 1, iec61850.MmsValue_newOctetString(b"SCADA_SCOUT"))
+             # 1: operTm
+             now_ms = int(time.time() * 1000)
+             mms_tm = iec61850.MmsValue_newUtcTimeMs(now_ms)
+             if mms_tm:
+                 iec61850.MmsValue_setElement(struct, 1, mms_tm)
              
-             # Create ctlNum
-             mms_ctl_num = iec61850.MmsValue_newInteger(ctl_num)
+             # 2: origin [cat, ident]
+             origin = iec61850.MmsValue_newStructure(2)
+             if origin:
+                 # Default cat=1 (station-control), ident="SCADA_SCOUT"
+                 cat = ctx.originator_cat if ctx.originator_cat > 0 else 1
+                 ident = ctx.originator_id if ctx.originator_id else "SCADA_SCOUT"
+                 
+                 iec61850.MmsValue_setElement(origin, 0, iec61850.MmsValue_newInteger(cat))
+                 
+                 # Root Cause Fix #4: Use VisibleString for textual Identity
+                 ident_val = iec61850.MmsValue_newVisibleString(ident)
+                 if ident_val:
+                     iec61850.MmsValue_setElement(origin, 1, ident_val)
+                 iec61850.MmsValue_setElement(struct, 2, origin)
              
-             # Assemble Operate Structure
-             # User code said size 5? 
-             # Let's try size 4 basic first: ctlVal, operTm, origin, ctlNum
-             # Actually, simpler IEDs might just default to what ControlObjectClient does.
-             # But if we must manual:
-             mms_operate = iec61850.MmsValue_newStructure(4)
-             iec61850.MmsValue_setElement(mms_operate, 0, mms_val)
-             iec61850.MmsValue_setElement(mms_operate, 1, mms_tm)
-             iec61850.MmsValue_setElement(mms_operate, 2, mms_origin)
-             iec61850.MmsValue_setElement(mms_operate, 3, mms_ctl_num)
+             # 3: ctlNum
+             iec61850.MmsValue_setElement(struct, 3, iec61850.MmsValue_newInteger(ctx.ctl_num))
              
-             return mms_operate
+             # 4: T
+             mms_t = iec61850.MmsValue_newUtcTimeMs(now_ms)
+             if mms_t:
+                 iec61850.MmsValue_setElement(struct, 4, mms_t)
+
+             # 5: Test (BOOLEAN)
+             # Always False for normal operations
+             iec61850.MmsValue_setElement(struct, 5, iec61850.MmsValue_newBoolean(False))
+
+             # 6: Check (CheckConditions - BitString[2])
+             # Bits: 0=synchrocheck, 1=interlock-check
+             mms_check = iec61850.MmsValue_newBitString(2)
+             if mms_check:
+                 iec61850.MmsValue_setBitStringBit(mms_check, 0, False)
+                 iec61850.MmsValue_setBitStringBit(mms_check, 1, False)
+                 iec61850.MmsValue_setElement(struct, 6, mms_check)
+             
+             return struct
         except Exception as e:
              logger.error(f"Failed to build operate struct: {e}")
+             if struct: iec61850.MmsValue_delete(struct)
              return None
 
-            
     def _create_mms_value(self, value: Any, signal: Signal):
         """Create MmsValue from Python value."""
         try:
             if isinstance(value, bool):
-                return iec61850.MmsValue_newBoolean(value)
+                mms = iec61850.MmsValue_newBoolean(value)
+                if not mms:
+                    logger.error(f"Failed to create MMS Boolean for value: {value}")
+                return mms
             elif isinstance(value, float):
                 return iec61850.MmsValue_newFloat(value)
             elif isinstance(value, int):
@@ -1707,6 +1410,28 @@ class IEC61850Adapter(BaseProtocol):
             return None
         except:
             return None
+
+    def write_signal(self, signal: Signal, value: Any) -> bool:
+        """Generic write for non-control attributes."""
+        if not self.connected: return False
+        
+        # Check if it's actually a control and redirect
+        obj_ref = self._get_control_object_reference(signal.address)
+        # If it's a known control DA, use operate/select
+        if "ctlVal" in signal.address or "Oper" in signal.address:
+            return self.operate(signal, value)
+
+        try:
+            mms_value = self._create_mms_value(value, signal)
+            if not mms_value: return False
+            
+            # Use CF as default for writes (usually settings)
+            with self._lock:
+                err = iec61850.IedConnection_writeObject(self.connection, signal.address, iec61850.IEC61850_FC_CF, mms_value)
+                iec61850.MmsValue_delete(mms_value)
+            return err == iec61850.IED_ERROR_OK
+        except:
+            return False
 
     def _detect_vendor_pre_connect(self):
         pass

@@ -200,19 +200,21 @@ class ControlDialog(QDialog):
         self.btn_direct.clicked.connect(self._on_direct)
         self.btn_direct.setEnabled(False)
         
-        self.btn_cancel = QPushButton("Cancel")
-        self.btn_cancel.setFixedHeight(40)
-        self.btn_cancel.clicked.connect(self._on_cancel) # Close dialog or IEC Cancel?
-        # The C# "Cancel" button closes the dialog. 
-        # But we also need an IEC Cancel operation potentially?
-        # C# "Cancel" is DialogResult.Cancel (close).
-        # We can add a separate "Abort Selection" button if SBO.
+        self.btn_abort = QPushButton("Abort Selection (Cancel)")
+        self.btn_abort.setFixedHeight(40)
+        self.btn_abort.clicked.connect(self._on_abort)
+        self.btn_abort.setEnabled(False)
+        
+        self.btn_close = QPushButton("Close")
+        self.btn_close.setFixedHeight(40)
+        self.btn_close.clicked.connect(self.reject)
         
         btn_layout.addWidget(self.btn_select)
         btn_layout.addWidget(self.btn_operate)
         btn_layout.addWidget(self.btn_direct)
+        btn_layout.addWidget(self.btn_abort)
         btn_layout.addStretch()
-        btn_layout.addWidget(self.btn_cancel)
+        btn_layout.addWidget(self.btn_close)
         
         main_layout.addLayout(btn_layout)
 
@@ -241,6 +243,18 @@ class ControlDialog(QDialog):
                 if ctx:
                     self.detected_control_model = ctx.ctl_model.value
                     
+                    # Sync UI with Context (Parameters)
+                    self.num_ctl_num.setValue(ctx.ctl_num)
+                    self.txt_origin_ident.setText(ctx.originator_id)
+                    self.cmb_origin_cat.setCurrentIndex(ctx.originator_cat)
+                    
+                    # Capability flags (for debugging/info)
+                    caps = []
+                    if ctx.supports_sbo: caps.append("SBO")
+                    if ctx.supports_sbOw: caps.append("SBOw")
+                    if ctx.supports_direct: caps.append("Oper")
+                    cap_str = f" [{', '.join(caps)}]" if caps else ""
+                    
                     names = {
                         0: "Status Only (0)",
                         1: "Direct Normal (1)",
@@ -249,19 +263,20 @@ class ControlDialog(QDialog):
                         4: "SBO Enhanced (4)"
                     }
                     name = names.get(self.detected_control_model, f"Unknown ({self.detected_control_model})")
-                    self.txt_control_model.setText(name)
+                    self.txt_control_model.setText(f"{name}{cap_str}")
                     
                     if self.detected_control_model == 0:
-                        self.txt_control_model.setStyleSheet("background-color: #ffcccc") # Red
+                        self.txt_control_model.setStyleSheet("background-color: #ffcccc") 
                     else:
-                        self.txt_control_model.setStyleSheet("background-color: #ccffcc") # Green
+                        self.txt_control_model.setStyleSheet("background-color: #ccffcc") 
                     
                     self._update_button_states()
                     self.lbl_status.setText(f"Context Initialized: {name}")
                     self.lbl_status.setStyleSheet("color: green")
                 else:
-                    self.lbl_status.setText("Error: Failed to initialize context (Not a control?)")
-                    self.txt_control_model.setText("Error")
+                    self.lbl_status.setText("Control NOT support (ctlModel=0 or missing)")
+                    self.txt_control_model.setText("Not Supported")
+                    self.txt_control_model.setStyleSheet("background-color: #ffcccc")
             else:
                 self.lbl_status.setText("Error: Adapter does not support JIT Context")
 
@@ -277,6 +292,7 @@ class ControlDialog(QDialog):
         self.btn_select.setEnabled(is_sbo and not self.selected)
         self.btn_operate.setEnabled(is_sbo and self.selected)
         self.btn_direct.setEnabled(is_direct)
+        self.btn_abort.setEnabled(is_sbo and self.selected)
         
         if is_sbo:
             if self.selected:
@@ -339,26 +355,28 @@ class ControlDialog(QDialog):
             adapter = self._get_adapter()
             if not adapter: return
 
-            params = self._get_params() # Use existing param builder
-            
-            # Get value for SBO (required by JIT/Strict IEDs)
+            # Update Context from UI
+            params = self._get_params()
+            object_ref = adapter._get_control_object_reference(self.signal.address)
+            ctx = adapter.controls.get(object_ref)
+            if ctx:
+                ctx.originator_cat = params['originator_category']
+                ctx.originator_id = params['originator_identity']
+                ctx.ctl_num = self.num_ctl_num.value()
+
             val = self._get_value()
-            # _get_value might not be enough if we need to handle "None" cases explicitly
-            # But the logic above seems mostly safe.
             
-            self.lbl_status.setText("Selecting...")
+            self.lbl_status.setText("Selecting Module...")
             self.lbl_status.setStyleSheet("color: blue")
             QApplication.processEvents()
 
             if adapter.select(self.signal, value=val, params=params):
-                self.lbl_status.setText("Selection Successful (Selected)")
+                self.lbl_status.setText("SELECT Successful (Ready to Operate)")
                 self.lbl_status.setStyleSheet("color: green")
-                self.selected = True # Track state locally as fallback
-                self.btn_select.setEnabled(False)
-                self.btn_operate.setEnabled(True)
-                self.btn_cancel.setEnabled(True)
+                self.selected = True 
+                self._update_button_states()
             else:
-                self.lbl_status.setText("Selection Failed")
+                self.lbl_status.setText("SELECT FAILED (Check device logs)")
                 self.lbl_status.setStyleSheet("color: red")
         except Exception as e:
             self.lbl_status.setText(f"Select Error: {e}")
@@ -367,32 +385,69 @@ class ControlDialog(QDialog):
     def _on_operate(self):
         self.lbl_status.setText("Operating...")
         self.lbl_status.setStyleSheet("color: blue")
+        QApplication.processEvents()
         
         try:
             adapter = self._get_adapter()
             params = self._get_params()
+            
+            # Update Context from UI
+            object_ref = adapter._get_control_object_reference(self.signal.address)
+            ctx = adapter.controls.get(object_ref)
+            if ctx:
+                ctx.originator_cat = params['originator_category']
+                ctx.originator_id = params['originator_identity']
+                ctx.ctl_num = self.num_ctl_num.value()
+
             val = self._get_value()
             
             success = adapter.operate(self.signal, val, params=params)
             
             if success:
-                self.lbl_status.setText("OPERATE Successful!")
+                self.lbl_status.setText("OPERATE SUCCESSFUL")
                 self.lbl_status.setStyleSheet("color: green")
-                self.selected = False # Reset selection after operate
+                self.selected = False 
+                
+                # Update ctlNum in UI for next time (auto-incremented in adapter)
+                if ctx:
+                    self.num_ctl_num.setValue(ctx.ctl_num)
+                    
                 self._update_button_states()
                 self._load_current_value()
             else:
-                self.lbl_status.setText("OPERATE Failed.")
+                self.lbl_status.setText("OPERATE FAILED")
                 self.lbl_status.setStyleSheet("color: red")
         except Exception as e:
             self.lbl_status.setText(f"Error: {e}")
+            self.lbl_status.setStyleSheet("color: red")
 
     def _on_direct(self):
         # Same as operate, but without selection check (adapter handles it)
         self._on_operate()
 
+    def _on_abort(self):
+        """Submit Cancel command to deselect."""
+        try:
+            adapter = self._get_adapter()
+            if not adapter: return
+            
+            self.lbl_status.setText("Aborting Selection...")
+            self.lbl_status.setStyleSheet("color: blue")
+            QApplication.processEvents()
+            
+            if adapter.cancel(self.signal):
+                self.lbl_status.setText("Selection Aborted Successfully")
+                self.lbl_status.setStyleSheet("color: green")
+                self.selected = False
+                self._update_button_states()
+            else:
+                self.lbl_status.setText("Abort Failed")
+                self.lbl_status.setStyleSheet("color: red")
+        except Exception as e:
+            self.lbl_status.setText(f"Abort Error: {e}")
+
     def _on_cancel(self):
-        # Close handles cleanup
+        # Deprecated: use btn_close or reject() directly
         self.reject()
 
     def done(self, result):

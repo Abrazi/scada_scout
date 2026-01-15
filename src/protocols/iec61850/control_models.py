@@ -30,9 +30,16 @@ class ControlState(Enum):
 class ControlObjectRuntime:
     """
     Runtime state tracker for an IEC 61850 Control Object (DO).
+    This object should only exist while the Control Window is open.
     """
     object_reference: str # Full DO path: LD/LN.DO
-    ctl_model: ControlModel = ControlModel.DIRECT_NORMAL
+    ctl_model: ControlModel = ControlModel.STATUS_ONLY
+    
+    # Capability flags discovered at runtime
+    supports_sbo: bool = False
+    supports_sbOw: bool = False
+    supports_direct: bool = False
+    enhanced_security: bool = False
     
     # State tracking
     state: ControlState = ControlState.IDLE
@@ -40,9 +47,8 @@ class ControlObjectRuntime:
     last_operate_time: Optional[datetime] = None
     last_error: str = ""
     
-    # Selection parameters
-    sbo_timeout: int = 10000 # Default MMS timeout in ms
-    originator_cat: int = 2 # Station
+    # Control Parameters
+    ctl_num: int = 0  # Incrementing counter for Operates
     originator_cat: int = 2 # Station
     originator_id: str = "ScadaScout"
     sbo_reference: str = "" # Path to SBO or SBOw attribute
@@ -54,5 +60,6 @@ class ControlObjectRuntime:
     def update_from_ctl_model_int(self, val: int):
         try:
             self.ctl_model = ControlModel(val)
+            self.enhanced_security = self.ctl_model in [ControlModel.DIRECT_ENHANCED, ControlModel.SBO_ENHANCED]
         except ValueError:
-            self.ctl_model = ControlModel.DIRECT_NORMAL
+            self.ctl_model = ControlModel.STATUS_ONLY

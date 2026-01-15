@@ -590,11 +590,20 @@ def IedConnection_writeObject(connection, object_reference, fc, value):
     Returns:
         int: Error code
     """
+    if not connection:
+        return IED_ERROR_NOT_CONNECTED
+    if not value:
+        logger.error(f"IedConnection_writeObject: Attempted to write NULL MmsValue to {object_reference}")
+        return IED_ERROR_USER_PROVIDED_INVALID_ARGUMENT
+        
     _check_lib()
     func = _lib.IedConnection_writeObject
-    func.restype = c_int
-    func.argtypes = [IedConnection, c_char_p, c_int, MmsValue]
-    return func(connection, _encode_str(object_reference), fc, value)
+    func.restype = None  # C function returns void
+    func.argtypes = [IedConnection, POINTER(c_int), c_char_p, c_int, MmsValue]
+    
+    error = c_int()
+    func(connection, ctypes.byref(error), _encode_str(object_reference), fc, value)
+    return error.value
 
 def IedConnection_writeBooleanValue(connection, object_reference, fc, value):
     """
@@ -611,9 +620,12 @@ def IedConnection_writeBooleanValue(connection, object_reference, fc, value):
     """
     _check_lib()
     func = _lib.IedConnection_writeBooleanValue
-    func.restype = c_int
-    func.argtypes = [IedConnection, c_char_p, c_int, c_bool]
-    return func(connection, _encode_str(object_reference), fc, value)
+    func.restype = None
+    func.argtypes = [IedConnection, POINTER(c_int), c_char_p, c_int, c_bool]
+    
+    error = c_int()
+    func(connection, ctypes.byref(error), _encode_str(object_reference), fc, bool(value))
+    return error.value
 
 def IedConnection_writeFloatValue(connection, object_reference, fc, value):
     """
@@ -630,9 +642,12 @@ def IedConnection_writeFloatValue(connection, object_reference, fc, value):
     """
     _check_lib()
     func = _lib.IedConnection_writeFloatValue
-    func.restype = c_int
-    func.argtypes = [IedConnection, c_char_p, c_int, c_float]
-    return func(connection, _encode_str(object_reference), fc, value)
+    func.restype = None
+    func.argtypes = [IedConnection, POINTER(c_int), c_char_p, c_int, c_float]
+    
+    error = c_int()
+    func(connection, ctypes.byref(error), _encode_str(object_reference), fc, float(value))
+    return error.value
 
 def IedConnection_writeInt32Value(connection, object_reference, fc, value):
     """
@@ -649,9 +664,12 @@ def IedConnection_writeInt32Value(connection, object_reference, fc, value):
     """
     _check_lib()
     func = _lib.IedConnection_writeInt32Value
-    func.restype = c_int
-    func.argtypes = [IedConnection, c_char_p, c_int, c_int32]
-    return func(connection, _encode_str(object_reference), fc, value)
+    func.restype = None
+    func.argtypes = [IedConnection, POINTER(c_int), c_char_p, c_int, c_int32]
+    
+    error = c_int()
+    func(connection, ctypes.byref(error), _encode_str(object_reference), fc, int(value))
+    return error.value
 
 # ============================================================================
 # Control Model Functions (ControlObjectClient)
@@ -703,14 +721,14 @@ def ControlObjectClient_select(client):
     func.argtypes = [ControlObjectClient]
     return bool(func(client))
 
-def ControlObjectClient_operate(client, value, test_flag=False):
+def ControlObjectClient_operate(client, value, oper_time=0):
     """
     Perform Operate operation.
     
     Args:
         client: ControlObjectClient handle
         value: MmsValue to operate with (must match type)
-        test_flag: Boolean test flag (0 or non-zero)
+        oper_time: Optional uint64 timestamp (ms)
     
     Returns:
         bool: True if successful
@@ -718,8 +736,8 @@ def ControlObjectClient_operate(client, value, test_flag=False):
     _check_lib()
     func = _lib.ControlObjectClient_operate
     func.restype = c_bool
-    func.argtypes = [ControlObjectClient, MmsValue, c_int] 
-    return bool(func(client, value, 1 if test_flag else 0))
+    func.argtypes = [ControlObjectClient, MmsValue, c_uint64] 
+    return bool(func(client, value, int(oper_time)))
 
 def ControlObjectClient_cancel(client):
     """
@@ -741,23 +759,30 @@ def ControlObjectClient_cancel(client):
         # Some older versions might not have cancel
         return False
 
-def ControlObjectClient_setOriginator(client, category, identity):
+def ControlObjectClient_setOriginator(client, identity, category):
     """
-    Set Originator information.
+    Set the originator information.
     
     Args:
         client: ControlObjectClient handle
-        category: int (0=NotSupported, 1=Bay, 2=Station, 3=Remote, etc.)
-        identity: string identification
+        identity: String identity (e.g. "HMI")
+        category: Integer category (e.g. 1=StationControl)
     """
     try:
         _check_lib()
-        func = _lib.ControlObjectClient_setOriginator
-        func.restype = c_bool
-        func.argtypes = [ControlObjectClient, c_int, c_char_p]
-        return bool(func(client, category, _encode_str(identity)))
+        func = _lib.ControlObjectClient_setOrigin # native name is usually setOrigin
+        func.restype = None
+        func.argtypes = [ControlObjectClient, c_char_p, c_int]
+        func(client, _encode_str(identity), int(category))
     except AttributeError:
-        return False
+        # Try alternate name if setOrigin not found
+        try:
+            func = _lib.ControlObjectClient_setOriginator
+            func.restype = None
+            func.argtypes = [ControlObjectClient, c_int, c_char_p]
+            func(client, int(category), _encode_str(identity))
+        except AttributeError:
+            logger.error("ControlObjectClient_setOriginator/setOrigin not found in library.")
 
 def ControlObjectClient_setInterlockCheck(client, value):
     """Set Interlock Check flag."""
@@ -823,6 +848,8 @@ def MmsValue_delete(value):
     Args:
         value: MmsValue handle
     """
+    if not value:
+        return
     _check_lib()
     func = _lib.MmsValue_delete
     func.restype = None
@@ -916,7 +943,24 @@ def MmsValue_newBoolean(value):
     func = _lib.MmsValue_newBoolean
     func.restype = MmsValue
     func.argtypes = [c_bool]
-    return func(value)
+    return func(bool(value)) # Force boolean
+
+def MmsValue_newBitString(size):
+    """Create new bit string MmsValue."""
+    _check_lib()
+    func = _lib.MmsValue_newBitString
+    func.restype = MmsValue
+    func.argtypes = [c_int]
+    return func(size)
+
+def MmsValue_setBitStringBit(value, bit_pos, bit_value):
+    """Set bit in bit string."""
+    if not value: return
+    _check_lib()
+    func = _lib.MmsValue_setBitStringBit
+    func.restype = None
+    func.argtypes = [MmsValue, c_int, c_bool]
+    func(value, bit_pos, bool(bit_value))
 
 def MmsValue_newFloat(value):
     """Create new float MmsValue."""
@@ -942,64 +986,107 @@ def MmsValue_newVisibleString(value):
     func.argtypes = [c_char_p]
     return func(_encode_str(value))
 
-def MmsValue_newOctetString(value):
-    """Create new octet string MmsValue."""
+def MmsValue_newOctetString(size, max_size=None):
+    """Create new empty octet string MmsValue."""
     _check_lib()
+    if max_size is None:
+        max_size = size
     func = _lib.MmsValue_newOctetString
     func.restype = MmsValue
-    func.argtypes = [c_int, c_int] # size, max_size? No, usually MmsValue_newOctetString(int size, int max_size) in C?
-    # Actually checking libiec61850 header: MmsValue* MmsValue_newOctetString(int size, int maxSize);
-    # But how do we set the content? MmsValue_setOctetString(MmsValue* self, uint8_t* buf, int size);
-    # Or MmsValue_newOctetStringFromBytes(uint8_t* buf, int size); -> This might not exist in standard API.
-    # Let's try to assume we need to create then set.
-    return func(len(value), len(value))
+    func.argtypes = [c_int, c_int]
+    return func(size, max_size)
 
-def MmsValue_setOctetString(value, buf):
+def MmsValue_setOctetString(value, buf, length=None):
     """Set content of OctetString."""
     _check_lib()
     func = _lib.MmsValue_setOctetString
     func.restype = None
-    func.argtypes = [MmsValue, c_char_p, c_int]
-    func(value, buf, len(buf))
+    func.argtypes = [MmsValue, c_void_p, c_int]
+    if length is None:
+        length = len(buf)
+    
+    # Ensure bytes
+    if isinstance(buf, str):
+        buf = buf.encode('utf-8')
+    
+    func(value, buf, length)
 
 def MmsValue_newStructure(size):
-    """Create new Structure MmsValue."""
+    """Create new empty Structure MmsValue."""
     _check_lib()
-    func = _lib.MmsValue_newStructure
-    func.restype = MmsValue
-    func.argtypes = [c_int] # Standard C API takes (const MmsVariableSpecification* type) OR just size?
-    # In libiec61850, MmsValue_newStructure(const MmsVariableSpecification* type) is for typed.
-    # MmsValue_createEmptyStructure(int size) might be what we want for dynamic?
-    # Let's check headers if possible? No.
-    # Usually MmsValue_newStructure is deprecated or requires type.
-    # MmsValue* MmsValue_newDataAccessError(MmsDataAccessError accessError);
-    # Accessing C function directly.
-    # Re-reading user request: "MmsValue.newStructure(5)"
-    return func(size)
+    # MmsValue_createEmptyStructure is safer than MmsValue_newStructure (which requires type spec)
+    try:
+        func = _lib.MmsValue_createEmptyStructure
+        func.restype = MmsValue
+        func.argtypes = [c_int]
+        return func(size)
+    except AttributeError:
+        # If this doesn't exist, we cannot safely create an empty structure by size alone
+        logger.error("MmsValue_createEmptyStructure not found in library.")
+        return None
 
 def MmsValue_setElement(complex_value, index, element_value):
     """Set element in a structure/array."""
+    if not complex_value:
+        return
     _check_lib()
     func = _lib.MmsValue_setElement
     func.restype = None
     func.argtypes = [MmsValue, c_int, MmsValue]
     func(complex_value, index, element_value)
 
-def MmsValue_newUtcTime(timestamp):
-    """Create new UTC Time MmsValue from unix timestamp (int/float)."""
-    _check_lib()
-    func = _lib.MmsValue_newUtcTime
-    func.restype = MmsValue
-    func.argtypes = [c_uint32] # accepts time_t (seconds)
-    return func(int(timestamp))
+def MmsValue_newUtcTime(timestamp_s):
+    """Create new UTC Time MmsValue from unix timestamp (seconds)."""
+    try:
+        _check_lib()
+        func = _lib.MmsValue_newUtcTime
+        func.restype = MmsValue
+        func.argtypes = [c_uint32]
+        return func(int(timestamp_s))
+    except AttributeError:
+        logger.error("MmsValue_newUtcTime not found in library.")
+        return None
+
+def MmsValue_newUtcTimeMs(timestamp_ms):
+    """Create new UTC Time MmsValue from unix timestamp (milliseconds)."""
+    try:
+        _check_lib()
+        func = _lib.MmsValue_newUtcTimeMs
+        func.restype = MmsValue
+        func.argtypes = [c_uint64]
+        mms_val = func(int(timestamp_ms))
+        if mms_val:
+            return mms_val
+    except AttributeError:
+        pass # Expected fallback
+    
+    # Fallback to second-resolution if Ms version not available or failed
+    return MmsValue_newUtcTime(int(timestamp_ms / 1000))
+
+def MmsValue_setUtcTime(mms_val, timestamp_s):
+    """Set UTC time (seconds) in existing MmsValue."""
+    if not mms_val: return
+    try:
+        _check_lib()
+        func = _lib.MmsValue_setUtcTime
+        func.restype = None
+        func.argtypes = [MmsValue, c_uint32]
+        func(mms_val, int(timestamp_s))
+    except AttributeError:
+        logger.error("MmsValue_setUtcTime not found in library.")
 
 def MmsValue_setUtcTimeMs(mms_val, timestamp_ms):
-    """Set high precision time."""
-    _check_lib()
-    func = _lib.MmsValue_setUtcTimeMs
-    func.restype = None
-    func.argtypes = [MmsValue, c_uint64]
-    func(mms_val, int(timestamp_ms))
+    """Set high precision time in existing UtcTime value."""
+    if not mms_val: return
+    try:
+        _check_lib()
+        func = _lib.MmsValue_setUtcTimeMs
+        func.restype = None
+        func.argtypes = [MmsValue, c_uint64]
+        func(mms_val, int(timestamp_ms))
+    except AttributeError:
+        # Fallback to second-resolution
+        MmsValue_setUtcTime(mms_val, int(timestamp_ms / 1000))
 
 def MmsValue_newInteger(value):
     """Create new Integer (auto-sized)."""
