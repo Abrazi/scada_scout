@@ -200,12 +200,24 @@ class IEC61850Worker(Worker):
                 elif hasattr(self._client, 'read_signal'):
                     # Legacy: needs object. 
                     # Use a dummy signal
-                    from src.models.device_models import Signal
+                    from src.models.device_models import Signal, RTTState
                     dummy = Signal(name="Poll", address=sub.mms_path)
+                    
+                    # RTT Measurement (Synchronous)
+                    t_start = time.monotonic()
+                    dummy.rtt_state = RTTState.SENT
+                    
                     self._client.read_signal(dummy)
+                    
+                    # If we got here, response received (or exception already raised)
+                    t_end = time.monotonic()
+                    rtt_ms = (t_end - t_start) * 1000.0
+                    dummy.last_rtt = rtt_ms
+                    dummy.rtt_state = RTTState.RECEIVED
             
             except Exception as e:
                 logger.debug(f"Poll fail {self._device_name} {sub.mms_path}: {e}")
+                
 
     def _handle_task(self, task):
             try:

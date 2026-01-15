@@ -198,7 +198,7 @@ def export_device_list_csv(devices: List[Device], filepath: str) -> Tuple[bool, 
                     "255.255.255.0",  # Default
                     device.config.device_type.value,
                     "Yes" if device.connected else "No",
-                    device.last_update.strftime("%Y-%m-%d %H:%M:%S") if device.last_update else "Never"
+                    device.last_update.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3] if device.last_update else "Never"
                 ]
                 writer.writerow(row)
         
@@ -324,7 +324,7 @@ def export_diagnostics_report(devices: List[Device], filepath: str) -> Tuple[boo
                     f.write(f"  Port Check: {'OPEN' if reachable else 'CLOSED/FILTERED'}\n")
                 
                 if device.last_update:
-                    f.write(f"  Last Update: {device.last_update.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    f.write(f"  Last Update: {device.last_update.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}\n")
                 
                 # Count signals
                 if device.root_node:

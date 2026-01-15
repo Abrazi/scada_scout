@@ -14,7 +14,7 @@ class SignalTableModel(QAbstractTableModel):
     COLUMNS = [
         "Name", "Address", "Access", "Type", 
         "Modbus Type", "Endianness", "Scale", "Offset",
-        "Value", "Quality", "Timestamp", "Last Changed", "Error"
+        "Value", "Quality", "Timestamp", "Last Changed", "Error", "RTT (ms)"
     ]
 
     def __init__(self, parent=None):
@@ -35,7 +35,7 @@ class SignalTableModel(QAbstractTableModel):
             # dataChanged for all range is better.
             if self._signals:
                 tl = self.index(0, 0)
-                br = self.index(len(self._signals)-1, 12)
+                br = self.index(len(self._signals)-1, 13)
                 self.dataChanged.emit(tl, br, [Qt.DisplayRole, Qt.BackgroundRole, Qt.ForegroundRole])
             # self.layoutChanged.emit()
 
@@ -90,7 +90,7 @@ class SignalTableModel(QAbstractTableModel):
             if not self._updates_suspended:
                 # Notify view that the entire row might have changed for safety
                 top_left = self.index(row, 0)
-                bottom_right = self.index(row, 12)
+                bottom_right = self.index(row, 13)
                 self.dataChanged.emit(top_left, bottom_right, [Qt.DisplayRole])
 
     def get_signals(self) -> List[Signal]:
@@ -189,7 +189,18 @@ class SignalTableModel(QAbstractTableModel):
                 # Last Changed column
                 return signal.last_changed.strftime("%H:%M:%S.%f")[:-3] if signal.last_changed else "-"
             elif col == 12: return signal.error or "-"
-            return ""
+            elif col == 13: 
+                # RTT Column
+                if hasattr(signal, 'rtt_state'):
+                    from src.models.device_models import RTTState
+                    if signal.rtt_state == RTTState.RECEIVED:
+                        return f"{signal.last_rtt:.1f}"
+                    elif signal.rtt_state == RTTState.SENT:
+                        return "Pending..."
+                    elif signal.rtt_state == RTTState.TIMEOUT:
+                        return "Timeout"
+                return "N/A"
+            return None
         
         # Color coding based on quality
         if role == Qt.BackgroundRole and col == 9:  # Quality column

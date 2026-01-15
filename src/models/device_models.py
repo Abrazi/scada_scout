@@ -61,6 +61,12 @@ class ModbusEndianness(Enum):
     CDAB = "CDAB"
     BADC = "BADC"
 
+class RTTState(Enum):
+    IDLE = "Idle"
+    SENT = "Sent"
+    RECEIVED = "Received"
+    TIMEOUT = "Timeout"
+
 @dataclass
 class Signal:
     """Represents a single data point (Telemetry)."""
@@ -76,6 +82,10 @@ class Signal:
     fc: str = ""  # Functional Constraint (IEC 61850)
     enum_map: Dict[int, str] = field(default_factory=dict)
     error: str = ""
+    
+    # RTT Tracking
+    last_rtt: float = -1.0
+    rtt_state: RTTState = RTTState.IDLE
     
     # Modbus-specific fields
     modbus_data_type: Optional[ModbusDataType] = None

@@ -230,7 +230,7 @@ class DataInspectorDialog(QDialog):
             # Sane range for timestamp (1970 to 2100)
             if 0 < ts_val < 4102444800: 
                 dt = datetime.datetime.utcfromtimestamp(ts_val)
-                rows_other.append(["UNIX Timestamp", dt.strftime('%Y-%m-%d %H:%M:%S UTC'), "Ref: 32-bit BE"])
+                rows_other.append(["UNIX Timestamp", dt.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3] + " UTC", "Ref: 32-bit BE"])
         except:
              pass
 

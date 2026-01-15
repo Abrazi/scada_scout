@@ -170,11 +170,11 @@ class WatchListWidget(QWidget):
         self.table.setItem(row, 10, quality_item)
         
         # Column 11: Timestamp
-        ts_str = signal.timestamp.strftime("%H:%M:%S") if signal.timestamp else "--"
+        ts_str = signal.timestamp.strftime("%H:%M:%S.%f")[:-3] if signal.timestamp else "--"
         self.table.setItem(row, 11, QTableWidgetItem(ts_str))
 
         # Column 12: Last Changed
-        lc_str = signal.last_changed.strftime("%H:%M:%S") if signal.last_changed else "--"
+        lc_str = signal.last_changed.strftime("%H:%M:%S.%f")[:-3] if signal.last_changed else "--"
         self.table.setItem(row, 12, QTableWidgetItem(lc_str))
 
         # Column 13: Error
@@ -221,11 +221,11 @@ class WatchListWidget(QWidget):
                         quality_item.setBackground(QBrush(QColor('gray')))
 
                     # Column 11: Timestamp
-                    ts_str = signal.timestamp.strftime("%H:%M:%S") if signal.timestamp else "--"
+                    ts_str = signal.timestamp.strftime("%H:%M:%S.%f")[:-3] if signal.timestamp else "--"
                     self._ensure_item(row, 11).setText(ts_str)
 
                     # Column 12: Last Changed
-                    lc_str = signal.last_changed.strftime("%H:%M:%S") if signal.last_changed else "--"
+                    lc_str = signal.last_changed.strftime("%H:%M:%S.%f")[:-3] if signal.last_changed else "--"
                     self._ensure_item(row, 12).setText(lc_str)
 
                     # Column 13: Error
