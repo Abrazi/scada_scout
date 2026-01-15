@@ -1,8 +1,13 @@
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QTextEdit, QPushButton, QHBoxLayout, QCheckBox
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QTextEdit, QPushButton, QHBoxLayout, QCheckBox, QComboBox, QLineEdit, QLabel, QFileDialog
+import subprocess
+import os
 from PySide6.QtCore import Qt, Signal as QtSignal, QObject
 from PySide6.QtGui import QTextCursor, QColor
+import html
 import logging
 from datetime import datetime
+from src.core.packet_capture import PacketCaptureWorker
+import psutil
 
 class EventLogWidget(QWidget):
     """
@@ -68,9 +73,190 @@ class EventLogWidget(QWidget):
         
         toolbar_layout.addStretch()
         
+        
+        # Capture Controls
+        self.btn_capture = QPushButton("Capture Traffic")
+        self.btn_capture.setCheckable(True)
+        self.btn_capture.clicked.connect(self._toggle_capture)
+        # Style make it distinct
+        self.btn_capture.setStyleSheet("""
+            QPushButton:checked {
+                background-color: #c94e4e;
+                color: white;
+            }
+        """)
+        toolbar_layout.addWidget(self.btn_capture)
+
+        self.combo_capture_filter = QComboBox()
+        self.combo_capture_filter.addItem("MMS (TCP 102)", "tcp port 102")
+        self.combo_capture_filter.addItem("GOOSE (Ethertype 0x88b8)", "ether proto 0x88b8")
+        self.combo_capture_filter.addItem("SV (Ethertype 0x88ba)", "ether proto 0x88ba")
+        self.combo_capture_filter.addItem("All TCP", "tcp")
+        self.combo_capture_filter.addItem("All Traffic", "")
+        toolbar_layout.addWidget(self.combo_capture_filter)
+
+        # Capture logging controls
+        self.chk_log_file = QCheckBox("Log to File")
+        self.chk_log_file.setChecked(False)
+        toolbar_layout.addWidget(self.chk_log_file)
+
+        self.le_log_file = QLineEdit()
+        self.le_log_file.setPlaceholderText("packets.log")
+        self.le_log_file.setFixedWidth(220)
+        toolbar_layout.addWidget(self.le_log_file)
+
+        self.btn_browse_log = QPushButton("Browse...")
+        self.btn_browse_log.clicked.connect(self._browse_log_file)
+        toolbar_layout.addWidget(self.btn_browse_log)
+
+        self.chk_log_json = QCheckBox("JSON")
+        self.chk_log_json.setChecked(False)
+        toolbar_layout.addWidget(self.chk_log_json)
+
+        # Rotation controls
+        self.lbl_max_mb = QLabel("Max MB:")
+        self.le_max_mb = QLineEdit()
+        self.le_max_mb.setFixedWidth(80)
+        self.le_max_mb.setPlaceholderText("10")
+        toolbar_layout.addWidget(self.lbl_max_mb)
+        toolbar_layout.addWidget(self.le_max_mb)
+
+        self.lbl_max_files = QLabel("Rotations:")
+        self.le_max_files = QLineEdit()
+        self.le_max_files.setFixedWidth(50)
+        self.le_max_files.setPlaceholderText("5")
+        toolbar_layout.addWidget(self.lbl_max_files)
+        toolbar_layout.addWidget(self.le_max_files)
+
+        self.btn_apply_rotation = QPushButton("Apply Rotation")
+        self.btn_apply_rotation.clicked.connect(self._apply_rotation_settings)
+        toolbar_layout.addWidget(self.btn_apply_rotation)
+
+        # Open log file button
+        self.btn_open_log = QPushButton("Open Log")
+        self.btn_open_log.clicked.connect(self._open_log_file)
+        toolbar_layout.addWidget(self.btn_open_log)
+
+        # Interface selection
+        self.combo_iface = QComboBox()
+        self.combo_iface.setFixedWidth(180)
+        toolbar_layout.addWidget(self.combo_iface)
+
+        self.btn_refresh_ifaces = QPushButton("Refresh Ifaces")
+        self.btn_refresh_ifaces.clicked.connect(self._populate_ifaces)
+        toolbar_layout.addWidget(self.btn_refresh_ifaces)
+
+        # Populate interfaces initially
+        self._populate_ifaces()
+
         self.all_events = [] # Store all events to support filtering
         self.is_paused = False
         self.source_filter = "All Sources" # or specific device name
+        
+        self.capture_worker = PacketCaptureWorker()
+        self.capture_worker.packet_captured.connect(self._on_packet_captured)
+        self.capture_worker.error_occurred.connect(self._on_capture_error)
+
+    def _toggle_capture(self):
+        if self.btn_capture.isChecked():
+            filter_str = self.combo_capture_filter.currentData()
+            # Apply logging and interface settings to worker
+            log_to_file = self.chk_log_file.isChecked()
+            log_path = self.le_log_file.text() if self.le_log_file.text() else None
+            # If user requested logging but didn't provide a path, use default in cwd
+            if log_to_file and not log_path:
+                default_path = os.path.join(os.getcwd(), "packets.log")
+                self.le_log_file.setText(default_path)
+                log_path = default_path
+            json_fmt = self.chk_log_json.isChecked()
+            if log_to_file and log_path:
+                try:
+                    self.capture_worker.set_log_file(log_path, json_format=json_fmt)
+                except Exception as e:
+                    self.log_event("ERROR", "Network", f"Failed to set log file: {e}")
+
+            # Apply rotation settings now if provided
+            try:
+                max_mb = int(self.le_max_mb.text()) if self.le_max_mb.text() else None
+                max_files = int(self.le_max_files.text()) if self.le_max_files.text() else None
+                if max_mb is not None or max_files is not None:
+                    mb_bytes = (max_mb * 1024 * 1024) if max_mb is not None else None
+                    self.capture_worker.set_log_rotation(mb_bytes if mb_bytes is not None else 0, max_files if max_files is not None else 5)
+            except Exception:
+                pass
+
+            iface = self.combo_iface.currentText()
+            if iface and iface != "(none)":
+                try:
+                    self.capture_worker.set_interface(iface)
+                except Exception as e:
+                    self.log_event("ERROR", "Network", f"Failed to set interface: {e}")
+
+            self.capture_worker.start_capture(filter_str)
+            self.log_event("INFO", "Network", f"Started capture with filter: {filter_str}")
+        else:
+            self.capture_worker.stop_capture()
+            self.log_event("INFO", "Network", "Stopped capture")
+
+    def _on_packet_captured(self, summary: str):
+        self.log_event("PACKET", "Network", summary)
+
+    def _browse_log_file(self):
+        filename, _ = QFileDialog.getSaveFileName(self, "Select packet log file", "packets.log", "Log Files (*.log *.txt);;All Files (*)")
+        if filename:
+            self.le_log_file.setText(filename)
+
+    def _open_log_file(self):
+        path = self.le_log_file.text()
+        if not path:
+            self.log_event("ERROR", "Network", "No log file selected to open")
+            return
+        if not os.path.exists(path):
+            self.log_event("ERROR", "Network", f"Log file does not exist: {path}")
+            return
+        try:
+            if os.name == 'nt':
+                os.startfile(path)
+            elif os.name == 'posix':
+                # Linux / macOS
+                opener = 'xdg-open' if subprocess.run(['which', 'xdg-open'], capture_output=True).returncode == 0 else 'open'
+                subprocess.Popen([opener, path])
+            else:
+                subprocess.Popen(['open', path])
+        except Exception as e:
+            self.log_event("ERROR", "Network", f"Failed to open log: {e}")
+
+    def _apply_rotation_settings(self):
+        try:
+            max_mb = int(self.le_max_mb.text()) if self.le_max_mb.text() else None
+            max_files = int(self.le_max_files.text()) if self.le_max_files.text() else None
+            if max_mb is None and max_files is None:
+                return
+            mb_bytes = (max_mb * 1024 * 1024) if max_mb is not None else 0
+            self.capture_worker.set_log_rotation(mb_bytes, max_files if max_files is not None else 5)
+            self.log_event("INFO", "Network", f"Rotation set: {max_mb or 'default'} MB, {max_files or 'default'} files")
+        except Exception as e:
+            self.log_event("ERROR", "Network", f"Failed to apply rotation: {e}")
+
+    def _populate_ifaces(self):
+        self.combo_iface.clear()
+        try:
+            addrs = psutil.net_if_addrs()
+            if not addrs:
+                self.combo_iface.addItem("(none)")
+                return
+            # Add an empty option for default
+            self.combo_iface.addItem("")
+            for name in sorted(addrs.keys()):
+                self.combo_iface.addItem(name)
+        except Exception:
+            self.combo_iface.addItem("(none)")
+
+    def _on_capture_error(self, err: str):
+        self.log_event("ERROR", "Network", err)
+        # Uncheck button if crashed
+        if self.btn_capture.isChecked():
+             self.btn_capture.setChecked(False)
 
     def update_device_list(self, devices):
         """Updates the source filter with available devices."""
@@ -168,13 +354,23 @@ class EventLogWidget(QWidget):
             color = "#9cdcfe"
         elif level == "TRANSACTION":
             color = "#c586c0"
+        elif level == "PACKET":
+            color = "#569cd6" # Light Blue for packets
         else:
             color = "#d4d4d4"
         
         # Format the log entry
-        html = f'<span style="color: #808080;">[{event["timestamp"]}]</span> <span style="color: {color};">[{level}]</span> <span style="color: #569cd6;">{event["source"]}:</span> {event["message"]}'
-        
-        self.text_edit.append(html)
+        # Escape message and preserve formatting using <pre>
+        msg = message if isinstance(message, str) else str(message)
+        escaped = html.escape(msg)
+        entry_html = (
+            f'<span style="color: #808080;">[{event["timestamp"]}]</span> '
+            f'<span style="color: {color};">[{level}]</span> '
+            f'<span style="color: #569cd6;">{event["source"]}:</span> '
+            f'<pre style="white-space:pre-wrap;margin:0">{escaped}</pre>'
+        )
+
+        self.text_edit.append(entry_html)
         
         # Auto-scroll to bottom
         cursor = self.text_edit.textCursor()

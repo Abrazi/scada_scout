@@ -1103,19 +1103,26 @@ class IEC61850Adapter(BaseProtocol):
                     self.event_logger.error("IEC61850", f"Object {signal.address} has ctlModel=StatusOnly (0). Control not possible.")
                 return False
 
+            # Check if SELECT is even needed (only for SBO models)
+            if not ctx.ctl_model.is_sbo:
+                if self.event_logger:
+                    self.event_logger.info("IEC61850", f"Object {signal.address} has ctlModel={ctx.ctl_model.name}. Skipping SELECT phase (Direct Control).")
+                ctx.state = ControlState.SELECTED # Internal state transition to allow OPERATE
+                return True
+
             is_sbow = ctx.sbo_reference.endswith(".SBOw")
             if self.event_logger:
                 self.event_logger.info("IEC61850", f"Issuing SELECT (Security: {'Enhanced' if is_sbow else 'Normal'})")
         
             with self._lock:
                 payload = None
-                if is_sbow:
-                    # Enhanced Security (Select Before Operate with value)
-                    # Requires full 7-element Operate structure
-                    payload = self._build_operate_struct(value, ctx)
-                else:
-                    # Normal Security (Select Before Operate)
-                    # Root Cause Fix #2: Explicit MMS Boolean typing
+                # Always prefer building the full 7-element Operate structure for SELECT
+                # so that ctlNum, origin, timestamps and check/test fields are present.
+                # Some IEDs require these fields even for non-enhanced SBO.
+                payload = self._build_operate_struct(value, ctx, is_select=True)
+
+                # Fallback: if building the struct failed, fall back to simple MMS value
+                if not payload:
                     payload = self._create_mms_value(value, signal)
 
                 if not payload:
@@ -1215,9 +1222,11 @@ class IEC61850Adapter(BaseProtocol):
         if not self.connected or not self.connection:
             return None
             
-        object_ref = self._get_control_object_reference(signal_address)
-        if not object_ref:
+        original_do_ref = self._get_control_object_reference(signal_address)
+        if not original_do_ref:
             return None
+
+        object_ref = original_do_ref
 
         # Standard-Compliant CB Control Chain Fix:
         # If user targets XCBR/Pos, redirect to CSWI/Pos (Control Interface)
@@ -1230,8 +1239,9 @@ class IEC61850Adapter(BaseProtocol):
         if self.event_logger:
             self.event_logger.info("IEC61850", f"Initializing Control Context for {object_ref}")
             
-        # 1.1 Read ctlModel
+        # 1.1 Read ctlModel and ctlNum (Action 3)
         ctl_model_val = 0
+        ctl_num_val = 0
         supports_oper = False
         supports_sbo = False
         supports_sbow = False
@@ -1246,12 +1256,18 @@ class IEC61850Adapter(BaseProtocol):
                      ctl_model_val = val
                      if self.event_logger:
                          self.event_logger.debug("IEC61850", f"  Read ctlModel: {ctl_model_val}")
-                 else:
+                 
+                 # Action 3: Read current ctlNum for echoing
+                 val_num, err_num = iec61850.IedConnection_readInt32Value(
+                     self.connection, f"{object_ref}.ctlNum", iec61850.IEC61850_FC_ST
+                 )
+                 if err_num == iec61850.IED_ERROR_OK:
+                     ctl_num_val = val_num
                      if self.event_logger:
-                         self.event_logger.warning("IEC61850", f"  Failed to read ctlModel (Error: {err}). Defaulting to 0 (status-only)")
+                         self.event_logger.debug("IEC61850", f"  Read Current ctlNum: {ctl_num_val}")
             except Exception as e:
                  if self.event_logger:
-                     self.event_logger.warning("IEC61850", f"  Exception reading ctlModel: {e}")
+                     self.event_logger.warning("IEC61850", f"  Exception reading control attributes: {e}")
             
             # 1.3 Discover Oper/SBO
             try:
@@ -1273,15 +1289,16 @@ class IEC61850Adapter(BaseProtocol):
         # Build Context
         ctx = ControlObjectRuntime(object_reference=object_ref)
         ctx.update_from_ctl_model_int(ctl_model_val)
+        ctx.ctl_num = ctl_num_val # Initialization with IED's current value
 
         # Determine SBO Reference
         if supports_sbow:
             ctx.sbo_reference = f"{object_ref}.SBOw"
         elif supports_sbo:
             ctx.sbo_reference = f"{object_ref}.SBO"
-            
-        # Add to cache
+        # Add to cache (Multiple entries for robust lookup)
         self.controls[signal_address] = ctx 
+        self.controls[original_do_ref] = ctx
         self.controls[object_ref] = ctx
         
         return ctx
@@ -1320,67 +1337,79 @@ class IEC61850Adapter(BaseProtocol):
                 return address[:-len(suffix)]
         return address
 
-    def _build_operate_struct(self, value, ctx: ControlObjectRuntime):
-        """Builds the complex Operate structure manually (7 elements)."""
+    def _build_operate_struct(self, value, ctx: ControlObjectRuntime, is_select: bool = False):
+        """Builds the complex Operate structure manually (7 elements) with detailed logging."""
         struct = None
         try:
-             # Standard IEC 61850 Operate structure:
-             # 0: ctlVal (BOOLEAN or INT or FLOAT)
-             # 1: operTm (TIMESTAMP) - Optional
-             # 2: origin (Originator) - [orCat, orIdent]
-             # 3: ctlNum (INT8U)
-             # 4: T (TIMESTAMP)
-             # 5: Test (BOOLEAN)
-             # 6: Check (CheckConditions / BitString)
-             
+             # Standard IEC 61850 Operate structure baseline enforcement
              struct = iec61850.MmsValue_newStructure(7)
              if not struct: 
                  logger.error("Failed to allocate MmsValue structure.")
                  return None
              
+             now_ms = int(time.time() * 1000)
+             
+             # Extract Baseline Values
+             ctl_val_bool = bool(value)
+             test_bool = False # Safe Baseline
+             check_val = 0     # Safe Baseline
+             cat = ctx.originator_cat if ctx.originator_cat > 0 else 3 # 3 = Remote (Action 2)
+             ident = ctx.originator_id if ctx.originator_id and ctx.originator_id != "ScadaScout" else "SCADA"
+
+             # Root Cause Fix #1: Handle ctlNum carefully (Action 3 / Option B)
+             # We must ALWAYS fill the structure element to avoid NULL pointer crashes in the native encoder.
+             # Echo back the last known ctlNum from the IED.
+             ctl_num_to_send = ctx.ctl_num
+
+             if self.event_logger:
+                 self.event_logger.debug("IEC61850", f"Constructing {'SELECT' if is_select else 'OPERATE'} Payload (7 elements):")
+                 self.event_logger.debug("IEC61850", f"  [0] ctlVal: {ctl_val_bool}")
+                 self.event_logger.debug("IEC61850", f"  [1] operTm: {datetime.fromtimestamp(now_ms/1000).isoformat()} (Echoing T)")
+                 self.event_logger.debug("IEC61850", f"  [2] origin: cat={cat}, id={ident}")
+                 self.event_logger.debug("IEC61850", f"  [3] ctlNum: {ctl_num_to_send} (Echoed form IED)")
+                 self.event_logger.debug("IEC61850", f"  [4] T: {datetime.fromtimestamp(now_ms/1000).isoformat()}")
+                 self.event_logger.debug("IEC61850", f"  [5] Test: {test_bool}")
+                 self.event_logger.debug("IEC61850", f"  [6] Check: {check_val}")
+
              # 0: ctlVal
-             mms_val = self._create_mms_value(value, None)
+             mms_val = self._create_mms_value(ctl_val_bool, None)
              if not mms_val:
-                 logger.error(f"Failed to create ctlVal MmsValue for value: {value}")
+                 logger.error(f"Failed to create ctlVal MmsValue for value: {ctl_val_bool}")
                  iec61850.MmsValue_delete(struct)
                  return None
              iec61850.MmsValue_setElement(struct, 0, mms_val)
              
-             # 1: operTm
-             now_ms = int(time.time() * 1000)
+             # 1: operTm (Required to be non-NULL for encoder stability)
              mms_tm = iec61850.MmsValue_newUtcTimeMs(now_ms)
              if mms_tm:
                  iec61850.MmsValue_setElement(struct, 1, mms_tm)
+             else:
+                 # Fallback to prevent NULL element crash
+                 iec61850.MmsValue_setElement(struct, 1, iec61850.MmsValue_newBoolean(False))
              
              # 2: origin [cat, ident]
              origin = iec61850.MmsValue_newStructure(2)
              if origin:
-                 # Default cat=1 (station-control), ident="SCADA_SCOUT"
-                 cat = ctx.originator_cat if ctx.originator_cat > 0 else 1
-                 ident = ctx.originator_id if ctx.originator_id else "SCADA_SCOUT"
-                 
                  iec61850.MmsValue_setElement(origin, 0, iec61850.MmsValue_newInteger(cat))
-                 
-                 # Root Cause Fix #4: Use VisibleString for textual Identity
                  ident_val = iec61850.MmsValue_newVisibleString(ident)
                  if ident_val:
                      iec61850.MmsValue_setElement(origin, 1, ident_val)
                  iec61850.MmsValue_setElement(struct, 2, origin)
              
-             # 3: ctlNum
-             iec61850.MmsValue_setElement(struct, 3, iec61850.MmsValue_newInteger(ctx.ctl_num))
+             # 3: ctlNum (MANDATORY non-NULL)
+             iec61850.MmsValue_setElement(struct, 3, iec61850.MmsValue_newInteger(ctl_num_to_send))
              
              # 4: T
              mms_t = iec61850.MmsValue_newUtcTimeMs(now_ms)
              if mms_t:
                  iec61850.MmsValue_setElement(struct, 4, mms_t)
+             else:
+                 iec61850.MmsValue_setElement(struct, 4, iec61850.MmsValue_newBoolean(False))
 
              # 5: Test (BOOLEAN)
-             # Always False for normal operations
-             iec61850.MmsValue_setElement(struct, 5, iec61850.MmsValue_newBoolean(False))
+             iec61850.MmsValue_setElement(struct, 5, iec61850.MmsValue_newBoolean(test_bool))
 
              # 6: Check (CheckConditions - BitString[2])
-             # Bits: 0=synchrocheck, 1=interlock-check
              mms_check = iec61850.MmsValue_newBitString(2)
              if mms_check:
                  iec61850.MmsValue_setBitStringBit(mms_check, 0, False)

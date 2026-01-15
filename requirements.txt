@@ -5,6 +5,7 @@ numpy>=1.24.0
 
 # Protocol Libraries
 pymodbus>=3.5.0
+scapy>=2.5.0
 
 # IEC 61850 Protocol
 # Note: Requires native libiec61850 library (dll/so/dylib) to be installed

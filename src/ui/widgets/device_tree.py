@@ -1070,38 +1070,46 @@ class DeviceTreeWidget(QWidget):
         if item is None:
             return
 
-        def recurse(it: QStandardItem):
-            try:
-                idx = it.index()
-                if idx.isValid():
-                    self.tree_view.expand(idx)
-            except Exception:
-                pass
-            for i in range(it.rowCount()):
-                child = it.child(i)
-                if child:
-                    recurse(child)
+        self.tree_view.setUpdatesEnabled(False)
+        try:
+            def recurse(it: QStandardItem):
+                try:
+                    idx = it.index()
+                    if idx.isValid():
+                        self.tree_view.expand(idx)
+                except Exception:
+                    pass
+                for i in range(it.rowCount()):
+                    child = it.child(i)
+                    if child:
+                        recurse(child)
 
-        recurse(item)
+            recurse(item)
+        finally:
+            self.tree_view.setUpdatesEnabled(True)
 
     def _collapse_subtree(self, item: QStandardItem):
         """Recursively collapse the given QStandardItem and all its children in the view."""
         if item is None:
             return
 
-        def recurse(it: QStandardItem):
-            for i in range(it.rowCount()):
-                child = it.child(i)
-                if child:
-                    recurse(child)
-            try:
-                idx = it.index()
-                if idx.isValid():
-                    self.tree_view.collapse(idx)
-            except Exception:
-                pass
+        self.tree_view.setUpdatesEnabled(False)
+        try:
+            def recurse(it: QStandardItem):
+                for i in range(it.rowCount()):
+                    child = it.child(i)
+                    if child:
+                        recurse(child)
+                try:
+                    idx = it.index()
+                    if idx.isValid():
+                        self.tree_view.collapse(idx)
+                except Exception:
+                    pass
 
-        recurse(item)
+            recurse(item)
+        finally:
+            self.tree_view.setUpdatesEnabled(True)
 
     def _show_modbus_inspector(self, device_name):
         """Show the Modbus Data Inspector dialog"""
