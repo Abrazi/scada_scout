@@ -166,6 +166,17 @@ class SignalsViewWidget(QWidget):
 
     def _on_clear_clicked(self):
         """Clear all live data currently shown in the table."""
+        # Stop auto-refresh to prevent continued reading
+        if hasattr(self, 'refresh_timer') and self.refresh_timer.isActive():
+            self.refresh_timer.stop()
+            if hasattr(self, 'chk_auto_refresh'):
+                self.chk_auto_refresh.setChecked(False)
+        
+        # Clear the current node reference to prevent manual refresh from working
+        self.current_node = None
+        self.current_device_name = None
+        
+        # Clear the table model
         try:
             self.table_model.clear_signals()
         except Exception:
@@ -235,24 +246,29 @@ class SignalsViewWidget(QWidget):
         except Exception:
             logger.info("add_node_to_live: collected signals (count unknown)")
         if not signals:
+            import logging
+            logging.getLogger("SignalsView").warning(f"add_node_to_live: No signals found in node {node}")
             return
 
         try:
             self.table_model.add_signals(signals)
         except Exception:
             import logging
-            logging.getLogger("SignalsView").exception("Failed to add signals to model, falling back to set_node_filter")
-            # Fallback: reset to node filter
-            try:
-                self.table_model.set_node_filter(node)
-            except Exception:
-                pass
+            logging.getLogger("SignalsView").exception("Failed to add signals to model")
+            return
 
         # Update UI elements
         self.table_view.resizeColumnsToContents()
         self.lbl_no_signals.hide()
         if hasattr(self, 'btn_refresh_selected'):
             self.btn_refresh_selected.setEnabled(True)
+            
+        # Auto-start refresh if it was stopped
+        if hasattr(self, 'chk_auto_refresh') and not self.chk_auto_refresh.isChecked():
+            self.chk_auto_refresh.setChecked(True) # This triggers _on_auto_refresh_toggled -> starts timer
+        
+        # Trigger immediate read
+        self._trigger_background_read(self.current_device_name, signals)
 
     def resizeEvent(self, event):
         """Ensure overlay stays centered."""

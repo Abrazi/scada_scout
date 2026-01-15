@@ -2,6 +2,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QTableWidget,
                                 QTableWidgetItem, QPushButton, QSpinBox, QLabel,
                                 QHeaderView, QFileDialog, QMessageBox)
 from PySide6.QtCore import Qt, Signal as QtSignal
+from PySide6.QtGui import QBrush, QColor
 from src.core.watch_list_manager import WatchListManager, WatchedSignal
 from src.models.device_models import Signal, SignalQuality
 import logging
@@ -55,11 +56,12 @@ class WatchListWidget(QWidget):
         
         # Table
         self.table = QTableWidget()
-        self.table.setColumnCount(13)
+        # Add one column for RTT (ms) after Value
+        self.table.setColumnCount(14)
         self.table.setHorizontalHeaderLabels([
-            "Name", "Address", "Access", "Type", 
+            "Name", "Address", "Access", "Type",
             "Modbus Type", "Endianness", "Scale", "Offset",
-            "Value", "Quality", "Timestamp", "Last Changed", "Error"
+            "Value", "RTT (ms)", "Quality", "Timestamp", "Last Changed", "Error"
         ])
         
         header = self.table.horizontalHeader()
@@ -96,6 +98,14 @@ class WatchListWidget(QWidget):
             self._add_signal_row(watched)
         
         self.table.resizeColumnsToContents()
+
+    def _ensure_item(self, row: int, col: int) -> QTableWidgetItem:
+        """Ensure a QTableWidgetItem exists at (row, col) and return it."""
+        item = self.table.item(row, col)
+        if item is None:
+            item = QTableWidgetItem()
+            self.table.setItem(row, col, item)
+        return item
     
     def _add_signal_row(self, watched: WatchedSignal):
         """Add a row for a watched signal."""
@@ -138,34 +148,43 @@ class WatchListWidget(QWidget):
         # Column 8: Value
         value_str = str(signal.value) if signal.value is not None else "--"
         self.table.setItem(row, 8, QTableWidgetItem(value_str))
-        
-        # Column 9: Quality
-        quality_item = QTableWidgetItem(signal.quality.value)
-        # Color code by quality
-        if signal.quality == SignalQuality.GOOD:
-            quality_item.setBackground(Qt.green)
-        elif signal.quality == SignalQuality.INVALID:
-            quality_item.setBackground(Qt.red)
+
+        # Column 9: RTT (ms)
+        rtt_display = str(watched.last_response_ms) if watched.last_response_ms is not None else "--"
+        self.table.setItem(row, 9, QTableWidgetItem(rtt_display))
+
+        # Column 10: Quality
+        try:
+            qual_text = signal.quality.value if getattr(signal, 'quality', None) is not None else "--"
+        except Exception:
+            qual_text = "--"
+
+        quality_item = QTableWidgetItem(qual_text)
+        # Color code by quality (use QBrush/QColor to avoid conversion surprises)
+        if getattr(signal, 'quality', None) == SignalQuality.GOOD:
+            quality_item.setBackground(QBrush(QColor('darkgreen')))
+        elif getattr(signal, 'quality', None) == SignalQuality.INVALID:
+            quality_item.setBackground(QBrush(QColor('red')))
         else:
-            quality_item.setBackground(Qt.gray)
-        self.table.setItem(row, 9, quality_item)
+            quality_item.setBackground(QBrush(QColor('gray')))
+        self.table.setItem(row, 10, quality_item)
         
-        # Column 10: Timestamp
+        # Column 11: Timestamp
         ts_str = signal.timestamp.strftime("%H:%M:%S") if signal.timestamp else "--"
-        self.table.setItem(row, 10, QTableWidgetItem(ts_str))
-        
-        # Column 11: Last Changed
+        self.table.setItem(row, 11, QTableWidgetItem(ts_str))
+
+        # Column 12: Last Changed
         lc_str = signal.last_changed.strftime("%H:%M:%S") if signal.last_changed else "--"
-        self.table.setItem(row, 11, QTableWidgetItem(lc_str))
-        
-        # Column 12: Error
+        self.table.setItem(row, 12, QTableWidgetItem(lc_str))
+
+        # Column 13: Error
         error_str = signal.error or "-"
-        self.table.setItem(row, 12, QTableWidgetItem(error_str))
+        self.table.setItem(row, 13, QTableWidgetItem(error_str))
         
         # Store watch_id in row data (column 0)
         self.table.item(row, 0).setData(Qt.UserRole, watched.watch_id)
     
-    def _on_signal_updated(self, watch_id: str, signal: Signal):
+    def _on_signal_updated(self, watch_id: str, signal: Signal, response_ms: int):
         """Update a signal's display when its value changes."""
         # Find the row
         for row in range(self.table.rowCount()):
@@ -181,31 +200,39 @@ class WatchListWidget(QWidget):
                 # Column 6: Scale (usually doesn't change)
                 # Column 7: Offset (usually doesn't change)
                 
-                # Column 8: Value
-                value_str = str(signal.value) if signal.value is not None else "--"
-                self.table.item(row, 8).setText(value_str)
-                
-                # Column 9: Quality
-                quality_item = self.table.item(row, 9)
-                quality_item.setText(signal.quality.value)
-                if signal.quality == SignalQuality.GOOD:
-                    quality_item.setBackground(Qt.green)
-                elif signal.quality == SignalQuality.INVALID:
-                    quality_item.setBackground(Qt.red)
-                else:
-                    quality_item.setBackground(Qt.gray)
-                
-                # Column 10: Timestamp
-                ts_str = signal.timestamp.strftime("%H:%M:%S") if signal.timestamp else "--"
-                self.table.item(row, 10).setText(ts_str)
-                
-                # Column 11: Last Changed
-                lc_str = signal.last_changed.strftime("%H:%M:%S") if signal.last_changed else "--"
-                self.table.item(row, 11).setText(lc_str)
-                
-                # Column 12: Error
-                error_str = signal.error or "-"
-                self.table.item(row, 12).setText(error_str)
+                try:
+                    # Column 8: Value
+                    value_str = str(signal.value) if signal.value is not None else "--"
+                    self._ensure_item(row, 8).setText(value_str)
+
+                    # Column 9: RTT (ms)
+                    rtt_text = str(response_ms) if response_ms is not None else "--"
+                    self._ensure_item(row, 9).setText(rtt_text)
+
+                    # Column 10: Quality
+                    quality_item = self._ensure_item(row, 10)
+                    qual_text = signal.quality.value if getattr(signal, 'quality', None) is not None else "--"
+                    quality_item.setText(qual_text)
+                    if getattr(signal, 'quality', None) == SignalQuality.GOOD:
+                        quality_item.setBackground(QBrush(QColor('darkgreen')))
+                    elif getattr(signal, 'quality', None) == SignalQuality.INVALID:
+                        quality_item.setBackground(QBrush(QColor('red')))
+                    else:
+                        quality_item.setBackground(QBrush(QColor('gray')))
+
+                    # Column 11: Timestamp
+                    ts_str = signal.timestamp.strftime("%H:%M:%S") if signal.timestamp else "--"
+                    self._ensure_item(row, 11).setText(ts_str)
+
+                    # Column 12: Last Changed
+                    lc_str = signal.last_changed.strftime("%H:%M:%S") if signal.last_changed else "--"
+                    self._ensure_item(row, 12).setText(lc_str)
+
+                    # Column 13: Error
+                    error_str = signal.error or "-"
+                    self._ensure_item(row, 13).setText(error_str)
+                except Exception as e:
+                    logger.exception(f"Error updating watch list row {row} for {watch_id}: {e}")
                 break
     
     def _on_interval_changed(self, value: int):

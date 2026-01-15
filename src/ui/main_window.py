@@ -186,6 +186,9 @@ class MainWindow(QMainWindow):
         self.dock_right.setWidget(self.signals_view)
         self.addDockWidget(Qt.RightDockWidgetArea, self.dock_right)
         
+        # Connect signals_view to device_tree for "Add to Live Data" functionality
+        self.device_tree.signals_view = self.signals_view
+        
         # Watch List panel  
         self.dock_bottom = QDockWidget("Watch List", self)
         self.dock_bottom.setAllowedAreas(Qt.BottomDockWidgetArea | Qt.TopDockWidgetArea)

@@ -13,6 +13,10 @@ class WatchedSignal:
     device_name: str
     signal: Signal
     watch_id: str  # Unique ID: device_name + signal.address
+    # Timestamp when a read request was sent (epoch seconds)
+    last_request_ts: float = None
+    # Last measured response time in milliseconds
+    last_response_ms: int = None
     
     def to_dict(self):
         return {
@@ -28,7 +32,10 @@ class WatchListManager(QObject):
     Manages a list of signals to monitor with periodic polling.
     """
     # Signals
-    signal_updated = QtSignal(str, Signal)  # watch_id, updated_signal
+    # Use `object` for the signal parameter to avoid Shiboken attempting to
+    # convert our domain Signal class to a C++ type when emitting.
+    # Emitted args: watch_id (str), updated_signal (object), response_ms (int)
+    signal_updated = QtSignal(str, object, int)
     watch_list_changed = QtSignal()  # Emitted when list is modified
     
     def __init__(self, device_manager):
@@ -112,15 +119,30 @@ class WatchListManager(QObject):
         for watch_id, watched in self._watched_signals.items():
             try:
                 # Read signal from device
+                # Record request timestamp
+                import time
+                watched.last_request_ts = time.time()
+
                 updated_signal = self.device_manager.read_signal(
-                    watched.device_name, 
+                    watched.device_name,
                     watched.signal
                 )
                 
                 if updated_signal:
                     # Sync Result (from cache or blocking read)
                     watched.signal = updated_signal
-                    self.signal_updated.emit(watch_id, updated_signal)
+                    # Compute RTT if possible
+                    try:
+                        import time
+                        if watched.last_request_ts:
+                            rtt_ms = int(round((time.time() - watched.last_request_ts) * 1000))
+                        else:
+                            rtt_ms = None
+                    except Exception:
+                        rtt_ms = None
+
+                    watched.last_response_ms = rtt_ms
+                    self.signal_updated.emit(watch_id, updated_signal, rtt_ms)
                 else:
                     # Async read enqueued - DO NOT invalidate signal yet.
                     # Wait for _on_device_signal_updated to handle the result
@@ -135,7 +157,20 @@ class WatchListManager(QObject):
         if watch_id in self._watched_signals:
             watched = self._watched_signals[watch_id]
             watched.signal = signal
-            self.signal_updated.emit(watch_id, signal)
+            # Compute RTT if we have a request timestamp
+            try:
+                import time
+                if watched.last_request_ts:
+                    rtt_ms = int(round((time.time() - watched.last_request_ts) * 1000))
+                else:
+                    rtt_ms = None
+            except Exception:
+                rtt_ms = None
+
+            watched.last_response_ms = rtt_ms
+            # Clear the last_request_ts to avoid reusing it for future unsolicited updates
+            watched.last_request_ts = None
+            self.signal_updated.emit(watch_id, signal, rtt_ms)
     
     def save_to_file(self, filepath: str):
         """Save watch list to JSON file."""

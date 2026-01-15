@@ -829,12 +829,23 @@ class DeviceTreeWidget(QWidget):
             # Generic Node (LD, LN, DO)
             node = data
             if hasattr(node, 'name'):
+                # Find the device name by traversing up the tree
+                device_name = self._find_device_for_item(root_item)
+                
                 # Build address by traversing parents
                 full_address = self._build_node_address(root_item)
                 
                 copy_action = QAction("Copy node Address", self)
                 copy_action.triggered.connect(lambda: self._copy_to_clipboard(full_address))
                 menu.addAction(copy_action)
+                
+                # Add to Live Data
+                if hasattr(self, 'signals_view') and self.signals_view and device_name:
+                    menu.addSeparator()
+                    live_data_action = QAction("Add to Live Data", self)
+                    live_data_action.triggered.connect(lambda n=node, d=device_name: self._add_node_to_live_data(n, d))
+                    menu.addAction(live_data_action)
+                
                 # Expand/Collapse for generic node
                 menu.addSeparator()
                 expand_action = QAction("Expand All", self)
@@ -896,6 +907,61 @@ class DeviceTreeWidget(QWidget):
         from PySide6.QtWidgets import QApplication
         clipboard = QApplication.clipboard()
         clipboard.setText(text)
+
+    def _add_node_to_live_data(self, node, device_name):
+        """Add a node and all its signals to the Live Data view."""
+        # Be resilient to being passed a QStandardItem, an index-like object,
+        # a device name (str) or the actual domain node object.
+        try:
+            from PySide6.QtGui import QStandardItem
+        except Exception:
+            QStandardItem = None
+
+        resolved_node = node
+
+        # If a QStandardItem was passed, unwrap the stored domain object
+        if QStandardItem and isinstance(node, QStandardItem):
+            try:
+                resolved_node = node.data(Qt.UserRole)
+            except Exception:
+                resolved_node = node
+
+        # If a device name string was passed, resolve to device object
+        if isinstance(resolved_node, str):
+            try:
+                dev = self.device_manager.get_device(resolved_node)
+                if dev:
+                    resolved_node = dev
+            except Exception:
+                pass
+
+        # Ensure we have a signals_view to receive the node
+        if not (hasattr(self, 'signals_view') and self.signals_view):
+            logger.warning("_add_node_to_live_data: No SignalsView connected")
+            return
+
+        # Ask the SignalsView to add signals. If it finds none, inform the user.
+        prev_count = 0
+        try:
+            prev_count = self.signals_view.table_model.rowCount()
+        except Exception:
+            prev_count = 0
+
+        self.signals_view.add_node_to_live(resolved_node, device_name)
+
+        try:
+            new_count = self.signals_view.table_model.rowCount()
+        except Exception:
+            new_count = prev_count
+
+        if new_count == prev_count:
+            # No new signals were appended — notify the user quietly
+            try:
+                from PySide6.QtWidgets import QMessageBox
+                QMessageBox.information(self, "Add to Live Data", "No signals were found in the selected node.")
+            except Exception:
+                logger.info("_add_node_to_live_data: No signals were added for node")
+
 
     def _invoke_control_dialog(self, device_name, signal):
         """Open control dialog for a signal (separated to avoid lambda closure issues)."""
