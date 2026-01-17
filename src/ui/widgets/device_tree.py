@@ -1297,35 +1297,20 @@ class DeviceTreeWidget(QWidget):
             try:
                 self.device_manager.add_device(sim_config)
                 
-                # Try to connect (start the server)
-                success = self.device_manager.connect_device(sim_config.name)
+                # Start the server (this is async via worker thread)
+                self.device_manager.connect_device(sim_config.name)
                 
-                # Check if it actually connected
-                sim_device = self.device_manager.get_device(sim_config.name)
-                if sim_device and sim_device.connected:
-                    QMessageBox.information(
-                        self,
-                        "Simulator Started",
-                        f"✅ IEC 61850 simulator started successfully!\n\n"
-                        f"IED Name: {sim_config.name}\n"
-                        f"Listen Address: {sim_config.ip_address}:{sim_config.port}\n\n"
-                        "Other IEC 61850 clients can now connect to this address."
-                    )
-                else:
-                    QMessageBox.warning(
-                        self,
-                        "Simulator Start Failed",
-                        f"❌ Failed to start IEC 61850 simulator for {sim_config.name}\n\n"
-                        f"Possible causes:\n"
-                        f"• SCD file format not supported by libiec61850\n"
-                        f"• Port {sim_config.port} already in use\n"
-                        f"• IP {sim_config.ip_address} not configured\n\n"
-                        f"Check the Event Log for detailed error messages.\n\n"
-                        f"💡 Try:\n"
-                        f"• Export an ICD file from your engineering tool\n"
-                        f"• Use a different IP address\n"
-                        f"• Use a commercial IEC 61850 simulator"
-                    )
+                # Show success message - the Event Log will show detailed status
+                # Note: Connection happens asynchronously, so we show this immediately
+                QMessageBox.information(
+                    self,
+                    "Simulator Starting",
+                    f"✅ IEC 61850 simulator is starting...\n\n"
+                    f"IED Name: {sim_config.name}\n"
+                    f"Listen Address: {sim_config.ip_address}:{sim_config.port}\n\n"
+                    f"Check the Event Log panel for detailed startup status.\n"
+                    f"If successful, other IEC 61850 clients can connect to this address."
+                )
                     
             except Exception as e:
                 QMessageBox.critical(

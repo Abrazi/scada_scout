@@ -455,30 +455,40 @@ class EventLogWidget(QWidget):
             if source != self.source_filter:
                 return
         if level == "ERROR":
-            color = "#f48771"
+            color = "#f48771"  # Red
         elif level == "WARNING":
-            color = "#dcdcaa"
+            color = "#dcdcaa"  # Yellow
         elif level == "INFO":
-            color = "#4ec9b0"
+            color = "#4fc1ff"  # Bright Cyan - More visible for success messages
         elif level == "DEBUG":
-            color = "#9cdcfe"
+            color = "#9cdcfe"  # Light Blue
         elif level == "TRANSACTION":
-            color = "#c586c0"
+            color = "#c586c0"  # Purple
         elif level == "PACKET":
-            color = "#569cd6" # Light Blue for packets
+            color = "#569cd6"  # Blue for packets
         else:
-            color = "#d4d4d4"
+            color = "#d4d4d4"  # Gray
         
         # Format the log entry
         # Escape message and preserve formatting using <pre>
         msg = message if isinstance(message, str) else str(message)
         escaped = html.escape(msg)
-        entry_html = (
-            f'<span style="color: #808080;">[{event["timestamp"]}]</span> '
-            f'<span style="color: {color};">[{level}]</span> '
-            f'<span style="color: #569cd6;">{event["source"]}:</span> '
-            f'<pre style="white-space:pre-wrap;margin:0">{escaped}</pre>'
-        )
+        
+        # Make success messages stand out with bold text for ✅ indicators
+        if '✅' in msg:
+            entry_html = (
+                f'<span style="color: #808080;">[{event["timestamp"]}]</span> '
+                f'<span style="color: {color}; font-weight: bold;">[{level}]</span> '
+                f'<span style="color: #569cd6; font-weight: bold;">{event["source"]}:</span> '
+                f'<pre style="white-space:pre-wrap;margin:0; color: {color}; font-weight: bold;">{escaped}</pre>'
+            )
+        else:
+            entry_html = (
+                f'<span style="color: #808080;">[{event["timestamp"]}]</span> '
+                f'<span style="color: {color};">[{level}]</span> '
+                f'<span style="color: #569cd6;">{event["source"]}:</span> '
+                f'<pre style="white-space:pre-wrap;margin:0">{escaped}</pre>'
+            )
 
         self.text_edit.append(entry_html)
         

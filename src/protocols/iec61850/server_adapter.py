@@ -74,17 +74,23 @@ class IEC61850ServerAdapter(BaseProtocol):
                             self._filtered_scd_path = icd_path
                             logger.info(f"Successfully loaded model from extracted ICD: {icd_path}")
                 else:
-                    logger.warning("Model creation failed for ICD/CID file; will try minimal model fallback")
+                    logger.info("Model creation failed for ICD/CID file; will try dynamic model from SCD parser")
             
-            # If we still don't have a model, try creating a minimal working model
+            # If we still don't have a model, try creating it dynamically from parsed SCD/ICD
             if not self.model:
-                logger.warning("Attempting to create minimal test model as fallback")
+                logger.info("Attempting to create dynamic model from parsed SCD/ICD...")
                 if self.event_logger:
-                    self.event_logger.warning("IEC61850Server", "Creating minimal test model as fallback")
+                    self.event_logger.info("IEC61850Server", "Creating dynamic model from parsed SCD/ICD...")
 
                 # Try building a dynamic model from parsed SCD/ICD
                 self.model = self._create_model_from_scd_parser()
                 if not self.model:
+                    logger.warning("Dynamic model creation failed, trying minimal fallback model")
+                    if self.event_logger:
+                        self.event_logger.warning(
+                            "IEC61850Server",
+                            "⚠️ Dynamic model creation failed, falling back to minimal model"
+                        )
                     self.model = self._create_minimal_model()
                 if not self.model:
                     raise RuntimeError(
@@ -577,9 +583,23 @@ class IEC61850ServerAdapter(BaseProtocol):
 
             if created_attrs == 0:
                 logger.warning("Dynamic model creation produced 0 attributes")
+                if self.event_logger:
+                    self.event_logger.warning(
+                        "IEC61850Server",
+                        "⚠️ Dynamic model created but has 0 attributes"
+                    )
                 return None
 
             logger.info(f"Created dynamic model from SCD/ICD for {root.name} with {created_attrs} attributes")
+            if self.event_logger:
+                self.event_logger.info(
+                    "IEC61850Server",
+                    f"✅ Successfully created dynamic model from SCD/ICD\n"
+                    f"   IED: {root.name}\n"
+                    f"   Logical Devices: {ld_created}\n"
+                    f"   Logical Nodes: {ln_created}\n"
+                    f"   Total Attributes: {created_attrs}"
+                )
             return model
 
         except Exception as e:
