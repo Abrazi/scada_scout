@@ -1,14 +1,21 @@
 from PySide6.QtCore import Qt, QAbstractTableModel, QModelIndex
 from PySide6.QtGui import QColor, QBrush
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 from src.models.device_models import Signal
+import logging
+
+logger = logging.getLogger(__name__)
 
 class SignalTableModel(QAbstractTableModel):
     """
     Table Model for displaying a list of Signals.
     Optimized for frequent updates.
     """
-    COLUMNS = ["Name", "Address", "Access", "Type", "Value", "Quality", "Timestamp", "Error", "Enum Options"]
+    COLUMNS = [
+        "Name", "Address", "Access", "Type", 
+        "Modbus Type", "Endianness", "Scale", "Offset",
+        "Value", "Quality", "Timestamp", "Last Changed", "Error"
+    ]
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -24,18 +31,28 @@ class SignalTableModel(QAbstractTableModel):
         
         # Rebuild map
         self._signal_map = {self._get_key(s): i for i, s in enumerate(self._signals)}
+        logger.info(f"SignalTableModel: Reset filter. Collected {len(self._signals)} signals.")
         self.endResetModel()
 
     def _collect_signals_recursive(self, node):
-        if hasattr(node, "signals"):
+        # 1. If it's a Signal object (identify by existence of unique address)
+        if hasattr(node, 'address') and not hasattr(node, 'signals'):
+            self._signals.append(node)
+            return
+
+        # 2. If it's a Node object (identify by signals or children)
+        if hasattr(node, "signals") and node.signals:
              self._signals.extend(node.signals)
         
-        if hasattr(node, "children"):
+        if hasattr(node, "children") and node.children:
             for child in node.children:
                 self._collect_signals_recursive(child)
-        # If node is a Device object, it has root_node
+        
+        # 3. If it's a Device object (identify by root_node)
         if hasattr(node, "root_node") and node.root_node:
              self._collect_signals_recursive(node.root_node)
+        elif hasattr(node, "config") and hasattr(node.config, "name"):
+             pass
 
     def set_signals(self, signals: List[Signal]):
         """Legacy: Resets the model with a new list of signals."""
@@ -52,10 +69,14 @@ class SignalTableModel(QAbstractTableModel):
         if row is not None:
             self._signals[row] = signal
             
-            # Notify view that Type(3), Value(4), Quality(5), Timestamp(6), Error(7), Enum(8) changed
-            top_left = self.index(row, 3)
-            bottom_right = self.index(row, 8)
+            # Notify view that the entire row might have changed for safety
+            top_left = self.index(row, 0)
+            bottom_right = self.index(row, 12)
             self.dataChanged.emit(top_left, bottom_right, [Qt.DisplayRole])
+
+    def get_signals(self) -> List[Signal]:
+        """Returns the current list of signals in the model."""
+        return self._signals
 
     def get_signal_at_row(self, row: int) -> Optional[Signal]:
         if 0 <= row < len(self._signals):
@@ -67,6 +88,60 @@ class SignalTableModel(QAbstractTableModel):
 
     def columnCount(self, parent=QModelIndex()) -> int:
         return len(self.COLUMNS)
+
+    def flags(self, index: QModelIndex) -> Qt.ItemFlags:
+        if not index.isValid():
+            return Qt.NoItemFlags
+            
+        base_flags = Qt.ItemIsEnabled | Qt.ItemIsSelectable
+        
+        # Editable: Name(0), Modbus Type(4), Endianness(5), Scale(6), Offset(7), Value(8)
+        if index.column() in [0, 4, 5, 6, 7, 8]:
+             return base_flags | Qt.ItemIsEditable
+             
+        return base_flags
+
+    def setData(self, index: QModelIndex, value: Any, role: int = Qt.EditRole) -> bool:
+        if not index.isValid() or role != Qt.EditRole:
+            return False
+            
+        row = index.row()
+        col = index.column()
+        signal = self._signals[row]
+        
+        try:
+            from src.models.device_models import ModbusDataType, ModbusEndianness
+            if col == 0: # Name
+                signal.name = str(value)
+            elif col == 4: # Modbus Type
+                for d in ModbusDataType:
+                    if d.value == value or d.name == value:
+                        signal.modbus_data_type = d
+                        break
+            elif col == 5: # Endianness
+                for e in ModbusEndianness:
+                    if e.value == value or e.name == value:
+                        signal.modbus_endianness = e
+                        break
+            elif col == 6: # Scale
+                signal.modbus_scale = float(value)
+            elif col == 7: # Offset
+                signal.modbus_offset = float(value)
+            elif col == 8: # Value (Trigger Write)
+                # Parse based on type
+                if signal.modbus_data_type in [ModbusDataType.BOOL, ModbusDataType.BIT]:
+                    parsed_val = value.lower() in ['true', '1', 't', 'y', 'yes', 'on']
+                elif signal.modbus_data_type in [ModbusDataType.HEX16, ModbusDataType.BINARY16]:
+                    parsed_val = int(value, 0)
+                else:
+                    parsed_val = float(value) if '.' in value else int(value)
+                
+                signal.value = parsed_val
+            
+            self.dataChanged.emit(index, index, [Qt.DisplayRole])
+            return True
+        except:
+            return False
 
     def data(self, index: QModelIndex, role: int = Qt.DisplayRole):
         if not index.isValid():
@@ -83,45 +158,22 @@ class SignalTableModel(QAbstractTableModel):
                 if hasattr(signal, 'signal_type') and signal.signal_type:
                     return signal.signal_type.value if hasattr(signal.signal_type, 'value') else str(signal.signal_type)
                 return "Unknown"
-            elif col == 4: return str(signal.value) if signal.value is not None else "-"
-            elif col == 5: return signal.quality.value if hasattr(signal.quality, 'value') else str(signal.quality)
-            elif col == 6: 
+            elif col == 4: return signal.modbus_data_type.value if signal.modbus_data_type else "-"
+            elif col == 5: return signal.modbus_endianness.value if signal.modbus_endianness else "-"
+            elif col == 6: return str(signal.modbus_scale)
+            elif col == 7: return str(signal.modbus_offset)
+            elif col == 8: return str(signal.value) if signal.value is not None else "-"
+            elif col == 9: return signal.quality.value if hasattr(signal.quality, 'value') else str(signal.quality)
+            elif col == 10: 
                 return signal.timestamp.strftime("%H:%M:%S.%f")[:-3] if signal.timestamp else "-"
-            elif col == 7:
-                # Error column
-                return getattr(signal, 'error', '') or "-"
-            elif col == 8:
-                # Enum Options column - highlight current value
-                if hasattr(signal, 'enum_map') and signal.enum_map:
-                    # Sort by key (ordinal) and return comma-separated values
-                    sorted_items = sorted(signal.enum_map.items())
-                    
-                    # Try to extract current ordinal value from signal.value
-                    current_ord = None
-                    if signal.value is not None:
-                        # Value might be int, or "text (int)", or just text
-                        if isinstance(signal.value, int):
-                            current_ord = signal.value
-                        elif isinstance(signal.value, str):
-                            # Try to extract from "text (int)" format
-                            import re
-                            match = re.search(r'\((\d+)\)', signal.value)
-                            if match:
-                                current_ord = int(match.group(1))
-                    
-                    # Build display string with current value highlighted
-                    parts = []
-                    for ord_val, text_val in sorted_items:
-                        if ord_val == current_ord:
-                            parts.append(f"*{text_val} ({ord_val})*")  # Highlight current
-                        else:
-                            parts.append(f"{text_val} ({ord_val})")
-                    
-                    return ", ".join(parts)
-                return "-"
+            elif col == 11:
+                # Last Changed column
+                return signal.last_changed.strftime("%H:%M:%S.%f")[:-3] if signal.last_changed else "-"
+            elif col == 12: return signal.error or "-"
+            return ""
         
         # Color coding based on quality
-        if role == Qt.BackgroundRole and col == 5:  # Quality column
+        if role == Qt.BackgroundRole and col == 9:  # Quality column
             if hasattr(signal, 'quality'):
                 from src.models.device_models import SignalQuality
                 if signal.quality == SignalQuality.INVALID:

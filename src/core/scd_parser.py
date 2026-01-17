@@ -83,7 +83,8 @@ class SCDParser:
             return Node(name="IED_Not_Found")
 
         parsed_ied_name = ied_element.get("name", "Unknown_IED")
-        root_node = Node(name=parsed_ied_name, description="Offline IED from SCL")
+        ied_desc = ied_element.get("desc", "Offline IED from SCL")
+        root_node = Node(name=parsed_ied_name, description=ied_desc)
 
         # Browse AccessPoints -> Server -> LDevice
         # Note: Structure is usually IED -> AccessPoint -> Server -> LDevice
@@ -373,7 +374,15 @@ class SCDParser:
         if self.root is None:
             return []
 
-        ieds_map = {} # name -> {name: str, ips: []}
+        ieds_map = {} # name -> {name: str, description: str, ips: []}
+        
+        # Pre-scan IED descriptions
+        ied_descs = {}
+        all_ied_elements = self.root.findall(".//scl:IED", self.ns) + self.root.findall(".//IED")
+        for ied in all_ied_elements:
+            name = ied.get("name")
+            if name:
+                ied_descs[name] = ied.get("desc", "")
 
         # Strategy 1: Communication Section
         communication = self.root.find("scl:Communication", self.ns)
@@ -413,7 +422,11 @@ class SCDParser:
 
                     if ip:
                         if ied_name not in ieds_map:
-                            ieds_map[ied_name] = {'name': ied_name, 'ips': []}
+                            ieds_map[ied_name] = {
+                                'name': ied_name, 
+                                'description': ied_descs.get(ied_name, ""),
+                                'ips': []
+                            }
                         
                         ieds_map[ied_name]['ips'].append({
                             'ip': ip,
@@ -424,13 +437,12 @@ class SCDParser:
                         })
 
         # Strategy 2: IED Section (Fallback for IEDs with no Communication info)
-        all_ied_elements = self.root.findall("scl:IED", self.ns) + self.root.findall("IED")
-        for ied in all_ied_elements:
-            name = ied.get("name")
-            if name and name not in ieds_map:
+        for name, desc in ied_descs.items():
+            if name not in ieds_map:
                 # Default to localhost if not found in Communication
                 ieds_map[name] = {
                     'name': name, 
+                    'description': desc,
                     'ips': [{
                         'ip': '127.0.0.1', 
                         'ap': 'Default', 

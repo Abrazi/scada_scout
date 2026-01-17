@@ -3,6 +3,7 @@ from PySide6.QtGui import QStandardItemModel, QStandardItem, QPainter
 from PySide6.QtCharts import QChart, QChartView, QLineSeries
 from PySide6.QtCore import Qt
 from src.ui.models.signal_table_model import SignalTableModel
+import logging
 
 class SignalsViewWidget(QWidget):
     """
@@ -70,14 +71,28 @@ class SignalsViewWidget(QWidget):
                 if signals:
                     self._trigger_background_read(device_name, signals)
 
-    def set_filter_node(self, node):
+    def set_filter_node(self, node, device_name: str = None):
         """Updates the view to show signals from the given node."""
+        import logging
+        logger = logging.getLogger("SignalsViewWidget")
+        logger.info(f"SignalsViewWidget: Set filter node. Device: {device_name}")
+
         self.current_node = node
+        self.current_device_name = device_name
+        
         if node is None:
             self.current_device_name = None
         
         self.table_model.set_node_filter(node)
         self.table_view.resizeColumnsToContents()
+        
+        # Trigger an immediate background read if we have a device context
+        # This provides immediate feedback instead of waiting for the next poll
+        device_name = self._get_current_device_name()
+        if device_name:
+            signals = self.table_model.get_signals()
+            if signals:
+                self._trigger_background_read(device_name, signals)
 
     def _trigger_background_read(self, device_name, signals):
         """Execute signal reads in a background thread to prevent UI freeze."""
@@ -143,19 +158,50 @@ class SignalsViewWidget(QWidget):
         return None
 
     def _on_control_clicked(self, device_name, signal):
-        from PySide6.QtWidgets import QInputDialog, QMessageBox
+        """Handle control/write command for any protocol"""
+        from PySide6.QtWidgets import QMessageBox
+        from src.models.device_models import DeviceType, SignalType
         
-        # User requested command
-        # For ctVal (INT32), we usually send an integer.
-        # Should we assume Integer?
-        val, ok = QInputDialog.getInt(self, "Send Control", f"Enter value for {signal.name}:", 0)
+        # Get device to determine protocol
+        device = self.device_manager.get_device(device_name)
+        if not device:
+            QMessageBox.critical(self, "Error", "Device not found")
+            return
         
-        if ok:
-             try:
-                 self.device_manager.send_control_command(device_name, signal, 'OPERATE', val)
-                 QMessageBox.information(self, "Success", f"Command sent to {signal.name}")
-             except Exception as e:
-                 QMessageBox.critical(self, "Error", f"Failed to send command: {e}")
+        # Use protocol-specific write dialog
+        if device.config.device_type == DeviceType.MODBUS_TCP:
+            from src.ui.widgets.modbus_write_dialog import ModbusWriteDialog
+            dialog = ModbusWriteDialog(signal, self.device_manager, device_name, self)
+            dialog.exec()
+        
+        elif device.config.device_type == DeviceType.IEC61850_IED:
+            # Existing IEC 61850 control logic
+            from PySide6.QtWidgets import QInputDialog
+            
+            # For now, simple input dialog (can be enhanced with proper control dialog)
+            val, ok = QInputDialog.getInt(self, "Send Control", f"Enter value for {signal.name}:", 0)
+            
+            if ok:
+                try:
+                    protocol = self.device_manager._protocols.get(device_name)
+                    if protocol and hasattr(protocol, 'write_signal'):
+                        success = protocol.write_signal(signal, val)
+                        if success:
+                            QMessageBox.information(self, "Success", f"Command sent to {signal.name}")
+                        else:
+                            QMessageBox.critical(self, "Error", "Write operation failed")
+                    else:
+                        # Fallback to old control method
+                        self.device_manager.send_control_command(device_name, signal, 'OPERATE', val)
+                        QMessageBox.information(self, "Success", f"Command sent to {signal.name}")
+                except Exception as e:
+                    QMessageBox.critical(self, "Error", f"Failed to send command: {e}")
+        
+        elif device.config.device_type == DeviceType.IEC104_RTU:
+            QMessageBox.information(self, "IEC 104 Control", "IEC 104 control commands coming soon!")
+        
+        else:
+            QMessageBox.warning(self, "Unsupported", f"Write operations not yet supported for {device.config.device_type.value}")
 
     def _setup_chart_tab(self):
         """Create the Chart tab."""
@@ -178,14 +224,36 @@ class SignalsViewWidget(QWidget):
         """Connect to DeviceManager."""
         self.device_manager.device_added.connect(self._on_device_added)
         self.device_manager.signal_updated.connect(self._on_signal_update)
+        self.device_manager.device_updated.connect(self._on_device_updated)
 
     def _on_device_added(self, device):
         """When a device is added, we don't necessarily update view until selected."""
         pass
 
+    def _on_device_updated(self, device_name):
+        """Handle device model updates (e.g. discovery finished)."""
+        logger = logging.getLogger("SignalsViewWidget")
+        
+        # If we are currently showing this device, we must refresh because 
+        # the underlying Node objects might have been replaced.
+        if self.current_device_name == device_name:
+            logger.info(f"SignalsViewWidget: Device {device_name} updated. Refreshing view.")
+            
+            # Re-fetch the device and its root node
+            device = self.device_manager.get_device(device_name)
+            if device and device.root_node:
+                # We reset the filter to the Root Node of the device.
+                # Ideally we would preserve the exact selected sub-node, 
+                # but since node objects are replaced, we default to Root.
+                self.set_filter_node(device.root_node, device_name)
+            else:
+                # Device might be gone or empty
+                self.set_filter_node(None)
+
     def _on_signal_update(self, device_name, signal):
-        """Handle live update."""
-        self.table_model.update_signal(signal)
+        """Handle live update, only if it belongs to currently shown device."""
+        if device_name == self.current_device_name:
+            self.table_model.update_signal(signal)
         
     def _collect_signals(self, node) -> list:
         """Recursively collect all signals from a node tree (supports Node, Signal, or Device)."""
@@ -210,4 +278,5 @@ class SignalsViewWidget(QWidget):
         if hasattr(node, "root_node") and node.root_node:
             signals.extend(self._collect_signals(node.root_node))
             
+        logger.debug(f"SignalsViewWidget: Collected {len(signals)} signals for preview/refresh.")
         return signals
