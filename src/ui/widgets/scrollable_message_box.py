@@ -34,6 +34,6 @@ class ScrollableMessageBox(QDialog):
 def show_scrollable_error(parent, title, message, details):
     """Helper to show the dialog."""
     dlg = ScrollableMessageBox(title, message, details, parent)
-    dlg.setIcon(QDialogButtonBox.Critical) # Wait, QDialog doesn't have setIcon. 
-    # We could simulate icon but simple text is fine.
+    # QDialog doesn't have setIcon like QMessageBox. 
+    # Just execute the dialog.
     dlg.exec()

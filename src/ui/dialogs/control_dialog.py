@@ -137,6 +137,13 @@ class ControlDialog(QDialog):
         self.num_ctl_num.setRange(0, 255)
         form_extras.addRow("Control Number (ctlNum):", self.num_ctl_num)
         
+        # SBO Timeout
+        self.num_sbo_timeout = QSpinBox()
+        self.num_sbo_timeout.setRange(10, 10000)
+        self.num_sbo_timeout.setValue(100)  # Default 100ms like iedexplorer
+        self.num_sbo_timeout.setSuffix(" ms")
+        form_extras.addRow("SBO Timeout:", self.num_sbo_timeout)
+        
         # Timestamp
         ts_layout = QHBoxLayout()
         self.chk_use_ts = QCheckBox("Use Timestamp (T):")
@@ -340,6 +347,9 @@ class ControlDialog(QDialog):
         params['synchro_check'] = self.chk_synchro.isChecked()
         params['test'] = self.chk_test.isChecked()
         
+        # SBO Timeout
+        params['sbo_timeout'] = self.num_sbo_timeout.value()
+        
         return params
 
     def _get_value(self):
@@ -401,22 +411,42 @@ class ControlDialog(QDialog):
 
             val = self._get_value()
             
-            success = adapter.operate(self.signal, val, params=params)
-            
-            if success:
-                self.lbl_status.setText("OPERATE SUCCESSFUL")
-                self.lbl_status.setStyleSheet("color: green")
-                self.selected = False 
-                
-                # Update ctlNum in UI for next time (auto-incremented in adapter)
-                if ctx:
-                    self.num_ctl_num.setValue(ctx.ctl_num)
+            # Use automatic SBO workflow if SBO model and not already selected
+            if ctx and ctx.ctl_model.is_sbo and not self.selected:
+                # Full SBO sequence: SELECT -> wait -> OPERATE
+                success = adapter.send_command(self.signal, val, params=params)
+                if success:
+                    self.lbl_status.setText("SBO SEQUENCE SUCCESSFUL")
+                    self.lbl_status.setStyleSheet("color: green")
+                    self.selected = False  # Reset selection state
                     
-                self._update_button_states()
-                self._load_current_value()
+                    # Update ctlNum in UI for next time (auto-incremented in adapter)
+                    if ctx:
+                        self.num_ctl_num.setValue(ctx.ctl_num)
+                        
+                    self._update_button_states()
+                    self._load_current_value()
+                else:
+                    self.lbl_status.setText("SBO SEQUENCE FAILED")
+                    self.lbl_status.setStyleSheet("color: red")
             else:
-                self.lbl_status.setText("OPERATE FAILED")
-                self.lbl_status.setStyleSheet("color: red")
+                # Direct operate or already selected SBO
+                success = adapter.operate(self.signal, val, params=params)
+                
+                if success:
+                    self.lbl_status.setText("OPERATE SUCCESSFUL")
+                    self.lbl_status.setStyleSheet("color: green")
+                    self.selected = False 
+                    
+                    # Update ctlNum in UI for next time (auto-incremented in adapter)
+                    if ctx:
+                        self.num_ctl_num.setValue(ctx.ctl_num)
+                        
+                    self._update_button_states()
+                    self._load_current_value()
+                else:
+                    self.lbl_status.setText("OPERATE FAILED")
+                    self.lbl_status.setStyleSheet("color: red")
         except Exception as e:
             self.lbl_status.setText(f"Error: {e}")
             self.lbl_status.setStyleSheet("color: red")

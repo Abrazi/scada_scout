@@ -13,8 +13,9 @@ class ConnectionDialog(QDialog):
     """
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Connect to Device")
-        self.resize(400, 200)
+        self.setWindowTitle("🔌 Connect to Device")
+        self.resize(500, 300)
+        self.setMinimumWidth(450)
         
         self.layout = QVBoxLayout(self)
         self.form = QFormLayout()

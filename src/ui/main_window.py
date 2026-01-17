@@ -9,19 +9,25 @@ from src.ui.widgets.signals_view import SignalsViewWidget
 from src.ui.widgets.connection_dialog import ConnectionDialog
 from src.ui.widgets.scd_import_dialog import SCDImportDialog
 from src.ui.widgets.scrollable_message_box import show_scrollable_error
+from src.models.device_models import DeviceType
 from src.core.exporters import (
     export_network_config_script, 
     export_network_config_all_platforms, 
     export_device_list_csv, 
     export_goose_details_csv, 
-    export_diagnostics_report
+    export_diagnostics_report,
+    export_selected_ied_scl,
+    export_ied_from_online_discovery
 )
 from src.core.watch_list_manager import WatchListManager
 from src.ui.widgets.watch_list_widget import WatchListWidget
 from src.ui.widgets.event_log_widget import EventLogWidget
+from src.ui.widgets.title_bar import TitleBarWidget
 from src.ui.widgets.modbus_slave_widget import ModbusSlaveWidget
+from src.ui.widgets.iec61850_simulator_dialog import IEC61850SimulatorDialog
 from src.ui.widgets.connection_progress_dialog import ConnectionProgressDialog
 from src.ui.widgets.import_progress_dialog import ImportProgressDialog
+from src.ui.dialogs.settings_dialog import SettingsDialog
 
 class MainWindow(QMainWindow):
     """
@@ -32,8 +38,19 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.device_manager = device_manager
         self.event_logger = event_logger
-        self.setWindowTitle("Scada Scout")
+        self.setWindowTitle("SCADA Scout - Professional Edition")
         self.resize(1280, 800)
+        
+        # Set minimum size to ensure all controls fit in two-row layout
+        self.setMinimumSize(1200, 650)
+        
+        # Use a frameless window so we can provide a custom title bar (VSCode-style)
+        self.setWindowFlags((self.windowFlags() | Qt.Window) & ~Qt.WindowTitleHint)
+        self.setWindowFlags(self.windowFlags() | Qt.FramelessWindowHint)
+        
+        # Force window to be visible and get focus
+        self.setAttribute(Qt.WA_ShowWithoutActivating, False)
+        self.setFocusPolicy(Qt.StrongFocus)
         
         # Central Widget (Placeholder for now)
         self.central_widget = QWidget()
@@ -44,16 +61,53 @@ class MainWindow(QMainWindow):
         
         # Persistent Dialogs
         self.scd_dialog = None
+        # Drag support for frameless title area
+        self._drag_pos_main = None
+        # Floating title bar (fallback) - sits above menu widget to ensure
+        # controls are always visible and receive mouse events.
+        try:
+            self._floating_title = TitleBarWidget(self)
+            self._floating_title.setObjectName("FloatingTitleBar")
+            self._floating_title.move(0, 0)
+            self._floating_title.show()
+            self._floating_title.raise_()
+        except Exception:
+            self._floating_title = None
         
     def _setup_ui(self):
         self._create_menus()
         self._create_toolbar()
         self._create_statusbar()
+        # Re-enable dock panels so Device Explorer, Signals, Watch List, and Event Log appear
         self._create_dock_panels()
         
     def _create_menus(self):
-        menu_bar = self.menuBar()
-        
+        # Replace the standard menu bar area with a container that includes
+        # our custom TitleBarWidget above the QMenuBar so the app appears
+        # frameless with a VSCode-like title area.
+        from PySide6.QtWidgets import QMenuBar, QVBoxLayout
+
+        menu_container = QWidget(self)
+        # Match the title bar color so the stacked title + menu area appears seamless
+        menu_container.setStyleSheet("background-color: #2c3e50;")
+        vlayout = QVBoxLayout(menu_container)
+        vlayout.setContentsMargins(0, 0, 0, 0)
+        vlayout.setSpacing(0)
+
+        title_controls = TitleBarWidget(self)
+        vlayout.addWidget(title_controls)
+
+        menu_bar = QMenuBar(menu_container)
+        vlayout.addWidget(menu_bar)
+
+        # Set our composed widget as the menu area
+        try:
+            self.setMenuWidget(menu_container)
+        except Exception:
+            # Some platforms might not support setMenuWidget; fall back
+            # to the default menu bar in that case.
+            menu_bar = self.menuBar()
+
         # File Menu
         file_menu = menu_bar.addMenu("&File")
         
@@ -138,6 +192,12 @@ class MainWindow(QMainWindow):
         slave_server_action.triggered.connect(self._show_modbus_slave)
         conn_menu.addAction(slave_server_action)
         
+        # IEC 61850 Simulator
+        iec_simulator_action = QAction("&IEC 61850 Simulator...", self)
+        iec_simulator_action.setStatusTip("Simulate IEDs from an SCD file")
+        iec_simulator_action.triggered.connect(self._show_iec61850_simulator_dialog)
+        conn_menu.addAction(iec_simulator_action)
+        
         # View Menu
         self.view_menu = menu_bar.addMenu("&View")
         
@@ -147,26 +207,45 @@ class MainWindow(QMainWindow):
         self.view_menu.addAction(reset_layout_action)
         self.view_menu.addSeparator()
         
+        # Settings action
+        settings_action = QAction("⚙️ &Settings...", self)
+        settings_action.setShortcut("Ctrl+,")
+        settings_action.setStatusTip("Customize application appearance and behavior")
+        settings_action.triggered.connect(self._show_settings_dialog)
+        self.view_menu.addAction(settings_action)
+        self.view_menu.addSeparator()
+        
         # Help Menu
         help_menu = menu_bar.addMenu("&Help")
         
     def _create_toolbar(self):
-        toolbar = QToolBar("Main Toolbar")
-        self.addToolBar(toolbar)
+        self.toolbar = QToolBar("Main Toolbar")
+        self.addToolBar(self.toolbar)
         
     def _create_statusbar(self):
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("Ready")
+        # Add a QSizeGrip to support resizing a frameless window
+        try:
+            from PySide6.QtWidgets import QSizeGrip
+            grip = QSizeGrip(self)
+            self.status_bar.addPermanentWidget(grip)
+        except Exception:
+            pass
         
     def _create_dock_panels(self):
+        from PySide6.QtWidgets import QSizePolicy
+        
         # Left Panel: Device Tree
         self.dock_left = QDockWidget("Device Explorer", self)
-        self.dock_left.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+        self.dock_left.setAllowedAreas(Qt.AllDockWidgetAreas)
+        self.dock_left.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable | QDockWidget.DockWidgetClosable)
         
         self.watch_list_manager = WatchListManager(self.device_manager)
         
         self.device_tree = DeviceTreeWidget(self.device_manager, self.watch_list_manager)
+        self.device_tree.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.dock_left.setWidget(self.device_tree)
         self.addDockWidget(Qt.LeftDockWidgetArea, self.dock_left)
         
@@ -178,11 +257,13 @@ class MainWindow(QMainWindow):
         self.device_manager.device_removed.connect(lambda n: self._update_event_log_devices())
         self.device_manager.device_updated.connect(self._on_device_updated)
 
-        # Right Panel: Signals & Charts
+        # Right Panel: Signals & Charts (Data Visualization)
         self.dock_right = QDockWidget("Data Visualization", self)
-        self.dock_right.setAllowedAreas(Qt.RightDockWidgetArea | Qt.LeftDockWidgetArea)
+        self.dock_right.setAllowedAreas(Qt.AllDockWidgetAreas)
+        self.dock_right.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable | QDockWidget.DockWidgetClosable)
         
         self.signals_view = SignalsViewWidget(self.device_manager, self.watch_list_manager)
+        self.signals_view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.dock_right.setWidget(self.signals_view)
         self.addDockWidget(Qt.RightDockWidgetArea, self.dock_right)
         
@@ -192,35 +273,44 @@ class MainWindow(QMainWindow):
         
         # Watch List panel  
         self.dock_bottom = QDockWidget("Watch List", self)
-        self.dock_bottom.setAllowedAreas(Qt.BottomDockWidgetArea | Qt.TopDockWidgetArea)
+        self.dock_bottom.setAllowedAreas(Qt.AllDockWidgetAreas)
+        self.dock_bottom.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable | QDockWidget.DockWidgetClosable)
         
         self.watch_list_widget = WatchListWidget(self.watch_list_manager, self.device_manager)
+        self.watch_list_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.dock_bottom.setWidget(self.watch_list_widget)
         self.addDockWidget(Qt.BottomDockWidgetArea, self.dock_bottom)
         
         # Event Log panel
         self.dock_events = QDockWidget("Event Log", self)
-        self.dock_events.setAllowedAreas(Qt.RightDockWidgetArea | Qt.BottomDockWidgetArea)
+        self.dock_events.setAllowedAreas(Qt.AllDockWidgetAreas)
+        self.dock_events.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable | QDockWidget.DockWidgetClosable)
         
         self.event_log_widget = EventLogWidget()
+        self.event_log_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.dock_events.setWidget(self.event_log_widget)
         self.addDockWidget(Qt.RightDockWidgetArea, self.dock_events)
         
         # Modbus Slave Server panel (hidden by default)
         self.dock_modbus_slave = QDockWidget("Modbus Slave Server", self)
-        self.dock_modbus_slave.setAllowedAreas(Qt.BottomDockWidgetArea | Qt.RightDockWidgetArea)
+        self.dock_modbus_slave.setAllowedAreas(Qt.AllDockWidgetAreas)
+        self.dock_modbus_slave.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable | QDockWidget.DockWidgetClosable)
         
         self.modbus_slave_widget = ModbusSlaveWidget(
             event_logger=self.event_logger
         )
+        self.modbus_slave_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.dock_modbus_slave.setWidget(self.modbus_slave_widget)
         self.addDockWidget(Qt.BottomDockWidgetArea, self.dock_modbus_slave)
         
-        # Layout arrangement
+        # Layout arrangement - tab event log and data viz together, watch list separate
         self.tabifyDockWidget(self.dock_right, self.dock_events)
         self.tabifyDockWidget(self.dock_bottom, self.dock_modbus_slave)
-        self.dock_right.raise_()
+        self.dock_right.raise_()  # Show Data Visualization by default
         self.dock_modbus_slave.setVisible(False)
+        
+        # Apply initial layout with proper sizing
+        QTimer.singleShot(50, self._apply_initial_layout)
         
         # Add toggle actions to View menu
         self.view_menu.addAction(self.dock_left.toggleViewAction())
@@ -229,8 +319,66 @@ class MainWindow(QMainWindow):
         self.view_menu.addAction(self.dock_events.toggleViewAction())
         self.view_menu.addAction(self.dock_modbus_slave.toggleViewAction())
 
+    def _apply_initial_layout(self):
+        """Apply flexible initial layout with proportional sizing."""
+        # Get current window dimensions
+        window_width = self.width()
+        window_height = self.height()
+        
+        # Calculate proportional sizes (percentages of window size)
+        left_panel_width = int(window_width * 0.22)    # 22% for device explorer
+        right_panel_width = int(window_width * 0.78)   # 78% for data viz/event log
+        bottom_panel_height = int(window_height * 0.35) # 35% for watch list
+        
+        # Apply minimum constraints only
+        left_panel_width = max(200, left_panel_width)   # Minimum 200px
+        right_panel_width = max(400, right_panel_width) # Minimum 400px
+        bottom_panel_height = max(150, bottom_panel_height) # Minimum 150px
+        
+        # Set horizontal dock sizes
+        self.resizeDocks([self.dock_left], [left_panel_width], Qt.Horizontal)
+        self.resizeDocks([self.dock_right], [right_panel_width], Qt.Horizontal)
+        
+        # Set vertical dock sizes  
+        self.resizeDocks([self.dock_bottom], [bottom_panel_height], Qt.Vertical)
+
+    def resizeEvent(self, event):
+        # Keep floating title bar stretched across the top
+        try:
+            if hasattr(self, '_floating_title') and self._floating_title:
+                self._floating_title.resize(self.width(), self._floating_title.height())
+                self._floating_title.raise_()
+        except Exception:
+            pass
+        return super().resizeEvent(event)
+
+    # Window-level dragging: allow dragging when user clicks the title area
+    def mousePressEvent(self, event):
+        # Only begin drag on left button within title area region (top 40px)
+        if event.button() == Qt.LeftButton and event.pos().y() <= 40:
+            self._drag_pos_main = event.globalPosition().toPoint()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._drag_pos_main is None:
+            return super().mouseMoveEvent(event)
+        if event.buttons() & Qt.LeftButton:
+            new_pos = event.globalPosition().toPoint()
+            delta = new_pos - self._drag_pos_main
+            self._drag_pos_main = new_pos
+            self.move(self.pos() + delta)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._drag_pos_main = None
+        return super().mouseReleaseEvent(event)
+
     def _on_reset_layout(self):
-        """Restores the default docking layout."""
+        """Restores the default docking layout with flexible sizing."""
         self.dock_left.setVisible(True)
         self.dock_right.setVisible(True)
         self.dock_bottom.setVisible(True)
@@ -243,6 +391,115 @@ class MainWindow(QMainWindow):
         
         self.tabifyDockWidget(self.dock_right, self.dock_events)
         self.dock_right.raise_()
+        
+        # Reapply flexible initial sizing
+        QTimer.singleShot(100, self._apply_initial_layout)
+
+    def _show_settings_dialog(self):
+        """Opens the Settings Dialog for appearance customization."""
+        dialog = SettingsDialog(self)
+        dialog.settings_changed.connect(self._apply_settings)
+        dialog.exec()
+    
+    def _apply_settings(self):
+        """Apply customized settings to the application."""
+        from src.ui import styles
+        settings = QSettings("ScadaScout", "UI")
+        
+        # Get theme
+        theme = settings.value("theme", "Dark")
+        
+        # Check if we need to use custom colors
+        custom_colors = settings.value("use_custom_colors", False, type=bool)
+        
+        if custom_colors:
+            # Generate custom stylesheet based on saved colors
+            primary_color = settings.value("primary_color", "#3498db")
+            accent_color = settings.value("accent_color", "#2980b9")
+            success_color = settings.value("success_color", "#27ae60")
+            warning_color = settings.value("warning_color", "#f39c12")
+            error_color = settings.value("error_color", "#e74c3c")
+            bg_color = settings.value("bg_color", "#ecf0f1")
+            text_color = settings.value("text_color", "#2c3e50")
+            
+            # Regenerate stylesheet with custom colors
+            custom_style = styles.generate_custom_stylesheet(
+                primary_color, accent_color, success_color, warning_color,
+                error_color, bg_color, text_color
+            )
+            base_style = custom_style
+        else:
+            # Use predefined theme
+            if theme == "Dark":
+                base_style = styles.DARK_THEME
+            else:
+                base_style = styles.PROFESSIONAL_STYLE
+        
+        # Apply font settings
+        font_family = settings.value("font_family", "Segoe UI")
+        font_size = settings.value("font_size", 10, type=int)
+        from PySide6.QtGui import QFont
+        app_font = QFont(font_family, font_size)
+        QApplication.instance().setFont(app_font)
+
+        # Layout sizes
+        widget_padding = settings.value("widget_padding", 8, type=int)
+        button_padding = settings.value("button_padding", 8, type=int)
+        border_radius = settings.value("border_radius", 4, type=int)
+        button_height = settings.value("button_height", 32, type=int)
+        input_height = settings.value("input_height", 32, type=int)
+        icon_size = settings.value("icon_size", 24, type=int)
+
+        # Build overrides for sizes and fonts so QSS doesn't lock to defaults
+        overrides = f"""
+QWidget {{ font-size: {font_size}pt; }}
+QPushButton {{ padding: {button_padding}px; min-height: {button_height}px; border-radius: {border_radius}px; }}
+QToolButton {{ padding: {button_padding}px; border-radius: {border_radius}px; }}
+QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox {{ padding: {widget_padding}px; min-height: {input_height}px; border-radius: {border_radius}px; }}
+QMenuBar::item {{ padding: {widget_padding}px {button_padding + 6}px; font-size: {font_size + 1}pt; }}
+QTabBar::tab {{ padding: {widget_padding + 2}px {button_padding + 8}px; font-size: {font_size + 1}pt; }}
+"""
+
+        QApplication.instance().setStyleSheet(base_style + "\n" + overrides)
+
+        # Apply icon size to toolbar if present
+        try:
+            if hasattr(self, 'toolbar') and self.toolbar:
+                from PySide6.QtCore import QSize
+                self.toolbar.setIconSize(QSize(icon_size, icon_size))
+        except Exception:
+            pass
+
+        # Apply window opacity
+        try:
+            opacity = settings.value("window_opacity", 100, type=int)
+            self.setWindowOpacity(max(0.5, min(1.0, opacity / 100.0)))
+        except Exception:
+            pass
+
+        # Apply menu icon visibility
+        try:
+            show_icons = settings.value("show_icons", True, type=bool)
+            QApplication.setAttribute(Qt.AA_DontShowIconsInMenus, not show_icons)
+        except Exception:
+            pass
+
+        # Apply basic UI animation toggles
+        try:
+            animations = settings.value("animations_enabled", True, type=bool)
+            QApplication.setEffectEnabled(Qt.UI_AnimateCombo, animations)
+            QApplication.setEffectEnabled(Qt.UI_AnimateTooltip, animations)
+            QApplication.setEffectEnabled(Qt.UI_AnimateMenu, animations)
+        except Exception:
+            pass
+        
+        # Update console font for event log
+        console_font_family = settings.value("console_font_family", "Consolas")
+        console_font_size = settings.value("console_font_size", 9, type=int)
+        self.event_log_widget.update_font(console_font_family, console_font_size)
+        
+        # Force repaint
+        self.repaint()
 
     def _show_connection_dialog(self):
         """Opens the Connection Dialog."""
@@ -276,7 +533,7 @@ class MainWindow(QMainWindow):
     def _show_scd_import_dialog(self):
         """Opens the SCD Import Dialog."""
         if not self.scd_dialog:
-            self.scd_dialog = SCDImportDialog(self)
+            self.scd_dialog = SCDImportDialog(self, event_logger=self.event_logger)
             
         if self.scd_dialog.exec():
             try:
@@ -297,16 +554,31 @@ class MainWindow(QMainWindow):
             
             for i, config in enumerate(configs):
                 try:
-                    progress.add_log(f"Importing {config.name} ({config.ip_address})...")
+                    progress.add_log(f"[{i+1}/{len(configs)}] Importing {config.name} ({config.ip_address})...")
+                    progress.add_log(f"  → Adding device configuration...")
                     self.device_manager.add_device(config)
+                    
+                    progress.add_log(f"  → Parsing SCD file for {config.name}...")
                     self.device_manager.load_offline_scd(config.name)
+                    
+                    progress.add_log(f"  ✓ Successfully imported {config.name}")
+                    
+                    if self.event_logger:
+                        self.event_logger.info("SCDImport", f"Imported device: {config.name} ({config.ip_address})")
+                    
                     count += 1
                     progress.set_progress(i + 1)
                 except Exception as e:
                     msg = f"Failed to add {config.name}: {e}"
-                    progress.add_log(f"ERROR: {msg}")
+                    progress.add_log(f"  ✗ ERROR: {msg}")
                     errors.append(msg)
+                    if self.event_logger:
+                        self.event_logger.error("SCDImport", f"Import failed for {config.name}: {e}")
             
+            progress.add_log(f"\n{'='*50}")
+            progress.add_log(f"Import complete: {count}/{len(configs)} devices imported successfully")
+            if errors:
+                progress.add_log(f"Failed: {len(errors)} device(s)")
             progress.finish()
             
             if errors:
@@ -384,6 +656,56 @@ class MainWindow(QMainWindow):
             else:
                 show_scrollable_error(self, "Export Failed", "Failed to export GOOSE details:", msg)
 
+    def _export_selected_ied_scl(self):
+        """Export selected IEC 61850 IED to IID/ICD/SCD"""
+        selected_devices = self.device_tree.get_selected_device_names()
+        if not selected_devices:
+            QMessageBox.information(self, "No Selection", "Select an IEC 61850 IED in the Device Explorer first.")
+            return
+
+        if len(selected_devices) > 1:
+            QMessageBox.information(self, "Multiple Selection", "Select a single IED to export.")
+            return
+
+        self._export_ied_scl_by_device(selected_devices[0])
+
+    def _export_ied_scl_by_device(self, device_name: str):
+        """Export a specific IEC 61850 IED by device name."""
+        device = self.device_manager.get_device(device_name)
+        if not device or device.config.device_type != DeviceType.IEC61850_IED:
+            QMessageBox.information(self, "Invalid Selection", "Selected device is not an IEC 61850 IED.")
+            return
+
+        default_name = f"{device.config.name}.icd"
+        filter_str = "SCL Files (*.iid *.icd *.scd)"
+        fname, _ = QFileDialog.getSaveFileName(self, "Export Selected IED", default_name, filter_str)
+        if not fname:
+            return
+
+        # Check if device has SCD file
+        scd_path = device.config.scd_file_path
+        
+        if scd_path and os.path.exists(scd_path):
+            # Export from SCD file
+            success, msg = export_selected_ied_scl(scd_path, device.config.name, fname)
+        else:
+            # Generate from online discovery
+            if not device.root_node or not device.root_node.children:
+                QMessageBox.warning(
+                    self,
+                    "No Data Model",
+                    f"Device '{device.config.name}' has not been discovered yet.\n\n"
+                    "Please connect to the device first to discover its data model."
+                )
+                return
+            
+            success, msg = export_ied_from_online_discovery(device, fname)
+        
+        if success:
+            self.status_bar.showMessage(f"Exported: {msg}", 3000)
+        else:
+            show_scrollable_error(self, "Export Failed", "Failed to export selected IED:", msg)
+
     def _export_diagnostics(self):
         """Export comprehensive diagnostics report"""
         fname, _ = QFileDialog.getSaveFileName(self, "Export Diagnostics Report", "diagnostics_report.txt", "Text Files (*.txt)")
@@ -403,6 +725,32 @@ class MainWindow(QMainWindow):
         if not settings.value("modbus_slave_info_shown", False):
             QMessageBox.information(self, "Modbus Slave Server", "This feature allows SCADA Scout to act as a Modbus TCP slave/server.\n\nUse cases:\n• Simulate devices for testing clients\n• Create virtual test environments\n• Act as a protocol gateway\n\nClick 'Start Server' to begin listening for connections.")
             settings.setValue("modbus_slave_info_shown", True)
+
+    def _show_iec61850_simulator_dialog(self):
+        """Open the IEC 61850 simulator configuration dialog"""
+        from src.ui.widgets.iec61850_simulator_dialog import IEC61850SimulatorDialog
+        from PySide6.QtWidgets import QDialog
+        
+        dialog = IEC61850SimulatorDialog(self, event_logger=self.event_logger)
+        if dialog.exec() == QDialog.Accepted:
+            configs = dialog.get_selected_configs()
+            if not configs:
+                return
+                
+            for config in configs:
+                # Add to device manager
+                self.device_manager.add_device(config)
+                # Automatically start the server
+                self.device_manager.connect_device(config.name)
+                
+                if self.event_logger:
+                    self.event_logger.info("Simulator", f"Started simulation for {config.name} on {config.ip_address}:{config.port}")
+            
+            QMessageBox.information(
+                self, 
+                "Simulator Started", 
+                f"Successfully started {len(configs)} IEC 61850 simulated IEDs.\nCheck the Device Explorer for status."
+            )
 
     # Project Management Handlers
     def _on_new_project(self):
@@ -453,3 +801,7 @@ class MainWindow(QMainWindow):
             if device:
                 # Passing the device object tells SignalTableModel to use device.root_node
                 self.signals_view.set_filter_node(device, device_name)
+
+    def closeEvent(self, event):
+        """Handle window close event."""
+        super().closeEvent(event)

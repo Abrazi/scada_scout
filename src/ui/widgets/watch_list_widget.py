@@ -56,12 +56,12 @@ class WatchListWidget(QWidget):
         
         # Table
         self.table = QTableWidget()
-        # Add one column for RTT (ms) after Value
-        self.table.setColumnCount(14)
+        # Add columns for RTT and Max RTT after Value
+        self.table.setColumnCount(15)
         self.table.setHorizontalHeaderLabels([
             "Name", "Address", "Access", "Type",
             "Modbus Type", "Endianness", "Scale", "Offset",
-            "Value", "RTT (ms)", "Quality", "Timestamp", "Last Changed", "Error"
+            "Value", "RTT (ms)", "Max RTT (ms)", "Quality", "Timestamp", "Last Changed", "Error"
         ])
         
         header = self.table.horizontalHeader()
@@ -153,7 +153,11 @@ class WatchListWidget(QWidget):
         rtt_display = str(watched.last_response_ms) if watched.last_response_ms is not None else "--"
         self.table.setItem(row, 9, QTableWidgetItem(rtt_display))
 
-        # Column 10: Quality
+        # Column 10: Max RTT (ms)
+        max_rtt_display = str(watched.max_response_ms) if watched.max_response_ms is not None else "--"
+        self.table.setItem(row, 10, QTableWidgetItem(max_rtt_display))
+
+        # Column 11: Quality
         try:
             qual_text = signal.quality.value if getattr(signal, 'quality', None) is not None else "--"
         except Exception:
@@ -167,24 +171,24 @@ class WatchListWidget(QWidget):
             quality_item.setBackground(QBrush(QColor('red')))
         else:
             quality_item.setBackground(QBrush(QColor('gray')))
-        self.table.setItem(row, 10, quality_item)
+        self.table.setItem(row, 11, quality_item)
         
-        # Column 11: Timestamp
+        # Column 12: Timestamp
         ts_str = signal.timestamp.strftime("%H:%M:%S.%f")[:-3] if signal.timestamp else "--"
-        self.table.setItem(row, 11, QTableWidgetItem(ts_str))
+        self.table.setItem(row, 12, QTableWidgetItem(ts_str))
 
-        # Column 12: Last Changed
+        # Column 13: Last Changed
         lc_str = signal.last_changed.strftime("%H:%M:%S.%f")[:-3] if signal.last_changed else "--"
-        self.table.setItem(row, 12, QTableWidgetItem(lc_str))
+        self.table.setItem(row, 13, QTableWidgetItem(lc_str))
 
-        # Column 13: Error
+        # Column 14: Error
         error_str = signal.error or "-"
-        self.table.setItem(row, 13, QTableWidgetItem(error_str))
+        self.table.setItem(row, 14, QTableWidgetItem(error_str))
         
         # Store watch_id in row data (column 0)
         self.table.item(row, 0).setData(Qt.UserRole, watched.watch_id)
     
-    def _on_signal_updated(self, watch_id: str, signal: Signal, response_ms: int):
+    def _on_signal_updated(self, watch_id: str, signal: Signal, response_ms: int | None):
         """Update a signal's display when its value changes."""
         # Find the row
         for row in range(self.table.rowCount()):
@@ -209,8 +213,14 @@ class WatchListWidget(QWidget):
                     rtt_text = str(response_ms) if response_ms is not None else "--"
                     self._ensure_item(row, 9).setText(rtt_text)
 
-                    # Column 10: Quality
-                    quality_item = self._ensure_item(row, 10)
+                    # Column 10: Max RTT (ms)
+                    watched = self.watch_manager.get_watched(watch_id)
+                    max_rtt = watched.max_response_ms if watched else None
+                    max_rtt_text = str(max_rtt) if max_rtt is not None else "--"
+                    self._ensure_item(row, 10).setText(max_rtt_text)
+
+                    # Column 11: Quality
+                    quality_item = self._ensure_item(row, 11)
                     qual_text = signal.quality.value if getattr(signal, 'quality', None) is not None else "--"
                     quality_item.setText(qual_text)
                     if getattr(signal, 'quality', None) == SignalQuality.GOOD:
@@ -220,17 +230,17 @@ class WatchListWidget(QWidget):
                     else:
                         quality_item.setBackground(QBrush(QColor('gray')))
 
-                    # Column 11: Timestamp
+                    # Column 12: Timestamp
                     ts_str = signal.timestamp.strftime("%H:%M:%S.%f")[:-3] if signal.timestamp else "--"
-                    self._ensure_item(row, 11).setText(ts_str)
+                    self._ensure_item(row, 12).setText(ts_str)
 
-                    # Column 12: Last Changed
+                    # Column 13: Last Changed
                     lc_str = signal.last_changed.strftime("%H:%M:%S.%f")[:-3] if signal.last_changed else "--"
-                    self._ensure_item(row, 12).setText(lc_str)
+                    self._ensure_item(row, 13).setText(lc_str)
 
-                    # Column 13: Error
+                    # Column 14: Error
                     error_str = signal.error or "-"
-                    self._ensure_item(row, 13).setText(error_str)
+                    self._ensure_item(row, 14).setText(error_str)
                 except Exception as e:
                     logger.exception(f"Error updating watch list row {row} for {watch_id}: {e}")
                 break

@@ -9,10 +9,11 @@ class SCDImportDialog(QDialog):
     """
     Dialog to select an SCD file, list found IEDs, and select which to import.
     """
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, event_logger=None):
         super().__init__(parent)
         self.setWindowTitle("Import from SCD/SCL")
         self.resize(600, 400)
+        self.event_logger = event_logger
         
         self.layout = QVBoxLayout(self)
         
@@ -43,10 +44,13 @@ class SCDImportDialog(QDialog):
         sel_layout = QHBoxLayout()
         btn_sel_all = QPushButton("Select All")
         btn_desel_all = QPushButton("Deselect All")
+        btn_check_ips = QPushButton("Check/Configure IPs")
+        btn_check_ips.clicked.connect(self._check_and_configure_ips)
         btn_sel_all.clicked.connect(self._select_all)
         btn_desel_all.clicked.connect(self._deselect_all)
         sel_layout.addWidget(btn_sel_all)
         sel_layout.addWidget(btn_desel_all)
+        sel_layout.addWidget(btn_check_ips)
         sel_layout.addStretch()
         self.layout.addLayout(sel_layout)
         
@@ -97,8 +101,13 @@ class SCDImportDialog(QDialog):
         self.progress_dialog.close()
         
         if error_msg:
+             if self.event_logger:
+                 self.event_logger.error("SCDImport", f"Failed to parse SCD: {error_msg}")
              QMessageBox.critical(self, "Parse Error", f"Failed to parse SCD file:\n{error_msg}")
              return
+
+        if self.event_logger:
+            self.event_logger.info("SCDImport", f"Successfully parsed SCD: {len(ieds)} IEDs found")
 
         self.parsed_ieds = ieds
         self._populate_table()
@@ -218,12 +227,23 @@ class SCDImportDialog(QDialog):
                 ip = "127.0.0.1"
                 # Check if it's a combobox
                 widget = self.table.cellWidget(row, 1)
-                if widget and isinstance(widget, QComboBox): # Updated import check if needed
-                     data = widget.currentData() # This is the ip_info dict
-                     ip = data['ip']
+                if widget and isinstance(widget, QComboBox):
+                    # For editable ComboBox, use currentText to get potentially edited value
+                    text = widget.currentText().strip()
+                    # Extract IP if it's in format with additional info
+                    if ' - ' in text or '(' in text:
+                        # Try to extract just the IP part
+                        ip = text.split(' - ')[0].split('(')[0].strip()
+                    else:
+                        ip = text
+                    # Fallback to data if text parsing didn't work
+                    if not ip:
+                        data = widget.currentData()
+                        if isinstance(data, dict):
+                            ip = data.get('ip', '127.0.0.1')
                 else:
-                     ip_item = self.table.item(row, 1)
-                     ip = ip_item.text() if ip_item else "127.0.0.1"
+                    ip_item = self.table.item(row, 1)
+                    ip = ip_item.text() if ip_item else "127.0.0.1"
 
                 configs.append(DeviceConfig(
                     name=name,
@@ -234,3 +254,76 @@ class SCDImportDialog(QDialog):
                     scd_file_path=self.scd_path
                 ))
         return configs
+
+    def _check_and_configure_ips(self):
+        """Check which IPs are not configured and offer to configure them"""
+        from src.utils.network_utils import NetworkUtils
+        from src.ui.dialogs.ip_config_dialog import IPConfigDialog
+        
+        # Get all local IPs
+        local_interfaces = NetworkUtils.get_network_interfaces()
+        local_ips = {iface.ip_address for iface in local_interfaces}
+        
+        # Collect IPs from selected IEDs
+        missing_ips = []
+        rows = self.table.rowCount()
+        
+        for row in range(rows):
+            chk_item = self.table.item(row, 3)
+            if chk_item.checkState() != Qt.Unchecked:
+                widget = self.table.cellWidget(row, 1)
+                ip = ""
+                
+                if widget and isinstance(widget, QComboBox):
+                    # For editable ComboBox, always use currentText to get potentially edited value
+                    text = widget.currentText().strip()
+                    # Extract IP if it's in format with additional info
+                    if ' - ' in text or '(' in text:
+                        # Try to extract just the IP part
+                        ip = text.split(' - ')[0].split('(')[0].strip()
+                    else:
+                        ip = text
+                    # Fallback to data if text parsing didn't work
+                    if not ip or not NetworkUtils.validate_ip_address(ip):
+                        data = widget.currentData()
+                        if isinstance(data, dict):
+                            ip = data.get('ip', '')
+                else:
+                    ip_item = self.table.item(row, 1)
+                    ip = ip_item.text() if ip_item else ""
+                
+                if ip and ip not in local_ips and ip not in missing_ips:
+                    if NetworkUtils.validate_ip_address(ip):
+                        missing_ips.append(ip)
+        
+        if not missing_ips:
+            QMessageBox.information(
+                self,
+                "All IPs Available",
+                "All selected IP addresses are already configured on local interfaces."
+            )
+            return
+        
+        # Show list of missing IPs
+        msg = "The following IP addresses are not configured:\n\n"
+        for ip in missing_ips:
+            msg += f"  • {ip}\n"
+        msg += "\nWould you like to configure them?"
+        
+        reply = QMessageBox.question(
+            self,
+            "Configure Missing IPs",
+            msg,
+            QMessageBox.Yes | QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            # Open config dialog for each IP
+            for ip in missing_ips:
+                dlg = IPConfigDialog(ip, self)
+                if dlg.exec() == QDialog.Accepted:
+                    # IP was configured (or user acknowledged manual config)
+                    continue
+                else:
+                    # User cancelled
+                    break

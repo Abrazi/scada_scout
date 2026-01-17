@@ -39,7 +39,25 @@ class BaseProtocol(ABC):
         """Reads a specific signal synchronously."""
         pass
 
-    # TODO: Add write_signal methods later
+    # Control methods (optional, implement if protocol supports control)
+    def send_command(self, signal: Signal, value, params: dict = None) -> bool:
+        """
+        High-level command sender (optional).
+        Default: not implemented.
+        """
+        raise NotImplementedError(f"{self.__class__.__name__} does not support send_command")
+    
+    def select(self, signal: Signal, value=None, params: dict = None) -> bool:
+        """SELECT phase for SBO control (optional)."""
+        raise NotImplementedError(f"{self.__class__.__name__} does not support select")
+    
+    def operate(self, signal: Signal, value, params: dict = None) -> bool:
+        """OPERATE phase for control (optional)."""
+        raise NotImplementedError(f"{self.__class__.__name__} does not support operate")
+    
+    def cancel(self, signal: Signal) -> bool:
+        """Cancel selection (optional)."""
+        raise NotImplementedError(f"{self.__class__.__name__} does not support cancel")
     
     def _emit_update(self, signal: Signal):
         """Helper to invoke the data callback safely."""

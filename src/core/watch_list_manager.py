@@ -17,6 +17,8 @@ class WatchedSignal:
     last_request_ts: float = None
     # Last measured response time in milliseconds
     last_response_ms: int = None
+    # Maximum observed response time in milliseconds
+    max_response_ms: int = None
     
     def to_dict(self):
         return {
@@ -34,8 +36,9 @@ class WatchListManager(QObject):
     # Signals
     # Use `object` for the signal parameter to avoid Shiboken attempting to
     # convert our domain Signal class to a C++ type when emitting.
-    # Emitted args: watch_id (str), updated_signal (object), response_ms (int)
-    signal_updated = QtSignal(str, object, int)
+    # Emitted args: watch_id (str), updated_signal (object), response_ms (object)
+    # Use `object` for response_ms so None can be emitted safely.
+    signal_updated = QtSignal(str, object, object)
     watch_list_changed = QtSignal()  # Emitted when list is modified
     
     def __init__(self, device_manager):
@@ -99,6 +102,10 @@ class WatchListManager(QObject):
     def get_all_watched(self) -> List[WatchedSignal]:
         """Get all watched signals."""
         return list(self._watched_signals.values())
+
+    def get_watched(self, watch_id: str) -> Optional[WatchedSignal]:
+        """Get a watched signal by watch_id."""
+        return self._watched_signals.get(watch_id)
     
     def set_poll_interval(self, interval_ms: int):
         """Set the polling interval in milliseconds."""
@@ -142,6 +149,9 @@ class WatchListManager(QObject):
                         rtt_ms = None
 
                     watched.last_response_ms = rtt_ms
+                    if rtt_ms is not None:
+                        if watched.max_response_ms is None or rtt_ms > watched.max_response_ms:
+                            watched.max_response_ms = rtt_ms
                     self.signal_updated.emit(watch_id, updated_signal, rtt_ms)
                 else:
                     # Async read enqueued - DO NOT invalidate signal yet.
@@ -168,6 +178,9 @@ class WatchListManager(QObject):
                 rtt_ms = None
 
             watched.last_response_ms = rtt_ms
+            if rtt_ms is not None:
+                if watched.max_response_ms is None or rtt_ms > watched.max_response_ms:
+                    watched.max_response_ms = rtt_ms
             # Clear the last_request_ts to avoid reusing it for future unsolicited updates
             watched.last_request_ts = None
             self.signal_updated.emit(watch_id, signal, rtt_ms)

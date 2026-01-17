@@ -1,9 +1,11 @@
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QTreeView, QMenu, QHeaderView
 from PySide6.QtGui import QStandardItemModel, QStandardItem, QAction, QColor, QBrush
 from PySide6.QtCore import Qt, Signal as QtSignal, QItemSelectionModel
-from typing import Optional
+import fnmatch
+from typing import Optional, List
 from src.ui.widgets.connection_dialog import ConnectionDialog
 from src.ui.widgets.modbus_inspector_dialog import ModbusInspectorDialog
+from src.models.device_models import DeviceType
 import logging
 
 logger = logging.getLogger(__name__)
@@ -27,12 +29,20 @@ class DeviceTreeWidget(QWidget):
         self.layout.setContentsMargins(0, 0, 0, 0)
         
         # Filter Bar
-        from PySide6.QtWidgets import QLineEdit, QHBoxLayout
+        from PySide6.QtWidgets import QLineEdit, QHBoxLayout, QToolButton, QLabel
         filter_layout = QHBoxLayout()
         self.txt_filter = QLineEdit()
         self.txt_filter.setPlaceholderText("Search devices...")
         self.txt_filter.textChanged.connect(self._filter_tree)
+        self.txt_filter.returnPressed.connect(self._select_next_match)
         filter_layout.addWidget(self.txt_filter)
+        self.btn_next_match = QToolButton()
+        self.btn_next_match.setText("Next")
+        self.btn_next_match.setEnabled(False)
+        self.btn_next_match.clicked.connect(self._select_next_match)
+        filter_layout.addWidget(self.btn_next_match)
+        self.lbl_filter_count = QLabel("")
+        filter_layout.addWidget(self.lbl_filter_count)
         self.layout.addLayout(filter_layout)
         
         self.tree_view = QTreeView()
@@ -48,46 +58,107 @@ class DeviceTreeWidget(QWidget):
         self.tree_view.selectionModel().selectionChanged.connect(self._on_selection_changed)
         self.model.itemChanged.connect(self._on_item_changed)
 
-    def _filter_tree(self, text):
-        """Filter the tree view based on text."""
-        search = text.lower()
-        
-        def filter_recursive(item):
-            visible = False
-            # Check self
-            if search in item.text().lower():
-                visible = True
-            
-            # Check children
-            for i in range(item.rowCount()):
-                child = item.child(i)
-                child_visible = filter_recursive(child)
-                if child_visible:
-                    visible = True
-            
-            # If visible, hide/show using view (if using proxy) or set row hidden
-            # Ideally with QStandardItemModel, we might want Proxy, but hiding rows works too.
-            # QTreeView.setRowHidden needs visual index.
-            # Easier: Use Proxy? Or manual traversal.
-            # Let's try manual traversal of the View for simplicity if not using Proxy.
-            # Wait, hiding requires mapping indices.
-            
-            # Better approach for QStandardItemModel: Loop visible rows?
-            return visible
+        # Filter tracking
+        self._filter_matches = []
+        self._filter_match_index = -1
 
-        # If text is empty, show all
+    def keyPressEvent(self, event):
+        """Handle keyboard shortcuts."""
+        if event.key() == Qt.Key_Delete:
+            self._remove_selected_devices()
+        else:
+            super().keyPressEvent(event)
+    
+    def _filter_tree(self, text):
+        """Find matches and jump to them without hiding any rows."""
+        search = text.strip().lower()
+        self._filter_matches = []
+        self._filter_match_index = -1
+
         if not search:
-            self._show_all_items(self.model.invisibleRootItem())
+            self.lbl_filter_count.setText("")
+            self.btn_next_match.setEnabled(False)
             return
 
-        # Recompute visibility for every top-level child
         root = self.model.invisibleRootItem()
-        for i in range(root.rowCount()):
-            child = root.child(i)
-            visible = self._filter_item_visibility(child, search)
-            self.tree_view.setRowHidden(i, root.index(), not visible)
-            if visible:
-                self.tree_view.expand(child.index())
+        self._collect_filter_matches(root, search, self._filter_matches)
+
+        if self._filter_matches:
+            self._filter_match_index = 0
+            self._select_match(self._filter_match_index)
+            self.btn_next_match.setEnabled(len(self._filter_matches) > 1)
+            self.lbl_filter_count.setText(f"1/{len(self._filter_matches)}")
+        else:
+            self.btn_next_match.setEnabled(False)
+            self.lbl_filter_count.setText("0/0")
+
+    def _collect_filter_matches(self, parent, search, matches):
+        for row in range(parent.rowCount()):
+            item = parent.child(row, 0)
+            if not item:
+                continue
+
+            txt = item.text().lower() if item.text() else ""
+            path_txt = self._item_path(item).lower()
+            desc_item = parent.child(row, 2)
+            if desc_item and desc_item.text():
+                txt += " " + desc_item.text().lower()
+
+            if self._matches_filter(txt, search) or self._matches_filter(path_txt, search):
+                matches.append(item)
+
+            if item.rowCount() > 0:
+                self._collect_filter_matches(item, search, matches)
+
+    def _matches_filter(self, text, search):
+        if not search:
+            return False
+
+        if "*" in search or "?" in search:
+            return fnmatch.fnmatch(text, search)
+
+        return search in text
+
+    def _item_path(self, item):
+        parts = []
+        current = item
+        while current is not None:
+            try:
+                parts.append(current.text())
+            except Exception:
+                pass
+            current = current.parent()
+        parts.reverse()
+        return ".".join(p for p in parts if p)
+
+    def _select_next_match(self):
+        if not self._filter_matches:
+            return
+
+        self._filter_match_index = (self._filter_match_index + 1) % len(self._filter_matches)
+        self._select_match(self._filter_match_index)
+        self.lbl_filter_count.setText(f"{self._filter_match_index + 1}/{len(self._filter_matches)}")
+
+    def _select_match(self, match_index):
+        try:
+            item = self._filter_matches[match_index]
+        except Exception:
+            return
+
+        # Expand to reveal match
+        parent = item.parent()
+        while parent is not None:
+            try:
+                self.tree_view.expand(parent.index())
+            except Exception:
+                pass
+            parent = parent.parent()
+
+        index = item.index()
+        selection_model = self.tree_view.selectionModel()
+        selection_model.select(index, QItemSelectionModel.ClearAndSelect | QItemSelectionModel.Rows)
+        selection_model.setCurrentIndex(index, QItemSelectionModel.ClearAndSelect | QItemSelectionModel.Rows)
+        self.tree_view.scrollTo(index)
 
     def _show_all_items(self, parent):
         for i in range(parent.rowCount()):
@@ -753,6 +824,19 @@ class DeviceTreeWidget(QWidget):
 
                 # Edit and Remove
                 menu.addSeparator()
+                if device.config.device_type == DeviceType.IEC61850_IED:
+                    # Add simulator option
+                    simulate_action = QAction("Start Simulator for this IED...", self)
+                    simulate_action.triggered.connect(lambda: self._start_ied_simulator(device_name))
+                    menu.addAction(simulate_action)
+                    menu.addSeparator()
+                    
+                    export_ied_action = QAction("Export Selected IED (.iid/.icd/.scd)...", self)
+                    export_ied_action.triggered.connect(lambda: self._trigger_export_selected_ied(device_name))
+                    menu.addAction(export_ied_action)
+
+                    menu.addSeparator()
+
                 edit_action = QAction("Edit Connection", self)
                 edit_action.triggered.connect(lambda: self._edit_device(device_name))
                 menu.addAction(edit_action)
@@ -905,6 +989,15 @@ class DeviceTreeWidget(QWidget):
         
         if menu.actions():
             menu.exec(self.tree_view.viewport().mapToGlobal(position))
+
+    def _trigger_export_selected_ied(self, device_name: str):
+        """Trigger export of a specific IED via main window."""
+        try:
+            main_window = self.window()
+            if main_window and hasattr(main_window, "_export_ied_scl_by_device"):
+                main_window._export_ied_scl_by_device(device_name)
+        except Exception as e:
+            logger.error(f"DeviceTreeWidget: Failed to trigger IED export: {e}")
     
     def _find_device_for_item(self, item: QStandardItem) -> Optional[str]:
         """Find the device name by traversing up to the root, skipping folders."""
@@ -919,6 +1012,50 @@ class DeviceTreeWidget(QWidget):
             current = current.parent()
         return None
 
+    def get_selected_device_names(self) -> List[str]:
+        """Return unique device names from the current tree selection."""
+        selected = []
+        try:
+            selection_model = self.tree_view.selectionModel()
+            if not selection_model:
+                return selected
+
+            for index in selection_model.selectedRows(0):
+                item = self.model.itemFromIndex(index)
+                if not item:
+                    continue
+                device_name = self._find_device_for_item(item)
+                if device_name and device_name not in selected:
+                    selected.append(device_name)
+        except Exception as e:
+            logger.error(f"DeviceTreeWidget: Failed to get selected devices: {e}")
+        return selected
+
+    def _remove_selected_devices(self):
+        """Remove all selected devices after confirmation."""
+        device_names = self.get_selected_device_names()
+        if not device_names:
+            return
+        
+        from PySide6.QtWidgets import QMessageBox
+        if len(device_names) == 1:
+            msg = f"Are you sure you want to remove device '{device_names[0]}'?"
+            title = "Remove Device"
+        else:
+            msg = f"Are you sure you want to remove {len(device_names)} devices?\n\n" + "\n".join(f"• {name}" for name in device_names)
+            title = "Remove Devices"
+        
+        reply = QMessageBox.question(
+            self, 
+            title,
+            msg,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            for device_name in device_names:
+                self.device_manager.remove_device(device_name)
+    
     def _confirm_remove_device(self, device_name):
         """Asks user for confirmation before removing device."""
         from PySide6.QtWidgets import QMessageBox
@@ -1127,6 +1264,75 @@ class DeviceTreeWidget(QWidget):
         if not hasattr(self, '_inspector_dialogs'):
             self._inspector_dialogs = []
         self._inspector_dialogs.append(dialog)
+
+    def _start_ied_simulator(self, device_name):
+        """Start an IEC 61850 simulator for an imported IED"""
+        from PySide6.QtWidgets import QMessageBox, QDialog
+        from src.ui.dialogs.simulate_ied_dialog import SimulateIEDDialog
+        
+        device = self.device_manager.get_device(device_name)
+        if not device:
+            QMessageBox.warning(self, "Error", "Device not found")
+            return
+        
+        if device.config.device_type != DeviceType.IEC61850_IED:
+            QMessageBox.warning(self, "Error", "Simulation only available for IEC 61850 IED devices")
+            return
+        
+        if not device.config.scd_file_path:
+            QMessageBox.warning(
+                self, 
+                "No SCD File",
+                "This IED was not imported from an SCD/ICD file.\n"
+                "Simulation requires an SCD or ICD file."
+            )
+            return
+        
+        # Show dialog to configure simulator
+        dialog = SimulateIEDDialog(device.config, self)
+        if dialog.exec() == QDialog.Accepted:
+            sim_config = dialog.get_simulator_config()
+            
+            # Add the simulator as a new device
+            try:
+                self.device_manager.add_device(sim_config)
+                
+                # Try to connect (start the server)
+                success = self.device_manager.connect_device(sim_config.name)
+                
+                # Check if it actually connected
+                sim_device = self.device_manager.get_device(sim_config.name)
+                if sim_device and sim_device.connected:
+                    QMessageBox.information(
+                        self,
+                        "Simulator Started",
+                        f"✅ IEC 61850 simulator started successfully!\n\n"
+                        f"IED Name: {sim_config.name}\n"
+                        f"Listen Address: {sim_config.ip_address}:{sim_config.port}\n\n"
+                        "Other IEC 61850 clients can now connect to this address."
+                    )
+                else:
+                    QMessageBox.warning(
+                        self,
+                        "Simulator Start Failed",
+                        f"❌ Failed to start IEC 61850 simulator for {sim_config.name}\n\n"
+                        f"Possible causes:\n"
+                        f"• SCD file format not supported by libiec61850\n"
+                        f"• Port {sim_config.port} already in use\n"
+                        f"• IP {sim_config.ip_address} not configured\n\n"
+                        f"Check the Event Log for detailed error messages.\n\n"
+                        f"💡 Try:\n"
+                        f"• Export an ICD file from your engineering tool\n"
+                        f"• Use a different IP address\n"
+                        f"• Use a commercial IEC 61850 simulator"
+                    )
+                    
+            except Exception as e:
+                QMessageBox.critical(
+                    self,
+                    "Simulation Failed",
+                    f"Failed to start simulator:\n{str(e)}"
+                )
 
     def _show_modbus_range_dialog(self, device_name):
         """Shows the dialog to configure Modbus address ranges."""

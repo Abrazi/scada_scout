@@ -1,4 +1,4 @@
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QTextEdit, QPushButton, QHBoxLayout, QCheckBox, QComboBox, QLineEdit, QLabel, QFileDialog
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QTextEdit, QPushButton, QHBoxLayout, QCheckBox, QComboBox, QLineEdit, QLabel, QFileDialog, QMessageBox, QGridLayout
 import subprocess
 import os
 from PySide6.QtCore import Qt, Signal as QtSignal, QObject
@@ -27,124 +27,121 @@ class EventLogWidget(QWidget):
             QTextEdit {
                 background-color: #1e1e1e;
                 color: #d4d4d4;
-                font-family: 'Courier New', monospace;
+                font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
                 font-size: 10pt;
+                border: 1px solid #3e3e42;
+                border-radius: 4px;
+                padding: 4px;
             }
         """)
         layout.addWidget(self.text_edit)
         
-        # Control buttons
-        btn_layout = QHBoxLayout()
+        # Control buttons in two rows for better flexibility
+        # Row 1: Basic controls
+        row1_layout = QHBoxLayout()
         
-        self.chk_verbose = QCheckBox("Show All Events (Verbose)")
-        self.chk_verbose.setChecked(True) # Default to showing everything for debugging
+        self.chk_verbose = QCheckBox("Show All Events")
+        self.chk_verbose.setChecked(True)
         self.chk_verbose.stateChanged.connect(self._refresh_log_view)
-        btn_layout.addWidget(self.chk_verbose)
+        row1_layout.addWidget(self.chk_verbose)
         
-        self.btn_clear = QPushButton("Clear Log")
-        self.btn_clear.clicked.connect(self.clear_log)
-        btn_layout.addWidget(self.btn_clear)
-        
-        self.btn_export = QPushButton("Export Log...")
-        self.btn_export.clicked.connect(self._export_log)
-        btn_layout.addWidget(self.btn_export)
-        
-        btn_layout.addStretch()
-        layout.addLayout(btn_layout)
-
-        # Toolbar for Play/Pause and Filtering
-        toolbar_layout = QHBoxLayout()
-        layout.addLayout(toolbar_layout)
-
-        # Pause/Resume
-        self.btn_pause = QPushButton("Pause")
+        self.btn_pause = QPushButton("⏸️ Pause")
         self.btn_pause.setCheckable(True)
         self.btn_pause.clicked.connect(self._toggle_pause)
-        toolbar_layout.addWidget(self.btn_pause)
+        row1_layout.addWidget(self.btn_pause)
         
         # Filter Source
-        from PySide6.QtWidgets import QComboBox
         self.combo_source = QComboBox()
         self.combo_source.addItem("All Sources")
-        self.combo_source.addItem("Application") # Only app logs
-        self.combo_source.addItem("Devices") # All device logs
+        self.combo_source.addItem("Application")
+        self.combo_source.addItem("Devices")
         self.combo_source.currentTextChanged.connect(self._apply_source_filter)
-        toolbar_layout.addWidget(self.combo_source)
+        self.combo_source.setMinimumWidth(120)
+        row1_layout.addWidget(self.combo_source)
         
-        toolbar_layout.addStretch()
+        self.btn_clear = QPushButton("🗑️ Clear")
+        self.btn_clear.clicked.connect(self.clear_log)
+        row1_layout.addWidget(self.btn_clear)
         
+        self.btn_export = QPushButton("💾 Export...")
+        self.btn_export.clicked.connect(self._export_log)
+        row1_layout.addWidget(self.btn_export)
         
-        # Capture Controls
-        self.btn_capture = QPushButton("Capture Traffic")
+        row1_layout.addStretch()
+        layout.addLayout(row1_layout)
+
+        # Row 2: Packet Capture Controls
+        row2_layout = QHBoxLayout()
+        
+        self.btn_capture = QPushButton("📡 Capture")
         self.btn_capture.setCheckable(True)
         self.btn_capture.clicked.connect(self._toggle_capture)
-        # Style make it distinct
-        self.btn_capture.setStyleSheet("""
-            QPushButton:checked {
-                background-color: #c94e4e;
-                color: white;
-            }
-        """)
-        toolbar_layout.addWidget(self.btn_capture)
+        row2_layout.addWidget(self.btn_capture)
 
         self.combo_capture_filter = QComboBox()
         self.combo_capture_filter.addItem("MMS (TCP 102)", "tcp port 102")
-        self.combo_capture_filter.addItem("GOOSE (Ethertype 0x88b8)", "ether proto 0x88b8")
-        self.combo_capture_filter.addItem("SV (Ethertype 0x88ba)", "ether proto 0x88ba")
+        self.combo_capture_filter.addItem("GOOSE (0x88b8)", "ether proto 0x88b8")
+        self.combo_capture_filter.addItem("SV (0x88ba)", "ether proto 0x88ba")
         self.combo_capture_filter.addItem("All TCP", "tcp")
         self.combo_capture_filter.addItem("All Traffic", "")
-        toolbar_layout.addWidget(self.combo_capture_filter)
+        self.combo_capture_filter.setMinimumWidth(120)
+        row2_layout.addWidget(self.combo_capture_filter)
 
-        # Capture logging controls
+        self.combo_iface = QComboBox()
+        self.combo_iface.setMinimumWidth(120)
+        row2_layout.addWidget(self.combo_iface)
+
+        self.btn_refresh_ifaces = QPushButton("↻")
+        self.btn_refresh_ifaces.setToolTip("Refresh Network Interfaces")
+        self.btn_refresh_ifaces.setMaximumWidth(40)
+        self.btn_refresh_ifaces.clicked.connect(self._populate_ifaces)
+        row2_layout.addWidget(self.btn_refresh_ifaces)
+
         self.chk_log_file = QCheckBox("Log to File")
         self.chk_log_file.setChecked(False)
-        toolbar_layout.addWidget(self.chk_log_file)
+        row2_layout.addWidget(self.chk_log_file)
 
         self.le_log_file = QLineEdit()
         self.le_log_file.setPlaceholderText("packets.log")
-        self.le_log_file.setFixedWidth(220)
-        toolbar_layout.addWidget(self.le_log_file)
+        self.le_log_file.setMinimumWidth(120)
+        row2_layout.addWidget(self.le_log_file)
 
-        self.btn_browse_log = QPushButton("Browse...")
+        self.btn_browse_log = QPushButton("...")
+        self.btn_browse_log.setToolTip("Browse for log file location")
+        self.btn_browse_log.setMaximumWidth(40)
         self.btn_browse_log.clicked.connect(self._browse_log_file)
-        toolbar_layout.addWidget(self.btn_browse_log)
+        row2_layout.addWidget(self.btn_browse_log)
+
+        self.btn_open_log = QPushButton("📂")
+        self.btn_open_log.setToolTip("Open log file")
+        self.btn_open_log.setMaximumWidth(40)
+        self.btn_open_log.clicked.connect(self._open_log_file)
+        row2_layout.addWidget(self.btn_open_log)
 
         self.chk_log_json = QCheckBox("JSON")
-        self.chk_log_json.setChecked(False)
-        toolbar_layout.addWidget(self.chk_log_json)
+        row2_layout.addWidget(self.chk_log_json)
 
-        # Rotation controls
         self.lbl_max_mb = QLabel("Max MB:")
         self.le_max_mb = QLineEdit()
-        self.le_max_mb.setFixedWidth(80)
+        self.le_max_mb.setMaximumWidth(60)
         self.le_max_mb.setPlaceholderText("10")
-        toolbar_layout.addWidget(self.lbl_max_mb)
-        toolbar_layout.addWidget(self.le_max_mb)
+        row2_layout.addWidget(self.lbl_max_mb)
+        row2_layout.addWidget(self.le_max_mb)
 
-        self.lbl_max_files = QLabel("Rotations:")
+        self.lbl_max_files = QLabel("Rot:")
         self.le_max_files = QLineEdit()
-        self.le_max_files.setFixedWidth(50)
+        self.le_max_files.setMaximumWidth(40)
         self.le_max_files.setPlaceholderText("5")
-        toolbar_layout.addWidget(self.lbl_max_files)
-        toolbar_layout.addWidget(self.le_max_files)
+        row2_layout.addWidget(self.lbl_max_files)
+        row2_layout.addWidget(self.le_max_files)
 
-        self.btn_apply_rotation = QPushButton("Apply Rotation")
+        self.btn_apply_rotation = QPushButton("Apply")
+        self.btn_apply_rotation.setToolTip("Apply rotation settings")
         self.btn_apply_rotation.clicked.connect(self._apply_rotation_settings)
-        toolbar_layout.addWidget(self.btn_apply_rotation)
+        row2_layout.addWidget(self.btn_apply_rotation)
 
-        # Open log file button
-        self.btn_open_log = QPushButton("Open Log")
-        self.btn_open_log.clicked.connect(self._open_log_file)
-        toolbar_layout.addWidget(self.btn_open_log)
-
-        # Interface selection
-        self.combo_iface = QComboBox()
-        self.combo_iface.setFixedWidth(180)
-        toolbar_layout.addWidget(self.combo_iface)
-
-        self.btn_refresh_ifaces = QPushButton("Refresh Ifaces")
-        self.btn_refresh_ifaces.clicked.connect(self._populate_ifaces)
-        toolbar_layout.addWidget(self.btn_refresh_ifaces)
+        row2_layout.addStretch()
+        layout.addLayout(row2_layout)
 
         # Populate interfaces initially
         self._populate_ifaces()
@@ -157,8 +154,69 @@ class EventLogWidget(QWidget):
         self.capture_worker.packet_captured.connect(self._on_packet_captured)
         self.capture_worker.error_occurred.connect(self._on_capture_error)
 
+        # Apply saved defaults from settings (if any)
+        try:
+            from PySide6.QtCore import QSettings
+            qs = QSettings("ScadaScout", "UI")
+            # Default filter may be stored as label; try matching by text
+            default_filter = qs.value("capture_default_filter", None)
+            if default_filter:
+                idx = self.combo_capture_filter.findText(default_filter)
+                if idx >= 0:
+                    self.combo_capture_filter.setCurrentIndex(idx)
+            # Default interface
+            default_iface = qs.value("capture_default_iface", "")
+            if default_iface:
+                # Will apply after populate; store and set after populate
+                self._pending_default_iface = default_iface
+            else:
+                self._pending_default_iface = None
+            # Logging defaults
+            self.chk_log_file.setChecked(qs.value("capture_default_log", False, type=bool))
+            self.le_log_file.setText(qs.value("capture_default_log_path", ""))
+            self.chk_log_json.setChecked(qs.value("capture_default_json", False, type=bool))
+            self.le_max_mb.setText(str(qs.value("capture_default_max_mb", 10)))
+            self.le_max_files.setText(str(qs.value("capture_default_max_files", 5)))
+        except Exception:
+            self._pending_default_iface = None
+
+        # Apply pending iface if set
+        try:
+            if hasattr(self, '_pending_default_iface') and self._pending_default_iface:
+                # Populate interfaces then set selection if present
+                self._populate_ifaces()
+                idx = self.combo_iface.findText(self._pending_default_iface)
+                if idx >= 0:
+                    self.combo_iface.setCurrentIndex(idx)
+        except Exception:
+            pass
+
     def _toggle_capture(self):
         if self.btn_capture.isChecked():
+            # Check if scapy is available before proceeding
+            if not self.capture_worker._scapy_available:
+                error_msg = f"Scapy is not installed. Error: {self.capture_worker._scapy_error}\n\nTo enable packet capture, install scapy:\n  pip install scapy\n\nOn Linux, you may also need: sudo apt-get install tcpdump"
+                self.log_event("ERROR", "Network", error_msg)
+                self.btn_capture.setChecked(False)
+                QMessageBox.warning(self, "Scapy Not Available", error_msg)
+                return
+            # Check raw-socket / pcap privileges (non-root may be unable to capture)
+            if not self._has_raw_socket_privileges():
+                warn = (
+                    "Current user lacks privileges to capture packets.\n"
+                    "You can either run the application as root (not recommended),\n"
+                    "or grant capture capabilities to the Python interpreter used by the venv.\n\n"
+                    "For example (run once):\n"
+                    "  sudo setcap 'cap_net_raw,cap_net_admin+eip' /path/to/venv/bin/python\n\n"
+                    "Alternatively install and use `dumpcap` with appropriate permissions,\n"
+                    "or run via a privileged capture helper.\n"
+                    "Capture will likely fail without one of these.\n"
+                )
+                self.log_event("WARNING", "Network", warn)
+                QMessageBox.warning(self, "Insufficient Capture Privileges", warn)
+                self.btn_capture.setChecked(False)
+                return
+            
             filter_str = self.combo_capture_filter.currentData()
             # Apply logging and interface settings to worker
             log_to_file = self.chk_log_file.isChecked()
@@ -192,14 +250,52 @@ class EventLogWidget(QWidget):
                 except Exception as e:
                     self.log_event("ERROR", "Network", f"Failed to set interface: {e}")
 
-            self.capture_worker.start_capture(filter_str)
-            self.log_event("INFO", "Network", f"Started capture with filter: {filter_str}")
+            try:
+                self.capture_worker.start_capture(filter_str)
+                self.log_event("INFO", "Network", f"Started capture with filter: {filter_str}")
+                self._update_capture_button_style(running=True)
+            except Exception as e:
+                self.log_event("ERROR", "Network", f"Failed to start capture: {e}")
+                QMessageBox.critical(self, "Capture Error", f"Failed to start capture: {e}")
+                self.btn_capture.setChecked(False)
+                self._update_capture_button_style(running=False, error=True)
         else:
             self.capture_worker.stop_capture()
             self.log_event("INFO", "Network", "Stopped capture")
+            self._update_capture_button_style(running=False)
 
     def _on_packet_captured(self, summary: str):
         self.log_event("PACKET", "Network", summary)
+
+    def _update_capture_button_style(self, running: bool, error: bool = False):
+        """Visually update the capture button to indicate running/stopped/error."""
+        if error:
+            # Error — red
+            self.btn_capture.setStyleSheet("background-color: #e74c3c; color: white;")
+            self.btn_capture.setText("📡 Capture")
+            return
+
+        if running:
+            # Running — green
+            self.btn_capture.setStyleSheet("background-color: #27ae60; color: white;")
+            self.btn_capture.setText("📡 Capturing...")
+        else:
+            # Stopped — neutral
+            self.btn_capture.setStyleSheet("")
+            self.btn_capture.setText("📡 Capture")
+
+    def _has_raw_socket_privileges(self) -> bool:
+        """Quick check whether current process can open a raw AF_PACKET socket (Linux).
+        Returns True if allowed, False otherwise.
+        """
+        try:
+            import socket
+            # Try to create a raw packet socket (only works on Linux)
+            s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.ntohs(3))
+            s.close()
+            return True
+        except Exception:
+            return False
 
     def _browse_log_file(self):
         filename, _ = QFileDialog.getSaveFileName(self, "Select packet log file", "packets.log", "Log Files (*.log *.txt);;All Files (*)")
@@ -257,6 +353,14 @@ class EventLogWidget(QWidget):
         # Uncheck button if crashed
         if self.btn_capture.isChecked():
              self.btn_capture.setChecked(False)
+        
+        # Show user-friendly message for common issues
+        if "Scapy not available" in err or "No module named 'scapy'" in err:
+            QMessageBox.warning(self, "Packet Capture Error", 
+                f"{err}\n\nPlease install scapy:\n  pip install scapy")
+        elif "permission" in err.lower() or "access" in err.lower():
+            QMessageBox.warning(self, "Packet Capture Error", 
+                f"{err}\n\nPacket capture requires elevated privileges.\nOn Linux: Try running with sudo\nOn Windows: Run as Administrator")
 
     def update_device_list(self, devices):
         """Updates the source filter with available devices."""
@@ -280,6 +384,12 @@ class EventLogWidget(QWidget):
             self.combo_source.setCurrentIndex(0)
             
         self.combo_source.blockSignals(False)
+
+    def update_font(self, font_family="Consolas", font_size=9):
+        """Update the console font for the event log."""
+        from PySide6.QtGui import QFont
+        font = QFont(font_family, font_size)
+        self.text_edit.setFont(font)
 
     def _toggle_pause(self):
         self.is_paused = self.btn_pause.isChecked()

@@ -6,6 +6,7 @@ from datetime import datetime
 class DeviceType(Enum):
     IEC104_RTU = "IEC 60870-5-104 RTU"
     IEC61850_IED = "IEC 61850 IED"
+    IEC61850_SERVER = "IEC 61850 Simulator (Server)"
     MODBUS_TCP = "Modbus TCP"
     MODBUS_SERVER = "Modbus Slave Server"
     UNKNOWN = "Unknown"

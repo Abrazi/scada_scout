@@ -1,4 +1,4 @@
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, Signal, QSettings
 from datetime import datetime
 import binascii
 import socket
@@ -6,6 +6,11 @@ import psutil
 import json
 import os
 import threading
+import shutil
+import subprocess
+import tempfile
+import time
+import signal
 
 
 class PacketCaptureWorker(QObject):
@@ -26,6 +31,13 @@ class PacketCaptureWorker(QObject):
         self._AsyncSniffer = None
         self._scapy_available = False
         self._scapy_error = None
+
+        # dumpcap / FIFO fallback
+        self._dumpcap_path = shutil.which('dumpcap')
+        self._dumpcap_proc = None
+        self._fifo_path = None
+        self._dumpcap_thread = None
+        self._stop_event = threading.Event()
 
         # Logging options
         self._log_file = None
@@ -49,6 +61,22 @@ class PacketCaptureWorker(QObject):
 
         # Populate local IPs by default
         self._gather_local_ips()
+
+        # Read preferred capture backend from settings (Auto/AsyncSniffer/dumpcap)
+        try:
+            qs = QSettings("ScadaScout", "UI")
+            raw = qs.value("capture_backend", "Auto")
+            if isinstance(raw, str):
+                if "Async" in raw:
+                    self._preferred_backend = 'async'
+                elif "dumpcap" in raw:
+                    self._preferred_backend = 'dumpcap'
+                else:
+                    self._preferred_backend = 'auto'
+            else:
+                self._preferred_backend = 'auto'
+        except Exception:
+            self._preferred_backend = 'auto'
 
     def _gather_local_ips(self, iface: str = None):
         """Populate `self._local_ips` either for given interface or all interfaces."""
@@ -285,22 +313,76 @@ class PacketCaptureWorker(QObject):
             # refresh local ip list for chosen iface
             self._gather_local_ips(iface=iface)
 
+        # Decide backend based on preference and availability
         try:
-            # AsyncSniffer runs sniff() in a background thread and exposes start/stop.
-            # Note: On Windows you must have Npcap/WinPcap installed and run as Administrator.
-            kwargs = {'prn': self._packet_callback, 'filter': filter_str, 'store': False}
-            if self._iface:
-                kwargs['iface'] = self._iface
-            # Emit a short debug message to help diagnose why capture may not start
+            from sys import platform
+            is_posix = platform.startswith('linux') or platform.startswith('darwin') or platform.startswith('freebsd')
+        except Exception:
+            is_posix = False
+
+        # Helper to try AsyncSniffer
+        def try_async():
             try:
-                self.packet_captured.emit(f"DEBUG: starting AsyncSniffer kwargs={kwargs}")
-            except Exception:
-                pass
-            self._sniffer = self._AsyncSniffer(**kwargs)
-            self._sniffer.start()
-        except Exception as e:
-            self._sniffer = None
-            self.error_occurred.emit(f"Failed to start sniffer: {e}")
+                kwargs = {'prn': self._packet_callback, 'filter': filter_str, 'store': False}
+                if self._iface:
+                    kwargs['iface'] = self._iface
+                try:
+                    self.packet_captured.emit(f"DEBUG: starting AsyncSniffer kwargs={kwargs}")
+                except Exception:
+                    pass
+                self._sniffer = self._AsyncSniffer(**kwargs)
+                self._sniffer.start()
+                return True, None
+            except Exception as e:
+                self._sniffer = None
+                return False, e
+
+        # Helper to try dumpcap fallback
+        def try_dumpcap():
+            if not is_posix:
+                return False, RuntimeError("dumpcap fallback is only supported on POSIX platforms")
+            if not self._dumpcap_path:
+                return False, RuntimeError("dumpcap not found on PATH")
+            try:
+                started = self._start_dumpcap_fifo(filter_str, iface)
+                return started, None
+            except Exception as e:
+                return False, e
+
+        # Branch based on preference
+        if self._preferred_backend == 'async':
+            ok, err = try_async()
+            if not ok:
+                self.error_occurred.emit(f"AsyncSniffer failed: {err}")
+            return
+
+        if self._preferred_backend == 'dumpcap':
+            ok, err = try_dumpcap()
+            if not ok:
+                # emit helpful guidance
+                self._emit_dumpcap_guidance(err)
+                self.error_occurred.emit(f"Dumpcap fallback failed: {err}")
+            return
+
+        # Auto mode: prefer AsyncSniffer, fallback to dumpcap on POSIX
+        ok, err = try_async()
+        if ok:
+            return
+        # Async failed; try dumpcap if available
+        if is_posix:
+            ok2, err2 = try_dumpcap()
+            if ok2:
+                try:
+                    self.packet_captured.emit(f"DEBUG: using dumpcap fallback at {self._fifo_path}")
+                except Exception:
+                    pass
+                return
+            else:
+                # Provide guidance if dumpcap not usable
+                self._emit_dumpcap_guidance(err2)
+
+        # final fallback: emit AsyncSniffer error
+        self.error_occurred.emit(f"Failed to start sniffer: {err}")
 
     def stop_capture(self):
         """Stop capturing packets if running."""
@@ -308,6 +390,7 @@ class PacketCaptureWorker(QObject):
             return
 
         try:
+            # Stop AsyncSniffer if running
             if self._sniffer is not None:
                 try:
                     self._sniffer.stop()
@@ -318,6 +401,188 @@ class PacketCaptureWorker(QObject):
                         pass
                 finally:
                     self._sniffer = None
+
+            # Stop dumpcap fallback if active
+            if self._dumpcap_proc is not None:
+                try:
+                    # signal termination
+                    self._stop_event.set()
+                    try:
+                        self._dumpcap_proc.terminate()
+                    except Exception:
+                        pass
+                    # wait briefly
+                    self._dumpcap_proc.wait(timeout=2)
+                except Exception:
+                    pass
+                finally:
+                    self._dumpcap_proc = None
+
+            if self._dumpcap_thread is not None:
+                try:
+                    self._dumpcap_thread.join(timeout=2)
+                except Exception:
+                    pass
+                finally:
+                    self._dumpcap_thread = None
+
+            # remove FIFO if exists
+            if self._fifo_path and os.path.exists(self._fifo_path):
+                try:
+                    os.unlink(self._fifo_path)
+                except Exception:
+                    pass
+                finally:
+                    self._fifo_path = None
         except Exception as e:
             self.error_occurred.emit(f"Failed to stop sniffer: {e}")
+
+    # --- dumpcap FIFO helpers ---
+    def _start_dumpcap_fifo(self, filter_str: str = "", iface: str = None) -> bool:
+        """Create FIFO and spawn dumpcap writing pcap to it; start reader thread.
+        Returns True on success.
+        """
+        # create fifo
+        try:
+            fd, fifo = tempfile.mkstemp(prefix='scadascout_fifo_', dir=tempfile.gettempdir())
+            os.close(fd)
+            os.unlink(fifo)
+            os.mkfifo(fifo, 0o600)
+            self._fifo_path = fifo
+        except Exception as e:
+            raise RuntimeError(f"Failed to create FIFO: {e}")
+
+        # build dumpcap command
+        cmd = [self._dumpcap_path, '-w', self._fifo_path]
+        if iface:
+            cmd = [self._dumpcap_path, '-i', iface, '-w', self._fifo_path]
+        if filter_str:
+            cmd.extend(['-f', filter_str])
+
+        # spawn dumpcap
+        try:
+            self._stop_event.clear()
+            # Start dumpcap detached; ensure stdout/stderr captured for errors
+            self._dumpcap_proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, preexec_fn=os.setsid)
+        except Exception as e:
+            # cleanup fifo
+            try:
+                if self._fifo_path and os.path.exists(self._fifo_path):
+                    os.unlink(self._fifo_path)
+            except Exception:
+                pass
+            self._fifo_path = None
+            raise RuntimeError(f"Failed to start dumpcap: {e}")
+
+        # start reader thread
+        self._dumpcap_thread = threading.Thread(target=self._read_fifo_loop, daemon=True)
+        self._dumpcap_thread.start()
+        return True
+
+    def _read_fifo_loop(self):
+        """Continuously read pcap packets from FIFO using Scapy RawPcapReader and dispatch.
+        This runs in a separate thread.
+        """
+        try:
+            # wait until fifo writer opens
+            while not os.path.exists(self._fifo_path) and not self._stop_event.is_set():
+                time.sleep(0.05)
+
+            from scapy.utils import RawPcapReader
+            while not self._stop_event.is_set():
+                try:
+                    reader = RawPcapReader(self._fifo_path)
+                except Exception as e:
+                    # Possibly fifo not yet writable; wait and retry
+                    time.sleep(0.1)
+                    continue
+
+                try:
+                    for pkt_data, pkt_meta in reader:
+                        if self._stop_event.is_set():
+                            break
+                        try:
+                            # build scapy packet from raw bytes
+                            from scapy.all import Ether
+                            pkt = Ether(pkt_data)
+                            # dispatch to processing
+                            try:
+                                self._packet_callback(pkt)
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        reader.close()
+                    except Exception:
+                        pass
+
+                # small sleep to avoid tight loop on EOF
+                time.sleep(0.05)
+        except Exception as e:
+            try:
+                self.error_occurred.emit(f"Dumpcap reader error: {e}")
+            except Exception:
+                pass
+        finally:
+            # ensure dumpcap process terminated
+            try:
+                if self._dumpcap_proc is not None:
+                    try:
+                        self._dumpcap_proc.terminate()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+    def _emit_dumpcap_guidance(self, error):
+        """Emit user-friendly guidance for installing/configuring dumpcap when fallback fails."""
+        try:
+            from sys import platform
+            is_linux = platform.startswith('linux')
+            is_mac = platform.startswith('darwin')
+        except Exception:
+            is_linux = is_mac = False
+
+        if not self._dumpcap_path:
+            if is_linux:
+                msg = (
+                    "`dumpcap` not found. Install Wireshark/dumpcap.\n"
+                    "On Debian/Ubuntu: sudo apt install wireshark\n"
+                    "On Fedora: sudo dnf install wireshark-cli\n"
+                    "After install, give dumpcap capture capability:\n"
+                    "  sudo setcap 'cap_net_raw,cap_net_admin+eip' /usr/bin/dumpcap\n"
+                )
+            elif is_mac:
+                msg = (
+                    "`dumpcap` not found. Install Wireshark for macOS and allow packet capture permissions."
+                )
+            else:
+                msg = "`dumpcap` not available on this platform."
+            try:
+                self.error_occurred.emit(msg)
+            except Exception:
+                pass
+            return
+
+        # dumpcap present but failed to start
+        # Suggest setcap for dumpcap binary
+        try:
+            setcap_cmd = f"sudo setcap 'cap_net_raw,cap_net_admin+eip' {self._dumpcap_path}"
+        except Exception:
+            setcap_cmd = "sudo setcap 'cap_net_raw,cap_net_admin+eip' /usr/bin/dumpcap"
+
+        guidance = (
+            f"Failed to use dumpcap ({error}).\n"
+            "If you want to use dumpcap without sudo, grant it capture capabilities (one-time):\n"
+            f"  {setcap_cmd}\n\n"
+            "Alternatively run the application as root (not recommended) or install a capture driver/tool appropriate for your OS."
+        )
+        try:
+            self.error_occurred.emit(guidance)
+        except Exception:
+            pass
 

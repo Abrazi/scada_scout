@@ -5,6 +5,7 @@ import time
 import traceback
 from typing import Any, Dict, Optional
 
+from PySide6.QtCore import QThread, Signal
 from src.core.events import EventEmitter
 from src.models.device_models import Device
 
@@ -62,9 +63,10 @@ class ConnectionWorker(Worker):
         finally:
             self.emit("finished")
 
-class SCDParseWorker(Worker):
+class SCDParseWorker(QThread):
     """Worker to parse SCD file in background thread."""
-    # Events: progress(msg, percent), finished_parsing(ieds, error_msg)
+    progress = Signal(str, int)
+    finished_parsing = Signal(list, str)
     
     def __init__(self, file_path):
         super().__init__()
@@ -72,26 +74,26 @@ class SCDParseWorker(Worker):
 
     def run(self):
         try:
-            self.emit("progress", "Reading SCD file...", 10)
+            self.progress.emit("Reading SCD file...", 10)
             
             # Helper to defer import
             from src.core.scd_parser import SCDParser
             
-            self.emit("progress", "Parsing XML structure...", 30)
+            self.progress.emit("Parsing XML structure...", 30)
             parser = SCDParser(self.file_path)
             
             if parser.root is None:
-                self.emit("finished_parsing", [], "Failed to parse XML root.")
+                self.finished_parsing.emit([], "Failed to parse XML root.")
                 return
 
-            self.emit("progress", "Extracting IED information...", 60)
+            self.progress.emit("Extracting IED information...", 60)
             ieds = parser.extract_ieds_info()
             
-            self.emit("progress", "Finalizing...", 90)
-            self.emit("finished_parsing", ieds, "")
+            self.progress.emit("Finalizing...", 90)
+            self.finished_parsing.emit(ieds, "")
             
         except Exception as e:
-            self.emit("finished_parsing", [], str(e))
+            self.finished_parsing.emit([], str(e))
 
 class BulkReadWorker(Worker):
     """Worker to read multiple signals in a background thread."""

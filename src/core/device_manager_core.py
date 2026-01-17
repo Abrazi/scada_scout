@@ -351,6 +351,9 @@ class DeviceManagerCore(EventEmitter):
         if config.device_type == DeviceType.IEC61850_IED:
             from src.protocols.iec61850.adapter import IEC61850Adapter
             return IEC61850Adapter(config, event_logger=self.event_logger)
+        elif config.device_type == DeviceType.IEC61850_SERVER:
+            from src.protocols.iec61850.server_adapter import IEC61850ServerAdapter
+            return IEC61850ServerAdapter(config, event_logger=self.event_logger)
         elif config.device_type == DeviceType.IEC104_RTU:
             from src.protocols.iec104.mock_client import IEC104MockClient
             return IEC104MockClient(config)
@@ -440,6 +443,8 @@ class DeviceManagerCore(EventEmitter):
                         proto.operate(signal, value)
                     elif command == 'CANCEL':
                         proto.cancel(signal)
+                    elif command == 'SEND_COMMAND':
+                        proto.send_command(signal, value)
                 except Exception:
                     pass
             return
@@ -450,6 +455,9 @@ class DeviceManagerCore(EventEmitter):
             protocol.operate(signal, value)
         elif command == 'CANCEL':
             protocol.cancel(signal)
+        elif command == 'SEND_COMMAND':
+            # New automatic SBO workflow
+            protocol.send_command(signal, value)
             
     def is_controllable(self, device_name: str, signal: Signal) -> bool:
         if "ctlVal" not in signal.address:

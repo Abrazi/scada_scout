@@ -401,6 +401,27 @@ def IedConnection_getDataDirectoryByFC(connection, data_reference, fc):
     result = func(connection, ctypes.byref(error), _encode_str(data_reference), fc)
     return (result, error.value)
 
+def IedConnection_getDataSetDirectory(connection, dataset_reference):
+    """
+    Get directory of DataSet entries (FCDA references).
+    
+    Args:
+        connection: IedConnection handle
+        dataset_reference: Full DataSet reference (e.g., "LD0/LLN0$ds1")
+    
+    Returns:
+        tuple: (LinkedList, error_code, is_deletable)
+    """
+    _check_lib()
+    func = _lib.IedConnection_getDataSetDirectory
+    func.restype = LinkedList
+    func.argtypes = [IedConnection, POINTER(c_int), c_char_p, POINTER(c_bool)]
+
+    error = c_int()
+    deletable = c_bool()
+    result = func(connection, ctypes.byref(error), _encode_str(dataset_reference), ctypes.byref(deletable))
+    return (result, error.value, bool(deletable.value))
+
 # ============================================================================
 # Reading Data
 # ============================================================================

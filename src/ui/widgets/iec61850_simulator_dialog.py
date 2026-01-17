@@ -1,0 +1,324 @@
+from PySide6.QtWidgets import (
+    QDialog, QVBoxLayout, QPushButton, QHBoxLayout, QFileDialog, QTableWidget,
+    QTableWidgetItem, QHeaderView, QDialogButtonBox, QLabel, QMessageBox,
+    QLineEdit, QComboBox, QSpinBox
+)
+from PySide6.QtCore import Qt
+from typing import List
+from src.models.device_models import DeviceConfig, DeviceType
+
+
+class IEC61850SimulatorDialog(QDialog):
+    """
+    Dialog to select an SCD file, choose IEDs, and configure IP/Port for simulation.
+    """
+    def __init__(self, parent=None, event_logger=None):
+        super().__init__(parent)
+        self.setWindowTitle("IEC 61850 Simulator (From SCD)")
+        self.resize(720, 420)
+        self.event_logger = event_logger
+
+        self.layout = QVBoxLayout(self)
+
+        # File Selection Block
+        file_layout = QHBoxLayout()
+        self.lbl_file = QLabel("No file selected")
+        btn_browse = QPushButton("Browse SCD...")
+        btn_browse.clicked.connect(self._browse_file)
+        file_layout.addWidget(btn_browse)
+        file_layout.addWidget(self.lbl_file)
+        file_layout.addStretch()
+        self.layout.addLayout(file_layout)
+
+        # Filter Search
+        self.txt_filter = QLineEdit()
+        self.txt_filter.setPlaceholderText("Filter by Name, IP, or AP (use * for wildcard)")
+        self.txt_filter.textChanged.connect(self._filter_table)
+        self.layout.addWidget(self.txt_filter)
+
+        # Table of IEDs
+        self.table = QTableWidget()
+        self.table.setColumnCount(5)
+        self.table.setHorizontalHeaderLabels(["Name", "IP Address", "Port", "Access Point", "Select"])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.layout.addWidget(self.table)
+
+        # Select/Deselect All
+        sel_layout = QHBoxLayout()
+        btn_sel_all = QPushButton("Select All")
+        btn_desel_all = QPushButton("Deselect All")
+        btn_check_ips = QPushButton("Check/Configure IPs")
+        btn_check_ips.clicked.connect(self._check_and_configure_ips)
+        btn_sel_all.clicked.connect(self._select_all)
+        btn_desel_all.clicked.connect(self._deselect_all)
+        sel_layout.addWidget(btn_sel_all)
+        sel_layout.addWidget(btn_desel_all)
+        sel_layout.addWidget(btn_check_ips)
+        sel_layout.addStretch()
+        self.layout.addLayout(sel_layout)
+
+        # Dialog Buttons
+        self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        self.layout.addWidget(self.buttons)
+
+        self.scd_path = None
+        self.parsed_ieds = []
+
+    def _browse_file(self):
+        fname, _ = QFileDialog.getOpenFileName(self, "Open SCL File", "", "SCL Files (*.scd *.cid *.icd *.xml)")
+        if fname:
+            self.scd_path = fname
+            self.lbl_file.setText(fname)
+            self._parse_and_list_with_progress(fname)
+
+    def _parse_and_list_with_progress(self, path):
+        from PySide6.QtWidgets import QProgressDialog, QApplication
+        from src.core.workers import SCDParseWorker
+
+        # Setup Progress Dialog
+        self.progress_dialog = QProgressDialog("Reading SCD file...", "Cancel", 0, 100, self)
+        self.progress_dialog.setWindowTitle("Loading SCD")
+        self.progress_dialog.setWindowModality(Qt.WindowModal)
+        self.progress_dialog.setMinimumDuration(0)
+        self.progress_dialog.setValue(0)
+        self.progress_dialog.show()
+        QApplication.processEvents()
+
+        # Setup Worker (SCDParseWorker is a QThread)
+        self.worker = SCDParseWorker(path)
+        self.worker.progress.connect(self._update_progress)
+        self.worker.finished_parsing.connect(self._on_parse_finished)
+        self.worker.finished.connect(self.worker.deleteLater)
+
+        self.worker.start()
+
+    def _update_progress(self, msg, val):
+        self.progress_dialog.setLabelText(msg)
+        self.progress_dialog.setValue(val)
+
+    def _on_parse_finished(self, ieds, error_msg):
+        self.progress_dialog.close()
+
+        if error_msg:
+            if self.event_logger:
+                self.event_logger.error("Simulator", f"Failed to parse SCD: {error_msg}")
+            QMessageBox.critical(self, "Parse Error", f"Failed to parse SCD file:\n{error_msg}")
+            return
+
+        if self.event_logger:
+            self.event_logger.info("Simulator", f"Successfully parsed SCD: {len(ieds)} IEDs found")
+
+        self.parsed_ieds = ieds
+        self._populate_table()
+
+    def _populate_table(self):
+        self.table.setRowCount(0)
+
+        for ied in self.parsed_ieds:
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+
+            # Name
+            name_item = QTableWidgetItem(ied['name'])
+            name_item.setData(Qt.UserRole, ied.get('description', ''))
+            self.table.setItem(row, 0, name_item)
+
+            # IP / Access Point Selection
+            ips = ied.get('ips', [])
+
+            if not ips:
+                ip_edit = QLineEdit("127.0.0.1")
+                self.table.setCellWidget(row, 1, ip_edit)
+                self.table.setItem(row, 3, QTableWidgetItem("N/A"))
+                port_val = 102
+            elif len(ips) == 1:
+                ip_info = ips[0]
+                ip_edit = QLineEdit(ip_info.get('ip', '127.0.0.1'))
+                self.table.setCellWidget(row, 1, ip_edit)
+                self.table.setItem(row, 3, QTableWidgetItem(f"{ip_info.get('ap', '')} ({ip_info.get('subnetwork', '')})"))
+                port_val = ip_info.get('port', 102)
+            else:
+                combo = QComboBox()
+                combo.setEditable(True)
+                for ip_info in ips:
+                    desc = f"{ip_info['ip']} - {ip_info['ap']} ({ip_info['subnetwork']})"
+                    combo.addItem(desc, ip_info)
+                combo.setCurrentIndex(0)
+                self.table.setCellWidget(row, 1, combo)
+                self.table.setItem(row, 3, QTableWidgetItem("Multiple (Select IP)"))
+                port_val = ips[0].get('port', 102)
+
+            # Port
+            port_spin = QSpinBox()
+            port_spin.setRange(1, 65535)
+            port_spin.setValue(int(port_val) if port_val else 102)
+            self.table.setCellWidget(row, 2, port_spin)
+
+            # Checkbox
+            chk_item = QTableWidgetItem()
+            chk_item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+            chk_item.setCheckState(Qt.Checked)
+            self.table.setItem(row, 4, chk_item)
+
+    def _select_all(self):
+        for row in range(self.table.rowCount()):
+            if not self.table.isRowHidden(row):
+                self.table.item(row, 4).setCheckState(Qt.Checked)
+
+    def _deselect_all(self):
+        for row in range(self.table.rowCount()):
+            if not self.table.isRowHidden(row):
+                self.table.item(row, 4).setCheckState(Qt.Unchecked)
+
+    def _filter_table(self, text):
+        search = text.strip().lower()
+        if not search:
+            for row in range(self.table.rowCount()):
+                self.table.setRowHidden(row, False)
+            return
+
+        use_glob = '*' in search or '?' in search
+
+        for row in range(self.table.rowCount()):
+            name_item = self.table.item(row, 0)
+            ap_item = self.table.item(row, 3)
+
+            ip_text = ""
+            ip_widget = self.table.cellWidget(row, 1)
+            if isinstance(ip_widget, QComboBox):
+                ip_text = ip_widget.currentText().lower()
+            elif isinstance(ip_widget, QLineEdit):
+                ip_text = ip_widget.text().lower()
+
+            name_text = name_item.text().lower() if name_item else ""
+            ap_text = ap_item.text().lower() if ap_item else ""
+
+            match = False
+            if use_glob:
+                import fnmatch
+                if fnmatch.fnmatch(name_text, search):
+                    match = True
+                elif fnmatch.fnmatch(ip_text, search):
+                    match = True
+                elif fnmatch.fnmatch(ap_text, search):
+                    match = True
+            else:
+                if search in name_text:
+                    match = True
+                elif search in ip_text:
+                    match = True
+                elif search in ap_text:
+                    match = True
+
+            self.table.setRowHidden(row, not match)
+
+    def get_selected_configs(self) -> List[DeviceConfig]:
+        configs = []
+        rows = self.table.rowCount()
+
+        for row in range(rows):
+            chk_item = self.table.item(row, 4)
+            state = chk_item.checkState()
+
+            if state != Qt.Unchecked:
+                name = self.table.item(row, 0).text()
+
+                ip = "127.0.0.1"
+                ip_widget = self.table.cellWidget(row, 1)
+                if isinstance(ip_widget, QComboBox):
+                    # For editable ComboBox, use currentText to get potentially edited value
+                    text = ip_widget.currentText().strip()
+                    # Extract IP from format "10.0.0.1 - AP1 (Subnet1)" or just "10.0.0.1"
+                    if ' - ' in text:
+                        ip = text.split(' - ')[0].strip()
+                    else:
+                        ip = text
+                    # Fallback to original data if parsing failed
+                    if not ip:
+                        data = ip_widget.currentData()
+                        if isinstance(data, dict) and data.get('ip'):
+                            ip = data['ip']
+                elif isinstance(ip_widget, QLineEdit):
+                    ip = ip_widget.text().strip() or "127.0.0.1"
+
+                port_widget = self.table.cellWidget(row, 2)
+                port = int(port_widget.value()) if isinstance(port_widget, QSpinBox) else 102
+
+                configs.append(DeviceConfig(
+                    name=name,
+                    description=self.table.item(row, 0).data(Qt.UserRole) or "",
+                    ip_address=ip,
+                    port=port,
+                    device_type=DeviceType.IEC61850_SERVER,
+                    scd_file_path=self.scd_path,
+                    protocol_params={"ied_name": name}
+                ))
+
+        return configs
+    def _check_and_configure_ips(self):
+        """Check which IPs are not configured and offer to configure them"""
+        from src.utils.network_utils import NetworkUtils
+        from src.ui.dialogs.ip_config_dialog import IPConfigDialog
+        
+        # Get all local IPs
+        local_interfaces = NetworkUtils.get_network_interfaces()
+        local_ips = {iface.ip_address for iface in local_interfaces}
+        
+        # Collect IPs from selected IEDs
+        missing_ips = []
+        rows = self.table.rowCount()
+        
+        for row in range(rows):
+            chk_item = self.table.item(row, 4)
+            if chk_item.checkState() != Qt.Unchecked:
+                ip_widget = self.table.cellWidget(row, 1)
+                ip = ""
+                
+                if isinstance(ip_widget, QComboBox):
+                    # For editable ComboBox, always use currentText to get potentially edited value
+                    text = ip_widget.currentText().strip()
+                    # Extract IP from format "10.0.0.1 - AP1 (Subnet1)" or just "10.0.0.1"
+                    if ' - ' in text:
+                        ip = text.split(' - ')[0].strip()
+                    else:
+                        ip = text
+                elif isinstance(ip_widget, QLineEdit):
+                    ip = ip_widget.text().strip()
+                
+                if ip and ip not in local_ips and ip not in missing_ips:
+                    if NetworkUtils.validate_ip_address(ip):
+                        missing_ips.append(ip)
+        
+        if not missing_ips:
+            QMessageBox.information(
+                self,
+                "All IPs Available",
+                "All selected IP addresses are already configured on local interfaces."
+            )
+            return
+        
+        # Show list of missing IPs
+        msg = "The following IP addresses are not configured:\n\n"
+        for ip in missing_ips:
+            msg += f"  • {ip}\n"
+        msg += "\nWould you like to configure them?"
+        
+        reply = QMessageBox.question(
+            self,
+            "Configure Missing IPs",
+            msg,
+            QMessageBox.Yes | QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            # Open config dialog for each IP
+            for ip in missing_ips:
+                dlg = IPConfigDialog(ip, self)
+                if dlg.exec() == QDialog.Accepted:
+                    # IP was configured (or user acknowledged manual config)
+                    continue
+                else:
+                    # User cancelled
+                    break

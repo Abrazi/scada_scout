@@ -105,6 +105,12 @@ class SCDParser:
             if not ln_elements:
                 ln_elements = ld.findall("LN") + ld.findall("LN0")
 
+            ln0_element = None
+            for ln in ln_elements:
+                if ln.tag.split('}')[-1] == "LN0":
+                    ln0_element = ln
+                    break
+
             for ln in ln_elements:
                 prefix = ln.get("prefix", "")
                 ln_class = ln.get("lnClass", "")
@@ -166,9 +172,28 @@ class SCDParser:
                         rpt_id = rpt.get("rptID", "")
                         ds_ref = rpt.get("datSet", "")
                         buffered = rpt.get("buffered", "false")
+                        buf_tm = rpt.get("bufTm", "")
+                        intg_pd = rpt.get("intgPd", "")
+                        trg_ops = self._attributes_to_kv(rpt.find("scl:TrgOps", self.ns) or rpt.find("TrgOps"))
+                        opt_flds = self._attributes_to_kv(rpt.find("scl:OptFields", self.ns) or rpt.find("OptFields"))
                         
                         desc = f"RptID={rpt_id} DataSet={ds_ref} Buf={buffered} Type=Report"
                         rpt_node = Node(name=rpt_name, description=desc)
+
+                        # Details
+                        self._add_detail_leaf(rpt_node, "RptID", rpt_id)
+                        self._add_detail_leaf(rpt_node, "DataSet", ds_ref)
+                        self._add_detail_leaf(rpt_node, "Buffered", buffered)
+                        self._add_detail_leaf(rpt_node, "BufTm", buf_tm)
+                        self._add_detail_leaf(rpt_node, "IntgPd", intg_pd)
+                        if trg_ops:
+                            self._add_detail_leaf(rpt_node, "TrgOps", trg_ops)
+                        if opt_flds:
+                            self._add_detail_leaf(rpt_node, "OptFields", opt_flds)
+
+                        # DataSet Entries
+                        self._append_dataset_entries(rpt_node, ln, ds_ref, ln0_element)
+
                         reports_root.children.append(rpt_node)
                     
                     ln_node.children.append(reports_root)
@@ -182,14 +207,71 @@ class SCDParser:
                         gse_name = gse.get("name")
                         app_id = gse.get("appID", "")
                         ds_ref = gse.get("datSet", "")
+                        conf_rev = gse.get("confRev", "")
+                        go_id = gse.get("goID", "")
+                        fixed_offs = gse.get("fixedOffs", "")
                         
                         desc = f"AppID={app_id} DataSet={ds_ref} Type=GOOSE"
                         gse_node = Node(name=gse_name, description=desc)
+
+                        # Details
+                        self._add_detail_leaf(gse_node, "AppID", app_id)
+                        self._add_detail_leaf(gse_node, "DataSet", ds_ref)
+                        self._add_detail_leaf(gse_node, "ConfRev", conf_rev)
+                        self._add_detail_leaf(gse_node, "GoID", go_id)
+                        self._add_detail_leaf(gse_node, "FixedOffs", fixed_offs)
+
+                        # DataSet Entries
+                        self._append_dataset_entries(gse_node, ln, ds_ref, ln0_element)
+
                         goose_root.children.append(gse_node)
                     
                     ln_node.children.append(goose_root)
 
         return root_node
+
+    def _add_detail_leaf(self, parent_node: Node, label: str, value: Any) -> None:
+        """Add a detail leaf node with optional value."""
+        if value is None or value == "":
+            parent_node.children.append(Node(name=label, description="Detail"))
+        else:
+            parent_node.children.append(Node(name=f"{label}={value}", description="Detail"))
+
+    def _attributes_to_kv(self, element) -> str:
+        """Convert XML element attributes to key=value string."""
+        if element is None:
+            return ""
+        attrs = []
+        for k, v in element.attrib.items():
+            attrs.append(f"{k}={v}")
+        return " ".join(attrs)
+
+    def _append_dataset_entries(self, parent_node: Node, ln_element, dataset_name: str, ln0_element=None) -> None:
+        """Append DataSet FCDA entries as leaf nodes."""
+        if not dataset_name:
+            return
+
+        entries = self._get_dataset_entries(ln_element, dataset_name)
+        if not entries and ln0_element is not None and ln0_element is not ln_element:
+            entries = self._get_dataset_entries(ln0_element, dataset_name)
+
+        if not entries:
+            return
+
+        entries_root = Node(name="DataSetEntries", description="FCDA members")
+        for entry in entries:
+            ln = entry.get('ln', '')
+            do = entry.get('do', '')
+            da = entry.get('da', '')
+            fc = entry.get('fc', '')
+
+            name_parts = [ln, do, da]
+            name = ".".join([p for p in name_parts if p])
+            if fc:
+                name = f"{name} [{fc}]"
+            entries_root.children.append(Node(name=name, description="FCDA"))
+
+        parent_node.children.append(entries_root)
 
     def _expand_ln_type_with_path(self, ln_node: Node, ln_type_id: str, path_prefix: str, ld_name: str = ""):
         """
@@ -409,16 +491,23 @@ class SCDParser:
                     ip = None
                     gateway = None
                     subnet_mask = None
+                    port = None
                     
                     if address:
                         for p in address.findall("scl:P", self.ns) + address.findall("P"):
                             ptype = p.get("type")
+                            ptype_norm = ptype.lower() if ptype else ""
                             if ptype == "IP":
                                 ip = p.text
                             elif ptype == "IP-SUBNET":
                                 subnet_mask = p.text
                             elif ptype == "IP-GATEWAY":
                                 gateway = p.text
+                            elif "port" in ptype_norm and p.text:
+                                try:
+                                    port = int(p.text)
+                                except Exception:
+                                    pass
 
                     if ip:
                         if ied_name not in ieds_map:
@@ -433,7 +522,8 @@ class SCDParser:
                             'ap': ap_name,
                             'subnetwork': subnet_name,
                             'mask': subnet_mask,
-                            'gateway': gateway
+                            'gateway': gateway,
+                            'port': port or 102
                         })
 
         # Strategy 2: IED Section (Fallback for IEDs with no Communication info)

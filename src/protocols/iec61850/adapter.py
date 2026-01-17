@@ -586,8 +586,18 @@ class IEC61850Adapter(BaseProtocol):
                                                         ))
                                                     iec61850.LinkedList_destroy(da_list)
                                             except: pass
-                                            
-                            except Exception: pass
+
+                            except Exception:
+                                # Close the try block from line 491 (Get Data Objects for this LN)
+                                pass
+
+                            # Add DataSets, Reports, and GOOSE control blocks (independent of DO browse)
+                            try:
+                                self._discover_datasets_online(full_ln_ref, ln_node)
+                                self._discover_reports_online(full_ln_ref, ln_node)
+                                self._discover_goose_online(full_ln_ref, ln_node)
+                            except Exception:
+                                pass
                     
                     try: iec61850.LinkedList_destroy(ln_list)
                     except: pass
@@ -634,6 +644,227 @@ class IEC61850Adapter(BaseProtocol):
         except Exception as e:
             logger.warning(f"LinkedList extraction failed: {e}")
             return []
+
+    def _add_detail_leaf(self, parent_node: Node, label: str, value: Optional[Any]) -> None:
+        if value is None or value == "":
+            parent_node.children.append(Node(name=label, description="Detail"))
+        else:
+            parent_node.children.append(Node(name=f"{label}={value}", description="Detail"))
+
+    def _normalize_dataset_ref(self, full_ln_ref: str, dataset_name: str) -> str:
+        if not dataset_name:
+            return ""
+        if "/" in dataset_name:
+            return dataset_name
+        ld_name = full_ln_ref.split("/")[0] if "/" in full_ln_ref else ""
+        if "$" in dataset_name:
+            return f"{ld_name}/{dataset_name}" if ld_name else dataset_name
+        return f"{full_ln_ref}${dataset_name}"
+
+    def _add_dataset_entries_online(self, dataset_ref: str, parent_node: Node) -> None:
+        if not dataset_ref:
+            return
+        try:
+            with self._lock:
+                ret = iec61850.IedConnection_getDataSetDirectory(self.connection, dataset_ref)
+            ds_list = ret[0] if isinstance(ret, (list, tuple)) else ret
+            err = ret[1] if isinstance(ret, (list, tuple)) and len(ret) > 1 else None
+
+            if ds_list and (err is None or err == iec61850.IED_ERROR_OK):
+                entries = self._extract_string_list(ds_list)
+                if entries:
+                    entries_root = Node(name="DataSetEntries", description="FCDA members")
+                    for entry in entries:
+                        entries_root.children.append(Node(name=entry, description="FCDA"))
+                    parent_node.children.append(entries_root)
+            try:
+                iec61850.LinkedList_destroy(ds_list)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _discover_datasets_online(self, full_ln_ref: str, ln_node: Node) -> None:
+        try:
+            with self._lock:
+                ret_ds = iec61850.IedConnection_getLogicalNodeDirectory(
+                    self.connection,
+                    full_ln_ref,
+                    iec61850.ACSI_CLASS_DATA_SET
+                )
+            ds_list = ret_ds[0] if isinstance(ret_ds, (list, tuple)) else ret_ds
+            if not ds_list:
+                return
+
+            ds_names = self._extract_string_list(ds_list)
+            if not ds_names:
+                return
+
+            datasets_root = Node(name="DataSets", description="Container")
+            for ds_name in ds_names:
+                ds_node = Node(name=ds_name, description="Type=DataSet")
+                dataset_ref = self._normalize_dataset_ref(full_ln_ref, ds_name)
+                self._add_detail_leaf(ds_node, "Ref", dataset_ref)
+                self._add_dataset_entries_online(dataset_ref, ds_node)
+                datasets_root.children.append(ds_node)
+
+            ln_node.children.append(datasets_root)
+            iec61850.LinkedList_destroy(ds_list)
+        except Exception:
+            pass
+
+    def _discover_reports_online(self, full_ln_ref: str, ln_node: Node) -> None:
+        reports_root = None
+
+        def add_report_nodes(rcb_names, rcb_type, fc):
+            nonlocal reports_root
+            if not rcb_names:
+                return
+            if reports_root is None:
+                reports_root = Node(name="Reports", description="Container")
+
+            for rcb_name in rcb_names:
+                rpt_node = Node(name=rcb_name, description=f"Type={rcb_type}")
+                rcb_ref = f"{full_ln_ref}.{rcb_name}"
+
+                # Read common attributes
+                try:
+                    rpt_id, err = iec61850.IedConnection_readStringValue(self.connection, f"{rcb_ref}.RptID", fc)
+                    if err == iec61850.IED_ERROR_OK:
+                        self._add_detail_leaf(rpt_node, "RptID", rpt_id)
+                except Exception:
+                    self._add_detail_leaf(rpt_node, "RptID", "")
+
+                dat_set_val = ""
+                try:
+                    dat_set_val, err = iec61850.IedConnection_readStringValue(self.connection, f"{rcb_ref}.DatSet", fc)
+                    if err == iec61850.IED_ERROR_OK:
+                        self._add_detail_leaf(rpt_node, "DatSet", dat_set_val)
+                except Exception:
+                    self._add_detail_leaf(rpt_node, "DatSet", "")
+
+                for attr in ["BufTm", "IntgPd"]:
+                    try:
+                        val, err = iec61850.IedConnection_readUnsigned32Value(self.connection, f"{rcb_ref}.{attr}", fc)
+                        if err == iec61850.IED_ERROR_OK:
+                            self._add_detail_leaf(rpt_node, attr, val)
+                    except Exception:
+                        self._add_detail_leaf(rpt_node, attr, "")
+
+                for attr in ["TrgOps", "OptFlds"]:
+                    try:
+                        val, err = iec61850.IedConnection_readBitStringValue(self.connection, f"{rcb_ref}.{attr}", fc)
+                        if err == iec61850.IED_ERROR_OK:
+                            self._add_detail_leaf(rpt_node, attr, val)
+                    except Exception:
+                        self._add_detail_leaf(rpt_node, attr, "")
+
+                dataset_ref = self._normalize_dataset_ref(full_ln_ref, dat_set_val)
+                self._add_dataset_entries_online(dataset_ref, rpt_node)
+
+                reports_root.children.append(rpt_node)
+
+        try:
+            with self._lock:
+                ret_urcb = iec61850.IedConnection_getLogicalNodeDirectory(
+                    self.connection,
+                    full_ln_ref,
+                    iec61850.ACSI_CLASS_URCB
+                )
+            urcb_list = ret_urcb[0] if isinstance(ret_urcb, (list, tuple)) else ret_urcb
+            urcb_names = self._extract_string_list(urcb_list) if urcb_list else []
+            add_report_nodes(urcb_names, "URCB", iec61850.IEC61850_FC_RP)
+            try:
+                iec61850.LinkedList_destroy(urcb_list)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+        try:
+            with self._lock:
+                ret_brcb = iec61850.IedConnection_getLogicalNodeDirectory(
+                    self.connection,
+                    full_ln_ref,
+                    iec61850.ACSI_CLASS_BRCB
+                )
+            brcb_list = ret_brcb[0] if isinstance(ret_brcb, (list, tuple)) else ret_brcb
+            brcb_names = self._extract_string_list(brcb_list) if brcb_list else []
+            add_report_nodes(brcb_names, "BRCB", iec61850.IEC61850_FC_BR)
+            try:
+                iec61850.LinkedList_destroy(brcb_list)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+        if reports_root is not None:
+            ln_node.children.append(reports_root)
+
+    def _discover_goose_online(self, full_ln_ref: str, ln_node: Node) -> None:
+        try:
+            with self._lock:
+                ret_gocb = iec61850.IedConnection_getLogicalNodeDirectory(
+                    self.connection,
+                    full_ln_ref,
+                    iec61850.ACSI_CLASS_GoCB
+                )
+            gocb_list = ret_gocb[0] if isinstance(ret_gocb, (list, tuple)) else ret_gocb
+            if not gocb_list:
+                return
+
+            gocb_names = self._extract_string_list(gocb_list)
+            if not gocb_names:
+                return
+
+            goose_root = Node(name="GOOSE", description="Container")
+
+            for gocb_name in gocb_names:
+                gse_node = Node(name=gocb_name, description="Type=GoCB")
+                gocb_ref = f"{full_ln_ref}.{gocb_name}"
+
+                dat_set_val = ""
+                try:
+                    go_id, err = iec61850.IedConnection_readStringValue(self.connection, f"{gocb_ref}.GoID", iec61850.IEC61850_FC_GO)
+                    if err == iec61850.IED_ERROR_OK:
+                        self._add_detail_leaf(gse_node, "GoID", go_id)
+                except Exception:
+                    self._add_detail_leaf(gse_node, "GoID", "")
+
+                try:
+                    dat_set_val, err = iec61850.IedConnection_readStringValue(self.connection, f"{gocb_ref}.DatSet", iec61850.IEC61850_FC_GO)
+                    if err == iec61850.IED_ERROR_OK:
+                        self._add_detail_leaf(gse_node, "DatSet", dat_set_val)
+                except Exception:
+                    self._add_detail_leaf(gse_node, "DatSet", "")
+
+                for attr in ["ConfRev", "MinTime", "MaxTime"]:
+                    try:
+                        val, err = iec61850.IedConnection_readUnsigned32Value(self.connection, f"{gocb_ref}.{attr}", iec61850.IEC61850_FC_GO)
+                        if err == iec61850.IED_ERROR_OK:
+                            self._add_detail_leaf(gse_node, attr, val)
+                    except Exception:
+                        self._add_detail_leaf(gse_node, attr, "")
+
+                try:
+                    app_id, err = iec61850.IedConnection_readStringValue(self.connection, f"{gocb_ref}.AppID", iec61850.IEC61850_FC_GO)
+                    if err == iec61850.IED_ERROR_OK:
+                        self._add_detail_leaf(gse_node, "AppID", app_id)
+                except Exception:
+                    self._add_detail_leaf(gse_node, "AppID", "")
+
+                dataset_ref = self._normalize_dataset_ref(full_ln_ref, dat_set_val)
+                self._add_dataset_entries_online(dataset_ref, gse_node)
+
+                goose_root.children.append(gse_node)
+
+            ln_node.children.append(goose_root)
+            try:
+                iec61850.LinkedList_destroy(gocb_list)
+            except Exception:
+                pass
+        except Exception:
+            pass
 
     def _get_timestamp_from_mms(self, mms_val):
         """Helper to extract Python datetime from MmsValue."""
@@ -1077,12 +1308,132 @@ class IEC61850Adapter(BaseProtocol):
             
         return signal
 
+    def send_command(self, signal: Signal, value: Any, params: dict = None) -> bool:
+        """
+        High-level command sender that automatically handles SBO workflow.
+        Replicates iedexplorer's DoSendCommandClick logic with detailed logging.
+        
+        For SBO models: SELECT -> wait -> OPERATE
+        For Direct models: OPERATE only
+        """
+        if self.event_logger:
+            self.event_logger.transaction("IEC61850", f"→ SEND_COMMAND {signal.address} = {value}")
+            self.event_logger.info("IEC61850", f"Starting command execution for {signal.address}")
+
+        if not self.connected or not self.connection:
+            if self.event_logger:
+                self.event_logger.error("IEC61850", "SEND_COMMAND FAILED: Not connected")
+            return False
+
+        try:
+            # Initialize control context if needed
+            object_ref = self._get_control_object_reference(signal.address)
+            ctx = self.controls.get(object_ref)
+            if not ctx:
+                ctx = self.init_control_context(signal.address)
+
+            if not ctx:
+                if self.event_logger:
+                    self.event_logger.error("IEC61850", f"SEND_COMMAND FAILED: Control initialization failed for {signal.address}")
+                return False
+
+            # Check if SBO is required
+            if ctx.ctl_model.is_sbo:
+                # Check if SBO objects are actually available
+                sbo_available = False
+                try:
+                    # Try to read the SBO reference to see if it exists
+                    test_val, test_err = iec61850.IedConnection_readBooleanValue(
+                        self.connection, ctx.sbo_reference, iec61850.IEC61850_FC_CO
+                    )
+                    if test_err == iec61850.IED_ERROR_OK:
+                        sbo_available = True
+                        iec61850.MmsValue_delete(test_val) if test_val else None
+                except:
+                    pass
+                
+                if not sbo_available:
+                    if self.event_logger:
+                        self.event_logger.warning("IEC61850", f"SBO objects not available despite ctlModel={ctx.ctl_model.name}. Falling back to direct control.")
+                    # Fall back to direct operate
+                    return self.operate(signal, value=value, params=params)
+                
+                # SBO workflow: SELECT -> wait -> OPERATE
+                if self.event_logger:
+                    self.event_logger.info("IEC61850", f"SBO Mode detected ({ctx.ctl_model.name}). Starting SBO sequence...")
+                    self.event_logger.info("IEC61850", f"Control Model: {ctx.ctl_model.name}, SBO Reference: {ctx.sbo_reference}")
+
+                # Find SBO and Oper addresses
+                sbo_address = ctx.sbo_reference + ".ctlVal"
+                oper_address = object_ref + ".Oper.ctlVal"
+
+                # Create dummy signals for SBO and Oper
+                from src.models.device_models import Signal as DummySignal
+                sbo_signal = DummySignal(name="ctlVal", address=sbo_address)
+                oper_signal = DummySignal(name="ctlVal", address=oper_address)
+
+                # Step 1: SELECT
+                if self.event_logger:
+                    self.event_logger.transaction("IEC61850", f"  → SELECT {sbo_address}")
+                    self.event_logger.info("IEC61850", f"  Executing SELECT with value={value}, current ctlNum={ctx.ctl_num}")
+
+                select_success = self.select(sbo_signal, value=value, params=params)
+                if not select_success:
+                    if self.event_logger:
+                        self.event_logger.error("IEC61850", "  ← SELECT FAILED - Aborting SBO sequence")
+                    return False
+
+                if self.event_logger:
+                    self.event_logger.transaction("IEC61850", "  ← SELECT SUCCESS")
+                    self.event_logger.info("IEC61850", f"  SELECT completed. State: {ctx.state.name}")
+
+                # Step 2: Wait for SBO timeout (default 100ms like iedexplorer)
+                sbo_timeout = params.get('sbo_timeout', 100) if params else 100
+                if self.event_logger:
+                    self.event_logger.info("IEC61850", f"  Waiting {sbo_timeout}ms for SBO timeout...")
+
+                time.sleep(sbo_timeout / 1000.0)
+
+                # Step 3: OPERATE
+                if self.event_logger:
+                    self.event_logger.transaction("IEC61850", f"  → OPERATE {oper_address}")
+                    self.event_logger.info("IEC61850", f"  Executing OPERATE with value={value}, incremented ctlNum={ctx.ctl_num + 1}")
+
+                operate_success = self.operate(oper_signal, value=value, params=params)
+                if not operate_success:
+                    if self.event_logger:
+                        self.event_logger.error("IEC61850", "  ← OPERATE FAILED - SBO sequence incomplete")
+                    return False
+
+                if self.event_logger:
+                    self.event_logger.transaction("IEC61850", "  ← OPERATE SUCCESS")
+                    self.event_logger.transaction("IEC61850", "← SBO SEQUENCE COMPLETE")
+                    self.event_logger.info("IEC61850", f"SBO sequence finished successfully. Final ctlNum={ctx.ctl_num}")
+
+                return True
+
+            else:
+                # Direct control: OPERATE only
+                if self.event_logger:
+                    self.event_logger.info("IEC61850", f"Direct Control Mode ({ctx.ctl_model.name}). Sending OPERATE...")
+
+                return self.operate(signal, value=value, params=params)
+
+        except Exception as e:
+            logger.error(f"Send command failed: {e}")
+            if self.event_logger:
+                self.event_logger.error("IEC61850", f"SEND_COMMAND EXCEPTION: {e}")
+            return False
+
     def select(self, signal: Signal, value: Any = None, params: dict = None) -> bool:
-        """Perform SELECT phase (SBO)."""
+        """Perform SELECT phase (SBO). Based on iedexplorer's DoSendCommandClick logic."""
         if self.event_logger:
             self.event_logger.transaction("IEC61850", f"→ SELECT {signal.address} = {value}")
-            
+            self.event_logger.info("IEC61850", f"Starting SBO SELECT phase for {signal.address}")
+
         if not self.connected or not self.connection:
+            if self.event_logger:
+                self.event_logger.error("IEC61850", "SELECT FAILED: Not connected")
             return False
 
         try:
@@ -1090,17 +1441,17 @@ class IEC61850Adapter(BaseProtocol):
             ctx = self.controls.get(object_ref)
             if not ctx:
                 ctx = self.init_control_context(signal.address)
-            
-                
+
+
             if not ctx:
                 if self.event_logger:
-                    self.event_logger.error("IEC61850", f"Control initialization failed for {signal.address}")
+                    self.event_logger.error("IEC61850", f"SELECT FAILED: Control initialization failed for {signal.address}")
                 return False
 
             # Root Cause Fix #2: Verify control model before SELECT
             if ctx.ctl_model == ControlModel.STATUS_ONLY:
                 if self.event_logger:
-                    self.event_logger.error("IEC61850", f"Object {signal.address} has ctlModel=StatusOnly (0). Control not possible.")
+                    self.event_logger.error("IEC61850", f"SELECT FAILED: Object {signal.address} has ctlModel=StatusOnly (0). Control not possible.")
                 return False
 
             # Check if SELECT is even needed (only for SBO models)
@@ -1112,8 +1463,9 @@ class IEC61850Adapter(BaseProtocol):
 
             is_sbow = ctx.sbo_reference.endswith(".SBOw")
             if self.event_logger:
-                self.event_logger.info("IEC61850", f"Issuing SELECT (Security: {'Enhanced' if is_sbow else 'Normal'})")
-        
+                self.event_logger.info("IEC61850", f"Issuing SELECT (Security: {'Enhanced (SBOw)' if is_sbow else 'Normal (SBO)'})")
+                self.event_logger.debug("IEC61850", f"SBO Reference: {ctx.sbo_reference}")
+
             with self._lock:
                 payload = None
                 # Always prefer building the full 7-element Operate structure for SELECT
@@ -1127,40 +1479,48 @@ class IEC61850Adapter(BaseProtocol):
 
                 if not payload:
                     if self.event_logger:
-                        self.event_logger.error("IEC61850", "Failed to build SELECT payload (NULL MmsValue)")
+                        self.event_logger.error("IEC61850", "SELECT FAILED: Failed to build SELECT payload (NULL MmsValue)")
                     return False
 
                 # Write to SBO/SBOw object using FC=CO
                 if self.event_logger:
-                     self.event_logger.debug("IEC61850", f"Writing payload to {ctx.sbo_reference}...")
-                
+                     self.event_logger.debug("IEC61850", f"Writing SELECT payload to {ctx.sbo_reference}...")
+
                 err = iec61850.IedConnection_writeObject(self.connection, ctx.sbo_reference, iec61850.IEC61850_FC_CO, payload)
-                
+
                 # Root Cause Fix #4 & #5: Safety cleanup
                 if payload:
                     iec61850.MmsValue_delete(payload)
-                
+
                 if err == iec61850.IED_ERROR_OK:
                     ctx.state = ControlState.SELECTED
                     ctx.last_select_time = datetime.now()
                     if self.event_logger:
                         self.event_logger.transaction("IEC61850", "← SELECT SUCCESS")
+                        self.event_logger.info("IEC61850", f"SELECT completed successfully. Ready for OPERATE. ctlNum={ctx.ctl_num}")
                     return True
                 else:
+                    error_msg = f"IED Error {err}"
+                    ctx.last_error = error_msg
                     if self.event_logger:
-                        self.event_logger.error("IEC61850", f"← SELECT FAILED (Error {err})")
+                        self.event_logger.error("IEC61850", f"← SELECT FAILED: {error_msg}")
                     return False
-                
+
         except Exception as e:
             logger.error(f"Select failed: {e}")
+            if self.event_logger:
+                self.event_logger.error("IEC61850", f"SELECT EXCEPTION: {e}")
             return False
 
     def operate(self, signal: Signal, value: Any, params: dict = None) -> bool:
-        """Perform OPERATE phase (Direct or SBO)."""
+        """Perform OPERATE phase (Direct or SBO). Based on iedexplorer's SendCommand logic."""
         if self.event_logger:
             self.event_logger.transaction("IEC61850", f"→ OPERATE {signal.address} = {value}")
-            
+            self.event_logger.info("IEC61850", f"Starting OPERATE phase for {signal.address}")
+
         if not self.connected or not self.connection:
+            if self.event_logger:
+                self.event_logger.error("IEC61850", "OPERATE FAILED: Not connected")
             return False
 
         try:
@@ -1168,51 +1528,81 @@ class IEC61850Adapter(BaseProtocol):
             ctx = self.controls.get(object_ref)
             if not ctx:
                 ctx = self.init_control_context(signal.address)
-                
+
             if not ctx:
                 if self.event_logger:
-                    self.event_logger.error("IEC61850", f"Control initialization failed for {signal.address}")
+                    self.event_logger.error("IEC61850", f"OPERATE FAILED: Control initialization failed for {signal.address}")
                 return False
 
             # Root Cause Fix #2: Verify control model before OPERATE
             if ctx.ctl_model == ControlModel.STATUS_ONLY:
                 if self.event_logger:
-                    self.event_logger.error("IEC61850", f"Object {signal.address} has ctlModel=StatusOnly (0). Control not possible.")
+                    self.event_logger.error("IEC61850", f"OPERATE FAILED: Object {signal.address} has ctlModel=StatusOnly (0). Control not possible.")
                 return False
 
-            # Increment control number
+            # Increment control number for OPERATE (following iedexplorer pattern)
+            old_ctl_num = ctx.ctl_num
             ctx.ctl_num = (ctx.ctl_num + 1) % 256
-            
+            if self.event_logger:
+                self.event_logger.info("IEC61850", f"Incremented ctlNum from {old_ctl_num} to {ctx.ctl_num}")
+
             with self._lock:
-                # Build full Operate struct (7 elements)
+                # Build full Operate struct (7 elements) with fresh timestamp
                 oper_struct = self._build_operate_struct(value, ctx)
                 if not oper_struct:
                     if self.event_logger:
-                        self.event_logger.error("IEC61850", "Failed to build OPERATE payload (NULL MmsValue)")
+                        self.event_logger.error("IEC61850", "OPERATE FAILED: Failed to build OPERATE payload (NULL MmsValue)")
                     return False
 
                 # Write to .Oper object using FC=CO
                 oper_path = f"{object_ref}.Oper"
                 if self.event_logger:
-                     self.event_logger.debug("IEC61850", f"Writing payload to {oper_path}...")
-                
+                     self.event_logger.debug("IEC61850", f"Writing OPERATE payload to {oper_path}...")
+                     self.event_logger.debug("IEC61850", f"Payload includes ctlNum={ctx.ctl_num}, fresh T timestamp")
+
                 err = iec61850.IedConnection_writeObject(self.connection, oper_path, iec61850.IEC61850_FC_CO, oper_struct)
-                
+
                 iec61850.MmsValue_delete(oper_struct)
-            
+
             if err == iec61850.IED_ERROR_OK:
                 ctx.state = ControlState.OPERATED
                 ctx.last_operate_time = datetime.now()
                 if self.event_logger:
                     self.event_logger.transaction("IEC61850", "← OPERATE SUCCESS")
+                    self.event_logger.info("IEC61850", f"OPERATE completed successfully. ctlNum={ctx.ctl_num}")
                 return True
             else:
+                # Fallback: Try direct write to .Oper.ctlVal for devices that don't properly implement structured controls
                 if self.event_logger:
-                    self.event_logger.error("IEC61850", f"← OPERATE FAILED (Error {err})")
-                return False
+                    self.event_logger.warning("IEC61850", f"Structured OPERATE failed (error {err}), trying direct write to .Oper.ctlVal")
                 
+                direct_target = f"{object_ref}.Oper.ctlVal"
+                mms_val = self._create_mms_value(value, None)
+                if mms_val:
+                    direct_err = iec61850.IedConnection_writeObject(self.connection, direct_target, iec61850.IEC61850_FC_CO, mms_val)
+                    iec61850.MmsValue_delete(mms_val)
+                    
+                    if direct_err == iec61850.IED_ERROR_OK:
+                        ctx.state = ControlState.OPERATED
+                        ctx.last_operate_time = datetime.now()
+                        if self.event_logger:
+                            self.event_logger.transaction("IEC61850", "← DIRECT OPERATE SUCCESS")
+                            self.event_logger.info("IEC61850", f"Direct OPERATE completed successfully")
+                        return True
+                    else:
+                        if self.event_logger:
+                            self.event_logger.error("IEC61850", f"Direct OPERATE also failed (error {direct_err})")
+                
+                error_msg = f"IED Error {err}"
+                ctx.last_error = error_msg
+                if self.event_logger:
+                    self.event_logger.error("IEC61850", f"← OPERATE FAILED: {error_msg}")
+                return False
+
         except Exception as e:
             logger.error(f"Operate failed: {e}")
+            if self.event_logger:
+                self.event_logger.error("IEC61850", f"OPERATE EXCEPTION: {e}")
             return False
 
     def init_control_context(self, signal_address: str) -> Optional[ControlObjectRuntime]:
