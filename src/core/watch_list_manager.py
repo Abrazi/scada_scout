@@ -160,6 +160,9 @@ class WatchListManager(QObject):
                     if rtt_ms is not None:
                         if watched.max_response_ms is None or rtt_ms > watched.max_response_ms:
                             watched.max_response_ms = rtt_ms
+                        # Update the signal's last_rtt field for property dialog access
+                        updated_signal.last_rtt = float(rtt_ms)
+                        watched.signal.last_rtt = float(rtt_ms)
                     self.signal_updated.emit(watch_id, updated_signal, rtt_ms)
                 else:
                     # Async read enqueued - DO NOT invalidate signal yet.
@@ -189,6 +192,9 @@ class WatchListManager(QObject):
             if rtt_ms is not None:
                 if watched.max_response_ms is None or rtt_ms > watched.max_response_ms:
                     watched.max_response_ms = rtt_ms
+                # Update the signal's last_rtt field for property dialog access
+                signal.last_rtt = float(rtt_ms)
+                watched.signal.last_rtt = float(rtt_ms)
             # Clear the last_request_ts to avoid reusing it for future unsolicited updates
             watched.last_request_ts = None
             self.signal_updated.emit(watch_id, signal, rtt_ms)

@@ -509,7 +509,7 @@ class ModbusTCPAdapter(BaseProtocol):
         
         for reg_map in self.config.modbus_register_maps:
             map_info = {
-                "name": reg_map.name,
+                "name": reg_map.name_prefix,
                 "function_code": reg_map.function_code,
                 "start_address": reg_map.start_address,
                 "count": reg_map.count,

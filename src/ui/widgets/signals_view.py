@@ -5,6 +5,7 @@ from PySide6.QtCore import Qt
 from src.ui.models.signal_table_model import SignalTableModel
 from PySide6.QtCore import QRegularExpression
 from PySide6.QtCore import QSortFilterProxyModel
+import json
 
 class SignalsViewWidget(QWidget):
     """
@@ -28,6 +29,89 @@ class SignalsViewWidget(QWidget):
         self._setup_chart_tab()
         
         self._connect_signals()
+        # Accept drops from Device Tree
+        try:
+            self.setAcceptDrops(True)
+        except Exception:
+            pass
+
+    def dragEnterEvent(self, event):
+        mimetype = 'application/x-scadascout-signals'
+        if event.mimeData().hasFormat(mimetype) or event.mimeData().hasText():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        try:
+            data = None
+            mimetype = 'application/x-scadascout-signals'
+            md = event.mimeData()
+            if md.hasFormat(mimetype):
+                raw = md.data(mimetype)
+                try:
+                    data = json.loads(bytes(raw).decode('utf-8'))
+                except Exception:
+                    data = None
+            elif md.hasText():
+                try:
+                    data = json.loads(md.text())
+                except Exception:
+                    data = None
+
+            if not data:
+                event.ignore()
+                return
+
+            added = 0
+            for entry in data:
+                device_name = entry.get('device')
+                address = entry.get('address')
+                # If it's a node entry, call add_node_to_live via finding node object
+                if entry.get('type') == 'node' or entry.get('node_name'):
+                    # Try to locate device and node object
+                    if device_name and hasattr(self, 'device_manager') and self.device_manager:
+                        dev = self.device_manager.get_device(device_name)
+                        if dev and getattr(dev, 'root_node', None):
+                            # Find node by name (simple heuristic)
+                            def _find_node_by_name(n, name):
+                                if getattr(n, 'name', '') == name:
+                                    return n
+                                for c in getattr(n, 'children', []):
+                                    r = _find_node_by_name(c, name)
+                                    if r: return r
+                                return None
+                            node = _find_node_by_name(dev.root_node, entry.get('node_name'))
+                            if node:
+                                self.add_node_to_live(node, device_name)
+                                added += 1
+                                continue
+
+                if device_name and address:
+                    payload = {
+                        'device': device_name,
+                        'address': address,
+                        'signal_name': entry.get('signal_name','')
+                    }
+                    # Use add_signal which subscribes and displays
+                    try:
+                        self.add_signal(payload)
+                        added += 1
+                    except Exception:
+                        pass
+
+            if added:
+                try:
+                    evt = getattr(self.device_manager, 'event_logger', None)
+                    if evt:
+                        evt.info("Live Data", f"Drag-and-drop added {added} signal(s)")
+                except Exception:
+                    pass
+                event.acceptProposedAction()
+            else:
+                event.ignore()
+        except Exception:
+            event.ignore()
 
     def _setup_table_tab(self):
         """Create the Signals Table tab."""
@@ -258,6 +342,15 @@ class SignalsViewWidget(QWidget):
             logging.getLogger("SignalsView").exception("Failed to add signals to model")
             return
 
+        # Event log
+        try:
+            evt = getattr(self.device_manager, 'event_logger', None)
+            if evt:
+                node_name = getattr(node, 'name', 'Node')
+                evt.info(device_name or "Live Data", f"Added {len(signals)} signals to Live Data from {node_name}")
+        except Exception:
+            pass
+
         # Update UI elements
         self.table_view.resizeColumnsToContents()
         self.lbl_no_signals.hide()
@@ -303,10 +396,10 @@ class SignalsViewWidget(QWidget):
         # Actually, in the plan, I said DeviceTree will emit a dict.
         # Let's support both the old single-signal payload and a new one.
         
-        # If signal_def has a 'node' object, we use it for recursion
+        # If signal_def has a 'node' object, add all leaf signals under node/subnodes
         node_obj = signal_def.get('node')
         if node_obj:
-            self._add_node_recursive(device_name, node_obj)
+            self.add_node_to_live(node_obj, device_name)
             return
 
         # Single signal fallback
@@ -350,6 +443,14 @@ class SignalsViewWidget(QWidget):
                  from src.models.device_models import Signal
                  s = Signal(name=signal_def.get('signal_name',''), address=address, description="Live Add")
                  self.table_model.add_signals([s])
+
+        # Event log
+        try:
+            evt = getattr(self.device_manager, 'event_logger', None)
+            if evt:
+                evt.info(device_name, f"Added signal to Live Data: {address}")
+        except Exception:
+            pass
                  
         self.lbl_no_signals.hide()
 
@@ -422,37 +523,16 @@ class SignalsViewWidget(QWidget):
         return None
 
     def _trigger_background_read(self, device_name, signals):
-        """DEPRECATED: Worker now polls automatically based on subscription."""
-        pass 
-        
-    def _on_clear_clicked(self):
-        """Clear all live data currently shown in the table."""
-        # Unsubscribe authoritative source
-        
-        # We need to know which devices we are watching.
-        # Since we might have signals from multiple, or just current.
-        # Simplest: Unsubscribe 'live_data' from ALL devices?
-        # Or just the current one?
-        # The user view usually mixes? Or is per tab?
-        # Current UI seems single-device focused (current_device_name).
-        
-        # If we want to accept the user's "Clear Live Data" as a global clear:
-        devices = self.device_manager.get_all_devices()
-        for dev in devices:
-             self.device_manager.subscription_manager.unsubscribe_all(dev.config.name, source="live_data")
-        
-        # Clear UI
-        self.table_model.clear_signals()
-        self.lbl_no_signals.show()
-        
-    def _on_refresh_clicked(self):
-         # This button is somewhat redundant with Auto-Polling.
-         # But maybe forces a One-Shot read via ON_DEMAND mode?
-         # Or just ignored.
-         pass
-         
-    def _on_refresh_selected_clicked(self):
-         pass
+        """Trigger a one-shot read for the provided signals."""
+        if not device_name or not signals:
+            return
+
+        for sig in signals:
+            try:
+                self.device_manager.read_signal(device_name, sig)
+            except Exception:
+                # Ignore individual read failures
+                continue
 
     def _get_current_device_name(self):
         """Get the device name for current signals view."""

@@ -249,12 +249,42 @@ class IEC61850Adapter(BaseProtocol):
         elif val_type == iec61850.MMS_UTC_TIME:
              ts = self._get_timestamp_from_mms(mms_val)
              if ts:
-                 return ts.strftime("%H:%M:%S.%f")[:-3], SignalType.TIMESTAMP, ""
+                 # Show full date + time in UTC with millisecond precision
+                 return ts.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3] + ' UTC', SignalType.TIMESTAMP, ""
              else:
                  return None, SignalType.TIMESTAMP, "Invalid timestamp format"
 
         elif val_type == iec61850.MMS_STRUCTURE:
-             return "[Structure]", SignalType.STATE, ""
+             # Try to expand common structures (e.g., TimeOfDay) for readability.
+             try:
+                 size = iec61850.MmsValue_getArraySize(mms_val)
+                 elems = []
+                 for i in range(size):
+                     try:
+                         ev = iec61850.MmsValue_getElement(mms_val, i)
+                         if not ev:
+                             elems.append((None, None))
+                             continue
+                         v, vtype, _ = self._parse_mms_value(ev)
+                         elems.append((v, vtype))
+                     except Exception:
+                         elems.append((None, None))
+
+                 # Heuristic: If first element is a UTC time, treat as TimeOfDay-like structure
+                 if elems and elems[0][1] == SignalType.TIMESTAMP:
+                     # Common field names for TimeOfDay-like structs
+                     field_names = ['time', 'leapSecondKnown', 'clockFailure', 'clockNotSynchronized', 'timeAccuracy']
+                     parts = []
+                     for idx, (val, vtype) in enumerate(elems):
+                         name = field_names[idx] if idx < len(field_names) else f'field{idx}'
+                         parts.append(f"{name}={val}")
+                     return "; ".join(parts), SignalType.TIMESTAMP, ""
+                 else:
+                     # Generic struct: list values
+                     parts = [str(v[0]) if v[0] is not None else 'None' for v in elems]
+                     return f"Structure[{', '.join(parts)}]", SignalType.STATE, ""
+             except Exception:
+                 return "[Structure]", SignalType.STATE, ""
              
         elif val_type == iec61850.MMS_ARRAY:
              size = iec61850.MmsValue_getArraySize(mms_val)
@@ -909,7 +939,11 @@ class IEC61850Adapter(BaseProtocol):
             if mms_type == iec61850.MMS_UTC_TIME:
                 unix_ts = iec61850.MmsValue_toUnixTimestamp(mms_val)
                 # handle both float and int unix timestamps
-                return datetime.fromtimestamp(unix_ts)
+                # Interpret as UTC and return a timezone-aware datetime
+                try:
+                    return datetime.utcfromtimestamp(unix_ts).replace(tzinfo=datetime.timezone.utc)
+                except Exception:
+                    return datetime.fromtimestamp(unix_ts)
         except (ValueError, OSError, OverflowError):
              logger.debug(f"Failed to parse UTC time from MMS value")
         return None
@@ -1134,7 +1168,11 @@ class IEC61850Adapter(BaseProtocol):
                             if success:
                                 ts = self._get_timestamp_from_mms(mms_val)
                                 if ts:
-                                    signal.value = ts.strftime("%H:%M:%S.%f")[:-3]
+                                    # Show full date + time in UTC with millisecond precision
+                                    try:
+                                        signal.value = ts.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3] + ' UTC'
+                                    except Exception:
+                                        signal.value = str(ts)
                                     signal.timestamp = ts
                                     signal.signal_type = SignalType.TIMESTAMP
                                     signal.quality = SignalQuality.GOOD

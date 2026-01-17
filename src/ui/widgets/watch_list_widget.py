@@ -4,6 +4,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QTableWidget,
 from PySide6.QtCore import Qt, Signal as QtSignal
 from PySide6.QtGui import QBrush, QColor
 from src.core.watch_list_manager import WatchListManager, WatchedSignal
+import datetime
 from src.models.device_models import Signal, SignalQuality
 import logging
 
@@ -76,6 +77,87 @@ class WatchListWidget(QWidget):
         self.table.customContextMenuRequested.connect(self._show_context_menu)
         
         layout.addWidget(self.table)
+        # Accept drops from Device Tree
+        try:
+            self.setAcceptDrops(True)
+        except Exception:
+            pass
+
+    def dragEnterEvent(self, event):
+        mimetype = 'application/x-scadascout-signals'
+        if event.mimeData().hasFormat(mimetype) or event.mimeData().hasText():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        try:
+            data = None
+            mimetype = 'application/x-scadascout-signals'
+            md = event.mimeData()
+            if md.hasFormat(mimetype):
+                raw = md.data(mimetype)
+                try:
+                    data = json.loads(bytes(raw).decode('utf-8'))
+                except Exception:
+                    data = None
+            elif md.hasText():
+                try:
+                    data = json.loads(md.text())
+                except Exception:
+                    data = None
+
+            if not data:
+                event.ignore()
+                return
+
+            added = 0
+            for entry in data:
+                device_name = entry.get('device')
+                address = entry.get('address')
+                if not device_name or not address:
+                    continue
+                # Find device and resolve Signal object
+                device = None
+                if hasattr(self, 'device_manager') and self.device_manager:
+                    device = self.device_manager.get_device(device_name)
+                if not device or not getattr(device, 'root_node', None):
+                    continue
+
+                # Use watch_manager helper to find signal
+                try:
+                    sig = self.watch_manager._find_signal_in_node(device.root_node, address)
+                except Exception:
+                    # Fallback search
+                    sig = None
+                    def _search(n):
+                        if hasattr(n, 'signals'):
+                            for s in n.signals:
+                                if s.address == address:
+                                    return s
+                        if hasattr(n, 'children'):
+                            for c in n.children:
+                                r = _search(c)
+                                if r: return r
+                        return None
+                    sig = _search(device.root_node)
+
+                if sig:
+                    self.watch_manager.add_signal(device_name, sig)
+                    added += 1
+
+            if added:
+                try:
+                    evt = getattr(self.device_manager, 'event_logger', None)
+                    if evt:
+                        evt.info("Watch List", f"Drag-and-drop added {added} signal(s)")
+                except Exception:
+                    pass
+                event.acceptProposedAction()
+            else:
+                event.ignore()
+        except Exception:
+            event.ignore()
         
     def keyPressEvent(self, event):
         """Handle keyboard shortcuts."""
@@ -150,7 +232,10 @@ class WatchListWidget(QWidget):
         self.table.setItem(row, 8, QTableWidgetItem(value_str))
 
         # Column 9: RTT (ms)
-        rtt_display = str(watched.last_response_ms) if watched.last_response_ms is not None else "--"
+        rtt_value = watched.last_response_ms
+        if rtt_value is None and hasattr(signal, 'last_rtt') and signal.last_rtt > 0:
+            rtt_value = int(round(signal.last_rtt))
+        rtt_display = str(rtt_value) if rtt_value is not None else "--"
         self.table.setItem(row, 9, QTableWidgetItem(rtt_display))
 
         # Column 10: Max RTT (ms)
@@ -174,11 +259,27 @@ class WatchListWidget(QWidget):
         self.table.setItem(row, 11, quality_item)
         
         # Column 12: Timestamp
-        ts_str = signal.timestamp.strftime("%H:%M:%S.%f")[:-3] if signal.timestamp else "--"
+        if signal.timestamp:
+            try:
+                ts_str = signal.timestamp.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+                if getattr(signal.timestamp, 'tzinfo', None) is not None and signal.timestamp.tzinfo == datetime.timezone.utc:
+                    ts_str += ' UTC'
+            except Exception:
+                ts_str = str(signal.timestamp)
+        else:
+            ts_str = "--"
         self.table.setItem(row, 12, QTableWidgetItem(ts_str))
 
         # Column 13: Last Changed
-        lc_str = signal.last_changed.strftime("%H:%M:%S.%f")[:-3] if signal.last_changed else "--"
+        if signal.last_changed:
+            try:
+                lc_str = signal.last_changed.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+                if getattr(signal.last_changed, 'tzinfo', None) is not None and signal.last_changed.tzinfo == datetime.timezone.utc:
+                    lc_str += ' UTC'
+            except Exception:
+                lc_str = str(signal.last_changed)
+        else:
+            lc_str = "--"
         self.table.setItem(row, 13, QTableWidgetItem(lc_str))
 
         # Column 14: Error
@@ -210,7 +311,14 @@ class WatchListWidget(QWidget):
                     self._ensure_item(row, 8).setText(value_str)
 
                     # Column 9: RTT (ms)
-                    rtt_text = str(response_ms) if response_ms is not None else "--"
+                    rtt_value = response_ms
+                    if rtt_value is None:
+                        watched = self.watch_manager.get_watched(watch_id)
+                        if watched and watched.last_response_ms is not None:
+                            rtt_value = watched.last_response_ms
+                        elif hasattr(signal, 'last_rtt') and signal.last_rtt > 0:
+                            rtt_value = int(round(signal.last_rtt))
+                    rtt_text = str(rtt_value) if rtt_value is not None else "--"
                     self._ensure_item(row, 9).setText(rtt_text)
 
                     # Column 10: Max RTT (ms)
@@ -231,11 +339,27 @@ class WatchListWidget(QWidget):
                         quality_item.setBackground(QBrush(QColor('gray')))
 
                     # Column 12: Timestamp
-                    ts_str = signal.timestamp.strftime("%H:%M:%S.%f")[:-3] if signal.timestamp else "--"
+                    if signal.timestamp:
+                        try:
+                            ts_str = signal.timestamp.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+                            if getattr(signal.timestamp, 'tzinfo', None) is not None and signal.timestamp.tzinfo == datetime.timezone.utc:
+                                ts_str += ' UTC'
+                        except Exception:
+                            ts_str = str(signal.timestamp)
+                    else:
+                        ts_str = "--"
                     self._ensure_item(row, 12).setText(ts_str)
 
                     # Column 13: Last Changed
-                    lc_str = signal.last_changed.strftime("%H:%M:%S.%f")[:-3] if signal.last_changed else "--"
+                    if signal.last_changed:
+                        try:
+                            lc_str = signal.last_changed.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+                            if getattr(signal.last_changed, 'tzinfo', None) is not None and signal.last_changed.tzinfo == datetime.timezone.utc:
+                                lc_str += ' UTC'
+                        except Exception:
+                            lc_str = str(signal.last_changed)
+                    else:
+                        lc_str = "--"
                     self._ensure_item(row, 13).setText(lc_str)
 
                     # Column 14: Error

@@ -3,6 +3,7 @@ from PySide6.QtGui import QColor, QBrush
 from typing import List, Dict, Optional, Any
 from src.models.device_models import Signal
 import logging
+import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -184,10 +185,26 @@ class SignalTableModel(QAbstractTableModel):
             elif col == 8: return str(signal.value) if signal.value is not None else "-"
             elif col == 9: return signal.quality.value if hasattr(signal.quality, 'value') else str(signal.quality)
             elif col == 10: 
-                return signal.timestamp.strftime("%H:%M:%S.%f")[:-3] if signal.timestamp else "-"
+                if signal.timestamp:
+                    try:
+                        ts = signal.timestamp.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+                        if getattr(signal.timestamp, 'tzinfo', None) is not None and signal.timestamp.tzinfo == datetime.timezone.utc:
+                            ts += ' UTC'
+                        return ts
+                    except Exception:
+                        return str(signal.timestamp)
+                return "-"
             elif col == 11:
                 # Last Changed column
-                return signal.last_changed.strftime("%H:%M:%S.%f")[:-3] if signal.last_changed else "-"
+                if signal.last_changed:
+                    try:
+                        lc = signal.last_changed.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+                        if getattr(signal.last_changed, 'tzinfo', None) is not None and signal.last_changed.tzinfo == datetime.timezone.utc:
+                            lc += ' UTC'
+                        return lc
+                    except Exception:
+                        return str(signal.last_changed)
+                return "-"
             elif col == 12: return signal.error or "-"
             elif col == 13: 
                 # RTT Column

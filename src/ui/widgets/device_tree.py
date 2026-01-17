@@ -1,7 +1,8 @@
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QTreeView, QMenu, QHeaderView
-from PySide6.QtGui import QStandardItemModel, QStandardItem, QAction, QColor, QBrush
-from PySide6.QtCore import Qt, Signal as QtSignal, QItemSelectionModel
+from PySide6.QtGui import QStandardItemModel, QStandardItem, QAction, QColor, QBrush, QDrag
+from PySide6.QtCore import Qt, Signal as QtSignal, QItemSelectionModel, QMimeData, QByteArray
 import fnmatch
+import json
 from typing import Optional, List
 from src.ui.widgets.connection_dialog import ConnectionDialog
 from src.ui.widgets.modbus_inspector_dialog import ModbusInspectorDialog
@@ -19,7 +20,7 @@ class DeviceTreeWidget(QWidget):
     # Emits the selected Node object (or list of signals if we want)
     # For now, let's emit the Node object so the SignalsView can filter.
     selection_changed = QtSignal(object, str) # Node or Device or Signal, device_name
-    add_to_live_data_requested = QtSignal(dict) # Emits signal definition payload
+    add_to_live_data_requested = QtSignal(object) # Emits signal definition payload (allow node objects)
 
     def __init__(self, device_manager, watch_list_manager=None, parent=None):
         super().__init__(parent)
@@ -45,7 +46,59 @@ class DeviceTreeWidget(QWidget):
         filter_layout.addWidget(self.lbl_filter_count)
         self.layout.addLayout(filter_layout)
         
-        self.tree_view = QTreeView()
+        # Small subclass to provide custom drag mime payload
+        class DraggableTreeView(QTreeView):
+            def __init__(self, owner, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self._owner = owner
+
+            def startDrag(self, supportedActions):
+                indexes = self.selectionModel().selectedIndexes()
+                # Use only column-0 indexes to avoid duplicates
+                seen = set()
+                items = []
+                for idx in indexes:
+                    if idx.column() != 0:
+                        continue
+                    # Avoid processing the same index twice
+                    key = (idx.row(), idx.parent())
+                    if key in seen:
+                        continue
+                    seen.add(key)
+
+                    item = self.model().itemFromIndex(idx)
+                    if not item:
+                        continue
+                    data = item.data(Qt.UserRole)
+                    device_name = self._owner._find_device_for_item(item)
+
+                    if data and hasattr(data, 'address'):
+                        items.append({
+                            'device': device_name,
+                            'address': getattr(data, 'address', ''),
+                            'signal_name': getattr(data, 'name', '')
+                        })
+                    else:
+                        # For non-signal items, include node identifier path
+                        items.append({
+                            'device': device_name,
+                            'node_name': item.text(),
+                            'type': 'node'
+                        })
+
+                if not items:
+                    return
+
+                mime = QMimeData()
+                payload = json.dumps(items)
+                mime.setData('application/x-scadascout-signals', QByteArray(payload.encode('utf-8')))
+                mime.setText(payload)
+
+                drag = QDrag(self)
+                drag.setMimeData(mime)
+                drag.exec(Qt.CopyAction)
+
+        self.tree_view = DraggableTreeView(self)
         self.layout.addWidget(self.tree_view)
         
         self._setup_view()
@@ -761,10 +814,68 @@ class DeviceTreeWidget(QWidget):
                         "node": target_node
                     }
                     self.add_to_live_data_requested.emit(payload)
+                    # Event log
+                    try:
+                        evt = getattr(self.device_manager, 'event_logger', None)
+                        if evt:
+                            node_name = getattr(target_node, 'name', 'Device')
+                            evt.info(device_name or "Live Data", f"Add All to Live Data requested for {node_name}")
+                    except Exception:
+                        pass
             
             add_recursive_action.triggered.connect(request_add_recursive)
             menu.addAction(add_recursive_action)
             menu.addSeparator()
+
+            # Add all signals under this node/device to Watch List
+            add_recursive_watch = QAction("Add All to Watch List", self)
+
+            def request_add_recursive_watch():
+                if not self.watch_list_manager:
+                    return
+
+                # Resolve target node
+                if is_device_node:
+                    device_name = data
+                    device = self.device_manager.get_device(device_name)
+                    target_node = device.root_node if device else None
+                else:
+                    device_name = self._find_device_for_item(root_item)
+                    target_node = data
+
+                if not target_node or not device_name:
+                    return
+
+                # Collect all signals under target node (including subnodes)
+                def _collect(node_obj):
+                    collected = []
+                    if hasattr(node_obj, 'signals') and node_obj.signals:
+                        collected.extend(node_obj.signals)
+                    if hasattr(node_obj, 'children') and node_obj.children:
+                        for child in node_obj.children:
+                            collected.extend(_collect(child))
+                    if hasattr(node_obj, 'root_node') and node_obj.root_node:
+                        collected.extend(_collect(node_obj.root_node))
+                    return collected
+
+                signals = _collect(target_node)
+                for sig in signals:
+                    try:
+                        self.watch_list_manager.add_signal(device_name, sig)
+                    except Exception:
+                        continue
+
+                # Event log
+                try:
+                    evt = getattr(self.device_manager, 'event_logger', None)
+                    if evt:
+                        node_name = getattr(target_node, 'name', 'Device')
+                        evt.info(device_name or "Watch List", f"Added {len(signals)} signals to Watch List from {node_name}")
+                except Exception:
+                    pass
+
+            add_recursive_watch.triggered.connect(request_add_recursive_watch)
+            menu.addAction(add_recursive_watch)
 
         if is_device_node:
              # Device specific actions
@@ -923,6 +1034,42 @@ class DeviceTreeWidget(QWidget):
                         
                     watch_action.triggered.connect(add_watch)
                     menu.addAction(watch_action)
+
+                # Add All to Live Data (for a selected signal: add its containing branch)
+                # This emits the same payload shape as the container/device recursive action
+                branch_recursive_action = QAction("Add All to Live Data", self)
+                def request_add_all_from_signal():
+                    # Find nearest ancestor node object (not the device string or folder)
+                    parent = root_item.parent()
+                    target_node = None
+                    while parent is not None:
+                        pdata = parent.data(Qt.UserRole)
+                        is_folder = parent.data(Qt.UserRole + 1) == "FOLDER"
+                        # Skip folders and device-name strings
+                        if pdata and not isinstance(pdata, str) and not is_folder:
+                            # Heuristic: node objects have 'children' or 'signals'
+                            if hasattr(pdata, 'children') or hasattr(pdata, 'signals'):
+                                target_node = pdata
+                                break
+                        parent = parent.parent()
+
+                    # Fallback: if no parent node found, try device root_node
+                    if target_node is None:
+                        dev_name = self._find_device_for_item(root_item)
+                        if dev_name:
+                            dev = self.device_manager.get_device(dev_name)
+                            if dev and hasattr(dev, 'root_node'):
+                                target_node = dev.root_node
+
+                    if target_node:
+                        payload = {
+                            "device": device_name,
+                            "node": target_node
+                        }
+                        self.add_to_live_data_requested.emit(payload)
+
+                branch_recursive_action.triggered.connect(request_add_all_from_signal)
+                menu.addAction(branch_recursive_action)
 
                 # Copy Address (only for single selection)
                 if len(selected_signals) == 1:

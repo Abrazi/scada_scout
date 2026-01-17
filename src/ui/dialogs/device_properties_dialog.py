@@ -7,6 +7,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 from src.models.device_models import Device, DeviceType
 from typing import Optional
+from collections import deque
 import logging
 import time
 
@@ -26,12 +27,16 @@ class DevicePropertiesDialog(QDialog):
         self.protocol = device_manager.get_protocol(device.config.name)
         self.watch_list_manager = watch_list_manager
         self.latest_rtt = -1.0  # Store the most recent RTT measurement
+        self._rtt_history = deque(maxlen=2000)
         
         self.setWindowTitle(f"Device Properties - {device.config.name}")
         self.resize(900, 700)
         
         self._setup_ui()
         self._populate_data()
+
+        if self.watch_list_manager and hasattr(self.watch_list_manager, 'signal_updated'):
+            self.watch_list_manager.signal_updated.connect(self._on_watch_list_rtt)
     
     def _setup_ui(self):
         """Setup the main UI with tabs."""
@@ -109,6 +114,28 @@ class DevicePropertiesDialog(QDialog):
         widget = QWidget()
         layout = QVBoxLayout(widget)
         
+        # Add refresh button at top
+        refresh_layout = QHBoxLayout()
+        refresh_btn = QPushButton("Refresh Connection Info")
+        refresh_btn.setMaximumWidth(180)
+        refresh_btn.clicked.connect(lambda: self._refresh_connection_tab(layout))
+        refresh_layout.addWidget(refresh_btn)
+        refresh_layout.addStretch()
+        layout.addLayout(refresh_layout)
+        
+        # Populate content
+        self._populate_connection_content(layout)
+        
+        return widget
+    
+    def _populate_connection_content(self, layout):
+        """Populate the connection tab content."""
+        # Clear existing content (except refresh button)
+        while layout.count() > 1:
+            item = layout.takeAt(1)
+            if item.widget():
+                item.widget().deleteLater()
+        
         # Connection details group
         conn_group = QGroupBox("Connection Details")
         grid = QGridLayout()
@@ -153,9 +180,21 @@ class DevicePropertiesDialog(QDialog):
         # Try to get additional network info
         row = 0
         
-        # Max RTT
+        # Latest RTT (from most recent measurement)
+        if self.latest_rtt > 0:
+            self._add_property_row(net_grid, row, "Latest RTT:", f"{self.latest_rtt:.2f} ms")
+        else:
+            self._add_property_row(net_grid, row, "Latest RTT:", "Click 'Refresh' to measure")
+        row += 1
+        
+        # Max RTT (from watch list history)
         max_rtt = self._calculate_max_rtt()
         self._add_property_row(net_grid, row, "Max RTT:", f"{max_rtt:.2f} ms" if max_rtt >= 0 else "N/A")
+        row += 1
+        
+        # Average RTT
+        avg_rtt = self._calculate_avg_rtt()
+        self._add_property_row(net_grid, row, "Avg RTT:", f"{avg_rtt:.2f} ms" if avg_rtt >= 0 else "N/A")
         row += 1
         
         # Try to get MAC address, gateway, etc. if available
@@ -168,8 +207,13 @@ class DevicePropertiesDialog(QDialog):
         layout.addWidget(net_group)
         
         layout.addStretch()
-        
-        return widget
+    
+    def _refresh_connection_tab(self, layout):
+        """Refresh the connection tab and measure RTT."""
+        # Measure RTT
+        self._measure_rtt_on_refresh()
+        # Refresh display
+        self._populate_connection_content(layout)
     
     def _create_datasets_tab(self):
         """Create datasets information tab (IEC 61850)."""
@@ -482,10 +526,43 @@ Direct Operate with Enhanced Security:
         widget = QWidget()
         layout = QVBoxLayout(widget)
         
-        group = QGroupBox("Modbus Configuration")
+        # Add refresh button at top
+        refresh_layout = QHBoxLayout()
+        refresh_btn = QPushButton("Refresh Modbus Info")
+        refresh_btn.setMaximumWidth(180)
+        refresh_btn.clicked.connect(lambda: self._refresh_modbus_tab(layout))
+        refresh_layout.addWidget(refresh_btn)
+        refresh_layout.addStretch()
+        layout.addLayout(refresh_layout)
+        
+        # Populate content
+        self._populate_modbus_content(layout)
+        
+        return widget
+    
+    def _populate_modbus_content(self, layout):
+        """Populate the Modbus tab content."""
+        # Clear existing content (except refresh button)
+        while layout.count() > 1:
+            item = layout.takeAt(1)
+            if item.widget():
+                item.widget().deleteLater()
+        
+        # Get device info from protocol adapter if available
+        device_info = {}
+        if self.protocol and hasattr(self.protocol, 'get_device_info'):
+            try:
+                device_info = self.protocol.get_device_info()
+            except Exception as e:
+                logger.debug(f"Could not get device info from protocol: {e}")
+        
+        # Basic Modbus Configuration
+        config_group = QGroupBox("Modbus Configuration")
         grid = QGridLayout()
         
         row = 0
+        self._add_property_row(grid, row, "Device Type:", self.device.config.device_type.value)
+        row += 1
         self._add_property_row(grid, row, "Unit ID:", str(self.device.config.modbus_unit_id))
         row += 1
         self._add_property_row(grid, row, "Timeout:", f"{self.device.config.modbus_timeout} seconds")
@@ -493,40 +570,126 @@ Direct Operate with Enhanced Security:
         self._add_property_row(grid, row, "Register Maps:", str(len(self.device.config.modbus_register_maps)))
         row += 1
         
+        # Add protocol adapter info if available
+        if device_info:
+            if 'total_registers' in device_info:
+                self._add_property_row(grid, row, "Total Registers:", str(device_info['total_registers']))
+                row += 1
+            if 'function_codes_used' in device_info:
+                fc_list = ', '.join(str(fc) for fc in device_info.get('function_codes_used', []))
+                self._add_property_row(grid, row, "Function Codes:", fc_list if fc_list else "None")
+                row += 1
+        
         if self.device.config.device_type == DeviceType.MODBUS_SERVER:
             self._add_property_row(grid, row, "Slave Mappings:", str(len(self.device.config.modbus_slave_mappings)))
             row += 1
             self._add_property_row(grid, row, "Slave Blocks:", str(len(self.device.config.modbus_slave_blocks)))
             row += 1
         
-        group.setLayout(grid)
-        layout.addWidget(group)
+        config_group.setLayout(grid)
+        layout.addWidget(config_group)
+        config_group.setLayout(grid)
+        layout.addWidget(config_group)
         
-        # Register map details
+        # Register map details with enhanced information
         if self.device.config.modbus_register_maps:
-            map_group = QGroupBox("Register Maps")
+            map_group = QGroupBox("Register Maps Details")
             map_layout = QVBoxLayout()
             
             table = QTableWidget()
-            table.setColumnCount(5)
-            table.setHorizontalHeaderLabels(["Name", "Function", "Start", "Count", "Data Type"])
+            table.setColumnCount(7)
+            table.setHorizontalHeaderLabels(["Name", "Function", "Start", "Count", "Data Type", "Endianness", "Scale/Offset"])
             table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+            table.horizontalHeader().setStretchLastSection(True)
             table.setRowCount(len(self.device.config.modbus_register_maps))
             
             for idx, reg_map in enumerate(self.device.config.modbus_register_maps):
-                table.setItem(idx, 0, QTableWidgetItem(reg_map.name))
-                table.setItem(idx, 1, QTableWidgetItem(str(reg_map.function_code)))
+                table.setItem(idx, 0, QTableWidgetItem(reg_map.name_prefix))
+                
+                # Function code with description
+                fc_text = {
+                    1: "1 (Read Coils)",
+                    2: "2 (Read Discrete Inputs)",
+                    3: "3 (Read Holding Registers)",
+                    4: "4 (Read Input Registers)",
+                    5: "5 (Write Single Coil)",
+                    6: "6 (Write Single Register)",
+                    15: "15 (Write Multiple Coils)",
+                    16: "16 (Write Multiple Registers)"
+                }.get(reg_map.function_code, str(reg_map.function_code))
+                table.setItem(idx, 1, QTableWidgetItem(fc_text))
+                
                 table.setItem(idx, 2, QTableWidgetItem(str(reg_map.start_address)))
                 table.setItem(idx, 3, QTableWidgetItem(str(reg_map.count)))
-                table.setItem(idx, 4, QTableWidgetItem(reg_map.data_type.value if hasattr(reg_map, 'data_type') else "N/A"))
+                
+                # Data type
+                dt = reg_map.data_type.value if hasattr(reg_map, 'data_type') else "Default"
+                table.setItem(idx, 4, QTableWidgetItem(dt))
+                
+                # Endianness
+                endian = ""
+                if hasattr(reg_map, 'endianness'):
+                    endian = reg_map.endianness.value if hasattr(reg_map.endianness, 'value') else str(reg_map.endianness)
+                table.setItem(idx, 5, QTableWidgetItem(endian))
+                
+                # Scale/Offset
+                scale_offset = ""
+                if hasattr(reg_map, 'scale') and hasattr(reg_map, 'offset'):
+                    if reg_map.scale != 1.0 or reg_map.offset != 0.0:
+                        scale_offset = f"×{reg_map.scale} +{reg_map.offset}"
+                table.setItem(idx, 6, QTableWidgetItem(scale_offset))
             
             map_layout.addWidget(table)
             map_group.setLayout(map_layout)
             layout.addWidget(map_group)
         
-        layout.addStretch()
+        # Modbus Server specific: Slave blocks
+        if self.device.config.device_type == DeviceType.MODBUS_SERVER and self.device.config.modbus_slave_blocks:
+            slave_group = QGroupBox("Slave Register Blocks")
+            slave_layout = QVBoxLayout()
+            
+            slave_table = QTableWidget()
+            slave_table.setColumnCount(5)
+            slave_table.setHorizontalHeaderLabels(["Type", "Start Address", "Size", "Default Value", "Description"])
+            slave_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+            slave_table.horizontalHeader().setStretchLastSection(True)
+            slave_table.setRowCount(len(self.device.config.modbus_slave_blocks))
+            
+            for idx, block in enumerate(self.device.config.modbus_slave_blocks):
+                slave_table.setItem(idx, 0, QTableWidgetItem(block.register_type if hasattr(block, 'register_type') else "N/A"))
+                slave_table.setItem(idx, 1, QTableWidgetItem(str(block.start_address if hasattr(block, 'start_address') else 0)))
+                slave_table.setItem(idx, 2, QTableWidgetItem(str(block.size if hasattr(block, 'size') else 0)))
+                slave_table.setItem(idx, 3, QTableWidgetItem(str(block.default_value if hasattr(block, 'default_value') else 0)))
+                slave_table.setItem(idx, 4, QTableWidgetItem(block.description if hasattr(block, 'description') else ""))
+            
+            slave_layout.addWidget(slave_table)
+            slave_group.setLayout(slave_layout)
+            layout.addWidget(slave_group)
         
-        return widget
+        # Connection statistics from protocol
+        if device_info and self.device.connected:
+            stats_group = QGroupBox("Connection Statistics")
+            stats_grid = QGridLayout()
+            
+            stats_row = 0
+            self._add_property_row(stats_grid, stats_row, "pymodbus Available:", 
+                                  "Yes" if device_info.get('pymodbus_available', False) else "No")
+            stats_row += 1
+            
+            stats_group.setLayout(stats_grid)
+            layout.addWidget(stats_group)
+        elif not self.device.connected:
+            info_label = QLabel("<i>Connect the device to see additional runtime statistics</i>")
+            layout.addWidget(info_label)
+        
+        layout.addStretch()
+    
+    def _refresh_modbus_tab(self, layout):
+        """Refresh the Modbus tab and measure RTT."""
+        # Measure RTT
+        self._measure_rtt_on_refresh()
+        # Refresh display
+        self._populate_modbus_content(layout)
     
     def _create_statistics_tab(self):
         """Create statistics tab."""
@@ -582,7 +745,9 @@ Direct Operate with Enhanced Security:
         # Latest RTT measurement
         if self.latest_rtt > 0:
             self._add_property_row(grid, row, "Latest RTT:", f"{self.latest_rtt:.2f} ms")
-            row += 1
+        else:
+            self._add_property_row(grid, row, "Latest RTT:", "Click 'Refresh & Measure RTT' button")
+        row += 1
         
         # Average RTT
         avg_rtt = self._calculate_avg_rtt()
@@ -673,6 +838,8 @@ Direct Operate with Enhanced Security:
                     rtt = (end_time - start_time) * 1000  # Convert to ms
                     logger.info(f"Measured RTT: {rtt:.2f} ms")
                     self.latest_rtt = rtt
+                    if rtt > 0:
+                        self._rtt_history.append(float(rtt))
                     return rtt
                 else:
                     logger.warning(f"Failed to read signal {test_signal.address}")
@@ -680,21 +847,60 @@ Direct Operate with Enhanced Security:
                 logger.error(f"Error measuring RTT: {e}")
         
         return -1.0
+
+    def _on_watch_list_rtt(self, watch_id: str, signal, response_ms):
+        """Handle watch list RTT updates for this device."""
+        try:
+            device_name = watch_id.split("::", 1)[0]
+        except Exception:
+            device_name = None
+
+        if device_name != self.device.config.name:
+            return
+
+        if response_ms is None:
+            return
+
+        try:
+            rtt_value = float(response_ms)
+        except Exception:
+            return
+
+        if rtt_value > 0:
+            self._rtt_history.append(rtt_value)
+
+    def _get_rtt_samples(self) -> list:
+        """Get RTT samples from history or from signals if history is empty."""
+        if self._rtt_history:
+            return list(self._rtt_history)
+
+        rtt_map = {}
+        if self.watch_list_manager:
+            watch_signals = self.watch_list_manager.get_signals_for_device(self.device.config.name)
+            for sig in watch_signals:
+                if hasattr(sig, 'last_rtt') and sig.last_rtt > 0:
+                    rtt_map[sig.address] = sig.last_rtt
+
+        if self.device.root_node:
+            self._collect_rtts_to_map_recursive(self.device.root_node, rtt_map)
+
+        return list(rtt_map.values())
     
     def _find_stval_signal(self):
-        """Find a random stVal signal to test RTT."""
+        """Find a signal to test RTT (stVal for IEC61850, any register for Modbus)."""
         if not self.device.root_node:
             return None
         
-        # Look for any signal with 'stVal' in the address (common in IEC 61850)
-        signals = []
-        self._collect_stval_signals_recursive(self.device.root_node, signals)
+        # For IEC 61850: Look for stVal signals
+        if 'IEC61850' in self.device.config.device_type.value:
+            signals = []
+            self._collect_stval_signals_recursive(self.device.root_node, signals)
+            
+            if signals:
+                # Return the first stVal signal found
+                return signals[0]
         
-        if signals:
-            # Return the first stVal signal found
-            return signals[0]
-        
-        # If no stVal found, just return any readable signal
+        # For all devices: return any readable signal
         all_signals = []
         self._collect_all_signals_recursive(self.device.root_node, all_signals)
         return all_signals[0] if all_signals else None
@@ -730,103 +936,32 @@ Direct Operate with Enhanced Security:
                     return
     
     def _calculate_max_rtt(self) -> float:
-        """Calculate maximum RTT from all signals and watch list."""
-        max_rtt = -1.0
-        
-        # Check watch list first
-        if self.watch_list_manager:
-            watch_signals = self.watch_list_manager.get_signals_for_device(self.device.config.name)
-            for sig in watch_signals:
-                if hasattr(sig, 'last_rtt') and sig.last_rtt > max_rtt:
-                    max_rtt = sig.last_rtt
-        
-        # Check device tree
-        if self.device.root_node:
-            tree_max = self._find_max_rtt_recursive(self.device.root_node)
-            if tree_max > max_rtt:
-                max_rtt = tree_max
-        
-        # Include latest measurement
-        if self.latest_rtt > max_rtt:
-            max_rtt = self.latest_rtt
-        
-        return max_rtt
-    
-    def _find_max_rtt_recursive(self, node) -> float:
-        """Recursively find max RTT in node tree."""
-        max_rtt = -1.0
-        
-        # Check signals
-        if hasattr(node, 'signals'):
-            for signal in node.signals:
-                if hasattr(signal, 'last_rtt') and signal.last_rtt > max_rtt:
-                    max_rtt = signal.last_rtt
-        
-        # Check children
-        if hasattr(node, 'children'):
-            for child in node.children:
-                child_max = self._find_max_rtt_recursive(child)
-                if child_max > max_rtt:
-                    max_rtt = child_max
-        
-        return max_rtt
+        """Calculate maximum RTT from all signals (avoiding duplicates)."""
+        samples = self._get_rtt_samples()
+        return max(samples) if samples else -1.0
     
     def _calculate_avg_rtt(self) -> float:
-        """Calculate average RTT from all signals and watch list."""
-        rtts = []
-        
-        # Get RTTs from watch list
-        if self.watch_list_manager:
-            watch_signals = self.watch_list_manager.get_signals_for_device(self.device.config.name)
-            for sig in watch_signals:
-                if hasattr(sig, 'last_rtt') and sig.last_rtt > 0:
-                    rtts.append(sig.last_rtt)
-        
-        # Get RTTs from device tree
-        if self.device.root_node:
-            self._collect_rtts_recursive(self.device.root_node, rtts)
-        
-        # Include latest measurement
-        if self.latest_rtt > 0:
-            rtts.append(self.latest_rtt)
-        
-        if rtts:
-            return sum(rtts) / len(rtts)
-        return -1.0
+        """Calculate average RTT from all signals (avoiding duplicates)."""
+        samples = self._get_rtt_samples()
+        return (sum(samples) / len(samples)) if samples else -1.0
     
     def _calculate_min_rtt(self) -> float:
-        """Calculate minimum RTT from all signals and watch list."""
-        rtts = []
-        
-        # Get RTTs from watch list
-        if self.watch_list_manager:
-            watch_signals = self.watch_list_manager.get_signals_for_device(self.device.config.name)
-            for sig in watch_signals:
-                if hasattr(sig, 'last_rtt') and sig.last_rtt > 0:
-                    rtts.append(sig.last_rtt)
-        
-        # Get RTTs from device tree
-        if self.device.root_node:
-            self._collect_rtts_recursive(self.device.root_node, rtts)
-        
-        # Include latest measurement
-        if self.latest_rtt > 0:
-            rtts.append(self.latest_rtt)
-        
-        if rtts:
-            return min(rtts)
-        return -1.0
+        """Calculate minimum RTT from all signals (avoiding duplicates)."""
+        samples = self._get_rtt_samples()
+        return min(samples) if samples else -1.0
     
-    def _collect_rtts_recursive(self, node, rtts: list):
-        """Recursively collect RTT values."""
+    def _collect_rtts_to_map_recursive(self, node, rtt_map: dict):
+        """Recursively collect RTT values to a map (address -> rtt)."""
         if hasattr(node, 'signals'):
             for signal in node.signals:
                 if hasattr(signal, 'last_rtt') and signal.last_rtt > 0:
-                    rtts.append(signal.last_rtt)
+                    # Only store if not already present or if this value is more recent
+                    if signal.address not in rtt_map:
+                        rtt_map[signal.address] = signal.last_rtt
         
         if hasattr(node, 'children'):
             for child in node.children:
-                self._collect_rtts_recursive(child, rtts)
+                self._collect_rtts_to_map_recursive(child, rtt_map)
     
     def _count_signals(self) -> int:
         """Count total signals in device tree."""
