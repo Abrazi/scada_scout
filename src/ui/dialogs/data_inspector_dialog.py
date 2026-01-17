@@ -41,7 +41,7 @@ class DataInspectorDialog(QDialog):
         group_raw = QGroupBox("Raw Registers (Hex)")
         raw_layout = QHBoxLayout(group_raw)
         self.lbl_raw = QLabel("Waiting for data...")
-        self.lbl_raw.setStyleSheet("font-family: monospace; font-size: 14px; font-weight: bold;")
+        self.lbl_raw.setProperty("class", "code-strong")
         raw_layout.addWidget(self.lbl_raw)
         layout.addWidget(group_raw)
         

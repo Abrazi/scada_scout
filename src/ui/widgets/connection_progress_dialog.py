@@ -1,5 +1,6 @@
 from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QProgressBar, QPushButton, QTextEdit, QHBoxLayout
 from PySide6.QtCore import Qt, Signal, QTimer
+from typing import Optional
 
 class ConnectionProgressDialog(QDialog):
     """
@@ -25,6 +26,8 @@ class ConnectionProgressDialog(QDialog):
         
         # Current status label
         self.lbl_status = QLabel("Initializing...")
+        self.lbl_status.setProperty("class", "status")
+        self._set_label_status(self.lbl_status, "info")
         layout.addWidget(self.lbl_status)
         
         # Progress bar
@@ -52,6 +55,14 @@ class ConnectionProgressDialog(QDialog):
         btn_layout.addWidget(self.btn_close)
         
         layout.addLayout(btn_layout)
+
+    def _set_label_status(self, label: QLabel, status: Optional[str]):
+        if status:
+            label.setProperty("status", status)
+        else:
+            label.setProperty("status", "")
+        label.style().unpolish(label)
+        label.style().polish(label)
         
     def update_progress(self, message: str, percent: int):
         """Update the progress status."""
@@ -60,26 +71,26 @@ class ConnectionProgressDialog(QDialog):
         self.txt_log.append(f"[{percent}%] {message}")
         
         if percent >= 100:
-            self.lbl_status.setStyleSheet("color: green;")
+            self._set_label_status(self.lbl_status, "success")
             self.btn_close.setText("Close")
             self.btn_close.setEnabled(True)
             # Auto-close on success after a short delay
             QTimer.singleShot(1500, self.accept)
             
         elif percent == 0 and ("Error" in message or "failed" in message.lower()):
-            self.lbl_status.setStyleSheet("color: red;")
+            self._set_label_status(self.lbl_status, "error")
             self.btn_close.setText("Close")
             self.btn_close.setEnabled(True)
             self.btn_retry.setVisible(True)
         else:
             # While in progress, ensure retry is hidden and status is normal
-            self.lbl_status.setStyleSheet("")
+            self._set_label_status(self.lbl_status, "info")
             self.btn_retry.setVisible(False)
 
     def _on_retry(self):
         """Signal a retry and reset UI state."""
         self.btn_retry.setVisible(False)
-        self.lbl_status.setStyleSheet("")
+        self._set_label_status(self.lbl_status, "info")
         self.lbl_status.setText("Retrying...")
         self.progress_bar.setValue(5)
         self.retry_requested.emit()

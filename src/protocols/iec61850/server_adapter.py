@@ -1,3 +1,4 @@
+import ctypes
 import logging
 import os
 import tempfile
@@ -27,6 +28,10 @@ class IEC61850ServerAdapter(BaseProtocol):
         self._filtered_scd_path: Optional[str] = None
         self.ied_name = config.protocol_params.get("ied_name", config.name) if config.protocol_params else config.name
         self._value_cache = {}
+        self._control_handlers = []
+        self._control_handler_params = []
+        self._sbo_state = {}
+        self._sbo_select_timeout_ms = 30000
 
     def connect(self) -> bool:
         if not self.config.scd_file_path:
@@ -48,39 +53,39 @@ class IEC61850ServerAdapter(BaseProtocol):
             if self.event_logger:
                 self.event_logger.info("IEC61850Server", f"Loading model for {self.ied_name} from {scd_path}")
 
-            # Try to create model from SCD
+            # Try to create model from SCD/ICD
             # Note: libiec61850 might not fully support SCD files for server creation
-            # It works better with ICD files or programmatically created models
+            # It works better with ICD/CID files or programmatically created models
             self.model = lib.ConfigFileParser_createModelFromConfigFileEx(scd_path.encode("utf-8"))
             
             if not self.model:
-                # Alternative: Try to extract ICD section and create a temporary ICD file
-                logger.warning("ConfigFileParser_createModelFromConfigFileEx failed, trying ICD extraction")
-                if self.event_logger:
-                    self.event_logger.warning("IEC61850Server", "SCD parsing failed, attempting ICD extraction")
-                
-                # Try to extract ICD and create model from that
-                icd_path = self._extract_icd_from_scd(scd_path, self.ied_name)
-                if icd_path:
-                    self.model = lib.ConfigFileParser_createModelFromConfigFileEx(icd_path.encode("utf-8"))
-                    if self.model:
-                        self._filtered_scd_path = icd_path
-                        logger.info(f"Successfully loaded model from extracted ICD: {icd_path}")
-                
-                if not self.model:
-                    raise RuntimeError(
-                        f"Failed to create IED model from SCD: {scd_path}. "
-                        f"libiec61850 server may not support this SCD format. "
-                        f"Try using an ICD file instead, or check that the SCD contains valid IED definition for '{self.ied_name}'"
-                    )
+                file_ext = os.path.splitext(scd_path)[1].lower()
+                if file_ext not in (".icd", ".cid"):
+                    # Alternative: Try to extract ICD section and create a temporary ICD file
+                    logger.warning("ConfigFileParser_createModelFromConfigFileEx failed, trying ICD extraction")
+                    if self.event_logger:
+                        self.event_logger.warning("IEC61850Server", "SCD parsing failed, attempting ICD extraction")
+                    
+                    # Try to extract ICD and create model from that
+                    icd_path = self._extract_icd_from_scd(scd_path, self.ied_name)
+                    if icd_path:
+                        self.model = lib.ConfigFileParser_createModelFromConfigFileEx(icd_path.encode("utf-8"))
+                        if self.model:
+                            self._filtered_scd_path = icd_path
+                            logger.info(f"Successfully loaded model from extracted ICD: {icd_path}")
+                else:
+                    logger.warning("Model creation failed for ICD/CID file; will try minimal model fallback")
             
             # If we still don't have a model, try creating a minimal working model
             if not self.model:
                 logger.warning("Attempting to create minimal test model as fallback")
                 if self.event_logger:
                     self.event_logger.warning("IEC61850Server", "Creating minimal test model as fallback")
-                
-                self.model = self._create_minimal_model()
+
+                # Try building a dynamic model from parsed SCD/ICD
+                self.model = self._create_model_from_scd_parser()
+                if not self.model:
+                    self.model = self._create_minimal_model()
                 if not self.model:
                     raise RuntimeError(
                         f"Failed to create any IED model for '{self.ied_name}'. "
@@ -112,30 +117,54 @@ class IEC61850ServerAdapter(BaseProtocol):
             except Exception as e:
                 logger.warning(f"Could not set server identity: {e}")
 
+            # Register SBO control handlers (if any)
+            try:
+                self._register_sbo_handlers()
+            except Exception as e:
+                logger.warning(f"Failed to register SBO handlers: {e}")
+
             # Start the server
             logger.info(f"Starting IEC61850 server on {self.config.ip_address}:{self.config.port}")
             start_result = lib.IedServer_start(self.server, int(self.config.port))
-            
-            # Check if server actually started
+
+            # Some libiec61850 builds return void; check isRunning if so
+            if start_result is None:
+                is_running = False
+                try:
+                    is_running = bool(lib.IedServer_isRunning(self.server))
+                except Exception:
+                    is_running = False
+                if is_running:
+                    self.connected = True
+                    logger.info("IEC61850 server started successfully")
+                    if self.event_logger:
+                        self.event_logger.info(
+                            "IEC61850Server",
+                            f"✅ Started IEC 61850 server '{self.ied_name}' on {self.config.ip_address}:{self.config.port}"
+                        )
+                    return True
+                raise RuntimeError("Failed to start IEC61850 server (isRunning=false)")
+
+            # Check if server actually started (when return code is available)
             if start_result == 0:  # 0 = success in libiec61850
                 self.connected = True
-                logger.info(f"IEC61850 server started successfully")
-                
+                logger.info("IEC61850 server started successfully")
+
                 if self.event_logger:
                     self.event_logger.info(
                         "IEC61850Server",
                         f"✅ Started IEC 61850 server '{self.ied_name}' on {self.config.ip_address}:{self.config.port}"
                     )
                 return True
-            else:
-                error_msg = f"Failed to start IEC61850 server (error code: {start_result})"
-                if start_result == 1:
-                    error_msg += " - Port may be in use"
-                elif start_result == 2:
-                    error_msg += " - Network interface not available"
-                
-                logger.error(error_msg)
-                raise RuntimeError(error_msg)
+
+            error_msg = f"Failed to start IEC61850 server (error code: {start_result})"
+            if start_result == 1:
+                error_msg += " - Port may be in use"
+            elif start_result == 2:
+                error_msg += " - Network interface not available"
+
+            logger.error(error_msg)
+            raise RuntimeError(error_msg)
 
         except Exception as e:
             logger.error(f"IEC61850 server start failed: {e}")
@@ -151,21 +180,16 @@ class IEC61850ServerAdapter(BaseProtocol):
                     lib.IedServer_stop(self.server)
                 except Exception:
                     pass
+                # Always destroy server - it will clean up the model internally
+                # Do NOT call IedModel_destroy separately - causes double-free
                 try:
                     lib.IedServer_destroy(self.server)
                 except Exception:
                     pass
         finally:
             self.server = None
+            self.model = None  # Clear reference but don't destroy - server handles it
             self.connected = False
-
-        try:
-            if self.model:
-                lib.IedModel_destroy(self.model)
-        except Exception:
-            pass
-        finally:
-            self.model = None
 
         # Clean up temporary files (both filtered SCD and extracted ICD)
         if self._filtered_scd_path and os.path.exists(self._filtered_scd_path):
@@ -365,15 +389,18 @@ class IEC61850ServerAdapter(BaseProtocol):
                 return None
 
             # Create DataObject Mod and basic attributes (stVal, q, t)
-            mod = lib.DataObject_create(b"Mod", lln0, 0)
+            lln0_node = ctypes.cast(lln0, ctypes.POINTER(lib.ModelNode))
+            mod = lib.DataObject_create(b"Mod", lln0_node, 0)
             if not mod:
                 logger.error("Failed to create DataObject Mod")
                 return None
 
+            mod_node = ctypes.cast(mod, ctypes.POINTER(lib.ModelNode))
+
             # stVal (INT32, FC=ST)
             st_val = lib.DataAttribute_create(
                 b"stVal",
-                mod,
+                mod_node,
                 lib.IEC61850_INT32,
                 lib.IEC61850_FC_ST,
                 0,
@@ -384,7 +411,7 @@ class IEC61850ServerAdapter(BaseProtocol):
             # q (QUALITY, FC=ST)
             quality = lib.DataAttribute_create(
                 b"q",
-                mod,
+                mod_node,
                 lib.IEC61850_QUALITY,
                 lib.IEC61850_FC_ST,
                 0,
@@ -395,7 +422,7 @@ class IEC61850ServerAdapter(BaseProtocol):
             # t (TIMESTAMP, FC=ST)
             timestamp = lib.DataAttribute_create(
                 b"t",
-                mod,
+                mod_node,
                 lib.IEC61850_TIMESTAMP,
                 lib.IEC61850_FC_ST,
                 0,
@@ -419,3 +446,403 @@ class IEC61850ServerAdapter(BaseProtocol):
         except Exception as e:
             logger.error(f"Minimal model creation failed: {e}")
             return None
+
+    def _create_model_from_scd_parser(self) -> Optional[int]:
+        """Build a dynamic model from parsed SCD/ICD data (best-effort)."""
+        try:
+            if not self.config.scd_file_path:
+                return None
+
+            parser = SCDParser(self.config.scd_file_path)
+            root = parser.get_structure(self.ied_name)
+            if not root or root.name in ("IED_Not_Found", "Error_No_SCD"):
+                return None
+
+            model = lib.IedModel_create(root.name.encode("utf-8"))
+            if not model:
+                logger.warning("IedModel_create returned NULL")
+                return None
+
+            try:
+                lib.IedModel_setIedName(model, root.name.encode("utf-8"))
+            except Exception:
+                pass
+
+            ld_nodes = {}
+            ln_nodes = {}
+            do_nodes = {}
+
+            ld_created = 0
+            ln_created = 0
+
+            for ld_node in root.children:
+                ld_inst = self._strip_ied_prefix(root.name, ld_node.name)
+                ld_inst = ld_inst or "LD0"
+                ldevice = lib.LogicalDevice_create(ld_inst.encode("utf-8"), model)
+                if not ldevice:
+                    logger.debug(f"LogicalDevice_create failed for {ld_inst}")
+                    continue
+                ld_nodes[ld_inst] = ldevice
+                ld_created += 1
+
+                for ln_node in ld_node.children:
+                    lnode = lib.LogicalNode_create(ln_node.name.encode("utf-8"), ldevice)
+                    if not lnode:
+                        logger.debug(f"LogicalNode_create failed for {ld_inst}/{ln_node.name}")
+                        continue
+                    ln_nodes[(ld_inst, ln_node.name)] = lnode
+                    ln_created += 1
+
+            created_attrs = 0
+            processed = 0
+            skipped_no_slash = 0
+            skipped_no_dot = 0
+            skipped_no_lnode = 0
+            skipped_short_path = 0
+            
+            # Build DataObjects/DataAttributes from signals (recursively)
+            for signal in self._iter_signals(root):
+                if not signal.address or "/" not in signal.address:
+                    skipped_no_slash += 1
+                    continue
+                addr_ld, rest = signal.address.split("/", 1)
+                addr_ld_norm = self._strip_ied_prefix(root.name, addr_ld)
+                addr_ld_norm = addr_ld_norm or addr_ld
+                if "." not in rest:
+                    skipped_no_dot += 1
+                    continue
+                ln_name, path = rest.split(".", 1)
+
+                lnode = ln_nodes.get((addr_ld_norm, ln_name))
+                if not lnode:
+                    if processed < 5:  # Log first few misses
+                        logger.debug(f"LN not found: ({addr_ld_norm}, {ln_name}) from {signal.address}")
+                    skipped_no_lnode += 1
+                    continue
+                
+                processed += 1
+
+                parts = path.split(".")
+                if len(parts) < 2:
+                    skipped_short_path += 1
+                    continue
+
+                da_name = parts[-1]
+                do_path = parts[:-1]
+
+                parent = ctypes.cast(lnode, ctypes.POINTER(lib.ModelNode))
+                current_path = []
+                for do_name in do_path:
+                    current_path.append(do_name)
+                    key = (addr_ld_norm, ln_name, ".".join(current_path))
+                    if key in do_nodes:
+                        parent = do_nodes[key]
+                        continue
+
+                    new_do = lib.DataObject_create(do_name.encode("utf-8"), parent, 0)
+                    if not new_do:
+                        break
+                    parent = ctypes.cast(new_do, ctypes.POINTER(lib.ModelNode))
+                    do_nodes[key] = parent
+
+                if not parent:
+                    continue
+
+                fc, btype = self._parse_signal_meta(signal)
+                da_type = self._map_btype_to_da_type(btype)
+                fc_type = self._map_fc_to_const(fc)
+
+                try:
+                    da = lib.DataAttribute_create(
+                        da_name.encode("utf-8"),
+                        parent,
+                        da_type,
+                        fc_type,
+                        0,
+                        0,
+                        0,
+                    )
+                    if da:
+                        created_attrs += 1
+                except Exception as e:
+                    logger.debug(f"Failed to create DA {da_name} in {addr_ld_norm}/{ln_name}: {e}")
+
+            logger.info(
+                f"Dynamic model build: LDs={ld_created}, LNs={ln_created}, attrs={created_attrs}"
+            )
+            logger.info(
+                f"Skipped: no_slash={skipped_no_slash}, no_dot={skipped_no_dot}, "
+                f"no_lnode={skipped_no_lnode}, short_path={skipped_short_path}, processed={processed}"
+            )
+
+            if created_attrs == 0:
+                logger.warning("Dynamic model creation produced 0 attributes")
+                return None
+
+            logger.info(f"Created dynamic model from SCD/ICD for {root.name} with {created_attrs} attributes")
+            return model
+
+        except Exception as e:
+            logger.warning(f"Dynamic model creation from SCD failed: {e}")
+            return None
+
+    def _strip_ied_prefix(self, ied_name: str, ld_name: str) -> str:
+        if ld_name.startswith(ied_name):
+            return ld_name[len(ied_name):]
+        return ld_name
+
+    def _iter_signals(self, node: Node):
+        for sig in node.signals:
+            yield sig
+        for child in node.children:
+            yield from self._iter_signals(child)
+
+    def _parse_signal_meta(self, signal: Signal) -> tuple[str, str]:
+        fc = signal.fc
+        btype = ""
+        desc = signal.description or ""
+        if not fc and "FC:" in desc:
+            try:
+                fc = desc.split("FC:", 1)[1].split()[0]
+            except Exception:
+                fc = ""
+        if "Type:" in desc:
+            try:
+                btype = desc.split("Type:", 1)[1].split()[0]
+            except Exception:
+                btype = ""
+        return fc, btype
+
+    def _map_fc_to_const(self, fc: str) -> int:
+        fc_map = {
+            "ST": lib.IEC61850_FC_ST,
+            "MX": lib.IEC61850_FC_MX,
+            "SP": lib.IEC61850_FC_SP,
+            "SV": lib.IEC61850_FC_SV,
+            "CF": lib.IEC61850_FC_CF,
+            "DC": lib.IEC61850_FC_DC,
+            "SG": lib.IEC61850_FC_SG,
+            "SE": lib.IEC61850_FC_SE,
+            "SR": lib.IEC61850_FC_SR,
+            "OR": lib.IEC61850_FC_OR,
+            "BL": lib.IEC61850_FC_BL,
+            "EX": lib.IEC61850_FC_EX,
+            "CO": lib.IEC61850_FC_CO,
+        }
+        return fc_map.get((fc or "ST"), lib.IEC61850_FC_ST)
+
+    def _map_btype_to_da_type(self, btype: str) -> int:
+        btype = (btype or "").strip()
+        btype_map = {
+            "BOOLEAN": lib.IEC61850_BOOLEAN,
+            "INT8": lib.IEC61850_INT8,
+            "INT16": lib.IEC61850_INT16,
+            "INT32": lib.IEC61850_INT32,
+            "INT8U": lib.IEC61850_INT8U,
+            "INT16U": lib.IEC61850_INT16U,
+            "INT32U": lib.IEC61850_INT32U,
+            "FLOAT32": lib.IEC61850_FLOAT32,
+            "FLOAT64": lib.IEC61850_FLOAT64,
+            "Enum": lib.IEC61850_ENUMERATED,
+            "Dbpos": lib.IEC61850_ENUMERATED,
+            "Quality": lib.IEC61850_QUALITY,
+            "Timestamp": lib.IEC61850_TIMESTAMP,
+            "Check": lib.IEC61850_CHECK,
+            "Struct": lib.IEC61850_CONSTRUCTED,
+            "EntryID": lib.IEC61850_OCTET_STRING_8,
+            "PhyComAddr": lib.IEC61850_PHYCOMADDR,
+            "OptFlds": lib.IEC61850_OPTFLDS,
+            "TrgOps": lib.IEC61850_TRGOPS,
+            "VisString32": lib.IEC61850_VISIBLE_STRING_32,
+            "VisString64": lib.IEC61850_VISIBLE_STRING_64,
+            "VisString65": lib.IEC61850_VISIBLE_STRING_65,
+            "VisString129": lib.IEC61850_VISIBLE_STRING_129,
+            "VisString255": lib.IEC61850_VISIBLE_STRING_255,
+            "Octet64": lib.IEC61850_OCTET_STRING_64,
+            "Octet8": lib.IEC61850_OCTET_STRING_8,
+        }
+        return btype_map.get(btype, lib.IEC61850_BOOLEAN)
+
+    def _register_sbo_handlers(self) -> None:
+        """Register SBO select/operate handlers for control DOs defined in the SCD."""
+        if not self.server or not self.model or not self.config.scd_file_path:
+            return
+
+        sbo_controls = self._find_sbo_control_objects(self.config.scd_file_path, self.ied_name)
+        if not sbo_controls:
+            return
+
+        for ref, ctl_model in sbo_controls:
+            model_node = lib.IedModel_getModelNodeByObjectReference(self.model, ref.encode("utf-8"))
+            if not model_node:
+                logger.warning(f"SBO control object not found in model: {ref}")
+                continue
+
+            data_object = ctypes.cast(model_node, ctypes.POINTER(lib.DataObject))
+            if not data_object:
+                logger.warning(f"Failed to cast model node to DataObject: {ref}")
+                continue
+
+            ctl_model_value = self._map_ctl_model(ctl_model)
+            if ctl_model_value is not None:
+                try:
+                    lib.IedServer_updateCtlModel(self.server, data_object, ctl_model_value)
+                except Exception as e:
+                    logger.warning(f"Failed to set ctlModel for {ref}: {e}")
+
+            control_ctx = {
+                "ref": ref,
+                "st_val": self._get_child_attribute(data_object, "stVal"),
+                "op_ok": self._get_child_attribute(data_object, "opOk"),
+                "t": self._get_child_attribute(data_object, "t"),
+            }
+
+            check_handler = self._make_sbo_check_handler(control_ctx)
+            control_handler = self._make_sbo_control_handler(control_ctx)
+
+            param = ctypes.py_object(control_ctx)
+            param_ptr = ctypes.cast(ctypes.pointer(param), ctypes.c_void_p)
+
+            lib.IedServer_setPerformCheckHandler(self.server, data_object, check_handler, param_ptr)
+            lib.IedServer_setControlHandler(self.server, data_object, control_handler, param_ptr)
+
+            self._control_handlers.append((check_handler, control_handler))
+            self._control_handler_params.append(param)
+
+            logger.info(f"Registered SBO handlers for {ref}")
+
+    def _find_sbo_control_objects(self, scd_path: str, ied_name: str) -> list[tuple[str, str]]:
+        """Find control DOs with SBO control model in the SCD and return object references."""
+        results = []
+        try:
+            tree = ET.parse(scd_path)
+            root = tree.getroot()
+
+            ns_uri = None
+            if "}" in root.tag:
+                ns_uri = root.tag.split("}")[0].strip("{")
+
+            def _ns(tag: str) -> str:
+                return f"{{{ns_uri}}}{tag}" if ns_uri else tag
+
+            # Find target IED
+            target_ied = None
+            for ied in root.findall(f".//{_ns('IED')}"):
+                if ied.get("name") == ied_name:
+                    target_ied = ied
+                    break
+            if target_ied is None:
+                return results
+
+            for ldevice in target_ied.findall(f".//{_ns('LDevice')}"):
+                ld_inst = ldevice.get("inst", "LD0")
+                for ln in list(ldevice):
+                    tag = ln.tag.split("}")[-1]
+                    if tag not in ("LN", "LN0"):
+                        continue
+                    ln_class = ln.get("lnClass", "LLN0")
+                    ln_inst = ln.get("inst", "")
+                    ln_prefix = ln.get("prefix", "")
+                    ln_name = f"{ln_prefix}{ln_class}{ln_inst}"
+
+                    for doi in ln.findall(f"{_ns('DOI')}"):
+                        do_name = doi.get("name")
+                        if not do_name:
+                            continue
+
+                        ctl_model = None
+                        for dai in doi.findall(f"{_ns('DAI')}"):
+                            if dai.get("name") == "ctlModel":
+                                val = dai.find(f"{_ns('Val')}")
+                                if val is not None and val.text:
+                                    ctl_model = val.text.strip()
+                                break
+
+                        if ctl_model and "sbo" in ctl_model.lower():
+                            ref = f"{ld_inst}/{ln_name}.{do_name}"
+                            results.append((ref, ctl_model))
+
+            return results
+        except Exception as e:
+            logger.warning(f"Failed to parse SCD for SBO controls: {e}")
+            return results
+
+    def _map_ctl_model(self, ctl_model: str) -> Optional[int]:
+        if not ctl_model:
+            return None
+        model = ctl_model.strip().lower()
+        if model == "sbo-with-enhanced-security":
+            return lib.CONTROL_MODEL_SBO_ENHANCED
+        if model == "sbo-with-normal-security":
+            return lib.CONTROL_MODEL_SBO_NORMAL
+        if model == "direct-with-enhanced-security":
+            return lib.CONTROL_MODEL_DIRECT_ENHANCED
+        if model == "direct-with-normal-security":
+            return lib.CONTROL_MODEL_DIRECT_NORMAL
+        if model == "status-only":
+            return lib.CONTROL_MODEL_STATUS_ONLY
+        return None
+
+    def _get_child_attribute(self, data_object, name: str):
+        node = ctypes.cast(data_object, ctypes.POINTER(lib.ModelNode))
+        child = lib.ModelNode_getChild(node, name.encode("utf-8"))
+        if not child:
+            return None
+        return ctypes.cast(child, ctypes.POINTER(lib.DataAttribute))
+
+    def _make_sbo_check_handler(self, ctx):
+        @lib.ControlPerformCheckHandler
+        def _handler(action, _param, value, _test, _interlock_check):
+            ref = ctx["ref"]
+            now = int(lib.Hal_getTimeInMs())
+
+            if lib.ControlAction_isSelect(action):
+                selected_at = self._sbo_state.get(ref)
+                if selected_at and (now - selected_at) < self._sbo_select_timeout_ms:
+                    lib.ControlAction_setAddCause(action, lib.ADD_CAUSE_OBJECT_ALREADY_SELECTED)
+                    return lib.CONTROL_OBJECT_ACCESS_DENIED
+
+                self._sbo_state[ref] = now
+                return lib.CONTROL_ACCEPTED
+
+            # Operate: require selection
+            selected_at = self._sbo_state.get(ref)
+            if not selected_at or (now - selected_at) > self._sbo_select_timeout_ms:
+                lib.ControlAction_setAddCause(action, lib.ADD_CAUSE_OBJECT_NOT_SELECTED)
+                return lib.CONTROL_WAITING_FOR_SELECT
+
+            return lib.CONTROL_ACCEPTED
+
+        return _handler
+
+    def _make_sbo_control_handler(self, ctx):
+        @lib.ControlHandler
+        def _handler(action, _param, value, _test):
+            ref = ctx["ref"]
+            try:
+                state = bool(lib.MmsValue_getBoolean(value)) if value else False
+            except Exception:
+                state = False
+
+            # Update opOk if available
+            if ctx.get("op_ok"):
+                op_ok_val = lib.MmsValue_newBoolean(True)
+                lib.IedServer_updateAttributeValue(self.server, ctx["op_ok"], op_ok_val)
+                lib.MmsValue_delete(op_ok_val)
+
+            # Update stVal if available
+            if ctx.get("st_val"):
+                st_val = lib.MmsValue_newBoolean(state)
+                lib.IedServer_updateAttributeValue(self.server, ctx["st_val"], st_val)
+                lib.MmsValue_delete(st_val)
+
+            # Update timestamp if available
+            if ctx.get("t"):
+                ts = int(lib.Hal_getTimeInMs())
+                lib.IedServer_updateUTCTimeAttributeValue(self.server, ctx["t"], ts)
+
+            # Clear selection on operate
+            self._sbo_state.pop(ref, None)
+            return lib.CONTROL_RESULT_OK
+
+        return _handler

@@ -25,7 +25,7 @@ class ImportProgressDialog(QDialog):
         
         self.log_area = QTextEdit()
         self.log_area.setReadOnly(True)
-        self.log_area.setStyleSheet("background-color: #1e1e1e; color: #d4d4d4; font-family: monospace; padding: 5px;")
+        self.log_area.setProperty("class", "code")
         self.layout.addWidget(self.log_area)
         
         self.btn_close = QPushButton("Close")

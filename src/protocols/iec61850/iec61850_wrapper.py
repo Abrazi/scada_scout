@@ -726,9 +726,41 @@ def ControlObjectClient_destroy(client):
     func.argtypes = [ControlObjectClient]
     func(client)
 
+def ControlObjectClient_getControlModel(client):
+    """
+    Get the control model of the control object.
+    
+    Args:
+        client: ControlObjectClient handle
+        
+    Returns:
+        int: Control model (0=STATUS_ONLY, 1=DIRECT_NORMAL, 2=SBO_NORMAL, 3=DIRECT_ENHANCED, 4=SBO_ENHANCED)
+    """
+    _check_lib()
+    func = _lib.ControlObjectClient_getControlModel
+    func.restype = c_int
+    func.argtypes = [ControlObjectClient]
+    return func(client)
+
+def ControlObjectClient_getLastError(client):
+    """
+    Get the last error code from the control object.
+    
+    Args:
+        client: ControlObjectClient handle
+        
+    Returns:
+        int: Last IedClientError code
+    """
+    _check_lib()
+    func = _lib.ControlObjectClient_getLastError
+    func.restype = c_int
+    func.argtypes = [ControlObjectClient]
+    return func(client)
+
 def ControlObjectClient_select(client):
     """
-    Perform Select operation (SBO).
+    Perform Select operation (SBO normal).
     
     Args:
         client: ControlObjectClient handle
@@ -741,6 +773,23 @@ def ControlObjectClient_select(client):
     func.restype = c_bool
     func.argtypes = [ControlObjectClient]
     return bool(func(client))
+
+def ControlObjectClient_selectWithValue(client, value):
+    """
+    Perform Select with value operation (SBO enhanced).
+    
+    Args:
+        client: ControlObjectClient handle
+        value: MmsValue to select with
+        
+    Returns:
+        bool: True if successful
+    """
+    _check_lib()
+    func = _lib.ControlObjectClient_selectWithValue
+    func.restype = c_bool
+    func.argtypes = [ControlObjectClient, MmsValue]
+    return bool(func(client, value))
 
 def ControlObjectClient_operate(client, value, oper_time=0):
     """

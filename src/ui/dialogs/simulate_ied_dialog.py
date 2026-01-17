@@ -1,6 +1,7 @@
 from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, 
-    QSpinBox, QPushButton, QDialogButtonBox, QGroupBox, QFormLayout
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
+    QSpinBox, QPushButton, QDialogButtonBox, QGroupBox, QFormLayout,
+    QFileDialog
 )
 from PySide6.QtCore import Qt
 from src.models.device_models import DeviceConfig, DeviceType
@@ -48,11 +49,17 @@ class SimulateIEDDialog(QDialog):
         self.spin_port.setValue(device_config.port or 102)
         config_layout.addRow("Listen Port:", self.spin_port)
         
-        # SCD File Path (read-only)
-        if device_config.scd_file_path:
-            self.txt_scd = QLineEdit(device_config.scd_file_path)
-            self.txt_scd.setReadOnly(True)
-            config_layout.addRow("SCD File:", self.txt_scd)
+        # SCD/ICD File Path
+        scd_path = device_config.scd_file_path
+        self.txt_scd = QLineEdit(scd_path or "")
+        self.txt_scd.setPlaceholderText("Select SCD/ICD file")
+        browse_btn = QPushButton("Browse...")
+        browse_btn.clicked.connect(self._browse_scd)
+
+        scd_row = QHBoxLayout()
+        scd_row.addWidget(self.txt_scd)
+        scd_row.addWidget(browse_btn)
+        config_layout.addRow("SCD/ICD File:", scd_row)
         
         config_group.setLayout(config_layout)
         self.layout.addWidget(config_group)
@@ -63,7 +70,7 @@ class SimulateIEDDialog(QDialog):
             "Other IEC 61850 clients can connect to this IP:Port.</i>"
         )
         note_label.setWordWrap(True)
-        note_label.setStyleSheet("color: #666; font-size: 11px;")
+        note_label.setProperty("class", "note")
         self.layout.addWidget(note_label)
         
         # Buttons
@@ -119,6 +126,16 @@ class SimulateIEDDialog(QDialog):
             if reply == QMessageBox.Yes:
                 dlg = IPConfigDialog(ip, self)
                 dlg.exec()
+
+    def _browse_scd(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select SCD/ICD File",
+            "",
+            "SCL Files (*.scd *.icd *.cid *.xml)"
+        )
+        if file_path:
+            self.txt_scd.setText(file_path)
     
     def get_simulator_config(self) -> DeviceConfig:
         """
@@ -130,6 +147,6 @@ class SimulateIEDDialog(QDialog):
             ip_address=self.txt_ip.text().strip() or "127.0.0.1",
             port=self.spin_port.value(),
             device_type=DeviceType.IEC61850_SERVER,  # Convert to server
-            scd_file_path=self.original_config.scd_file_path,
+            scd_file_path=self.txt_scd.text().strip() or None,
             protocol_params={"ied_name": self.original_config.name}
         )

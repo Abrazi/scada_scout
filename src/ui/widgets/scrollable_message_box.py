@@ -16,7 +16,7 @@ class ScrollableMessageBox(QDialog):
         # Message Label
         lbl = QLabel(message)
         lbl.setWordWrap(True)
-        lbl.setStyleSheet("font-weight: bold; margin-bottom: 5px;")
+        lbl.setProperty("class", "heading")
         layout.addWidget(lbl)
         
         # Details Area (Scrollable)

@@ -4,6 +4,7 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QTableWidget,
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont
 import logging
+from typing import Optional
 from src.models.device_models import ModbusDataType, ModbusEndianness
 from src.protocols.modbus.register_mapping import decode_mapped_value
 
@@ -47,7 +48,6 @@ class ModbusInspectorDialog(QDialog):
         
         self.btn_poll = QPushButton("Read & Inspect")
         self.btn_poll.clicked.connect(self._inspect_data)
-        self.btn_poll.setStyleSheet("font-weight: bold; background-color: #2196F3; color: white;")
         ctrl_layout.addWidget(self.btn_poll)
         
         self.btn_auto = QPushButton("Auto Update")
@@ -70,22 +70,30 @@ class ModbusInspectorDialog(QDialog):
         
         # Bottom info
         self.lbl_raw = QLabel("Raw Data: []")
-        self.lbl_raw.setStyleSheet("font-family: monospace; color: #555;")
+        self.lbl_raw.setProperty("class", "code")
         layout.addWidget(self.lbl_raw)
         
         self.lbl_bits = QLabel("Bits: ")
-        self.lbl_bits.setStyleSheet("font-family: monospace; color: #777;")
+        self.lbl_bits.setProperty("class", "code")
         layout.addWidget(self.lbl_bits)
+
+    def _set_button_class(self, button: QPushButton, class_name: Optional[str]):
+        if class_name:
+            button.setProperty("class", class_name)
+        else:
+            button.setProperty("class", "")
+        button.style().unpolish(button)
+        button.style().polish(button)
         
     def _toggle_auto(self, checked):
         if checked:
             self.timer.start(1000)
             self.btn_auto.setText("Stop Auto")
-            self.btn_auto.setStyleSheet("background-color: #F44336; color: white;")
+            self._set_button_class(self.btn_auto, "danger")
         else:
             self.timer.stop()
             self.btn_auto.setText("Auto Update")
-            self.btn_auto.setStyleSheet("")
+            self._set_button_class(self.btn_auto, None)
 
     def _inspect_data(self):
         """Poll raw registers and run all decoders"""

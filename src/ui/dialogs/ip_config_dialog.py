@@ -47,7 +47,7 @@ class IPConfigDialog(QDialog):
         
         self.lbl_command = QLabel()
         self.lbl_command.setWordWrap(True)
-        self.lbl_command.setStyleSheet("font-family: monospace; background-color: #f0f0f0; padding: 10px;")
+        self.lbl_command.setProperty("class", "code")
         cmd_layout.addWidget(self.lbl_command)
         
         cmd_group.setLayout(cmd_layout)

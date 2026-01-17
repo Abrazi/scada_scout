@@ -6,6 +6,7 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QFormLayout, QLineEdit,
                                 QDoubleSpinBox, QCheckBox, QGroupBox, QHBoxLayout,
                                 QPushButton, QMessageBox)
 from PySide6.QtCore import Qt
+from typing import Optional
 from src.models.device_models import Signal, SignalType, ModbusDataType
 
 class ModbusWriteDialog(QDialog):
@@ -40,7 +41,8 @@ class ModbusWriteDialog(QDialog):
         # Current value
         current_val = str(self.signal.value) if self.signal.value is not None else "N/A"
         self.lbl_current = QLabel(current_val)
-        self.lbl_current.setStyleSheet("font-weight: bold; color: blue;")
+        self.lbl_current.setProperty("class", "status")
+        self._set_label_status(self.lbl_current, "info")
         info_layout.addRow("Current Value:", self.lbl_current)
         
         layout.addWidget(info_group)
@@ -99,6 +101,14 @@ class ModbusWriteDialog(QDialog):
         button_layout.addWidget(self.buttons)
         
         layout.addLayout(button_layout)
+
+    def _set_label_status(self, label: QLabel, status: Optional[str]):
+        if status:
+            label.setProperty("status", status)
+        else:
+            label.setProperty("status", "")
+        label.style().unpolish(label)
+        label.style().polish(label)
     
     def _create_value_widget(self):
         """Create appropriate input widget based on signal type"""

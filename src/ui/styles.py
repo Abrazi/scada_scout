@@ -188,6 +188,21 @@ QLineEdit:disabled, QTextEdit:disabled {
     color: #95a5a6;
 }
 
+QLineEdit:read-only, QTextEdit:read-only, QPlainTextEdit:read-only {
+    background-color: #f0f2f4;
+    color: #7f8c8d;
+}
+
+QLineEdit[state="ok"] {
+    border: 2px solid #27ae60;
+    background-color: #eafaf1;
+}
+
+QLineEdit[state="error"] {
+    border: 2px solid #e74c3c;
+    background-color: #fdecea;
+}
+
 /* ==================== Combo Box ==================== */
 QComboBox {
     background-color: white;
@@ -525,6 +540,55 @@ QLabel[class="warning"] {
 QLabel[class="info"] {
     color: #3498db;
 }
+
+QLabel[class="status"] {
+    font-size: 11pt;
+    font-weight: 600;
+    padding: 6px;
+}
+
+QLabel[status="info"] {
+    color: #3498db;
+}
+
+QLabel[status="success"] {
+    color: #27ae60;
+}
+
+QLabel[status="warning"] {
+    color: #f39c12;
+}
+
+QLabel[status="error"] {
+    color: #e74c3c;
+}
+
+QLabel[class="note"] {
+    color: #6c757d;
+    font-size: 9pt;
+}
+
+QLabel[class="code"], QLabel[class="code-strong"] {
+    font-family: "Consolas", "Monaco", "Courier New", monospace;
+}
+
+QLabel[class="code"] {
+    background-color: #f0f0f0;
+    padding: 8px;
+    border: 1px solid #bdc3c7;
+    border-radius: 4px;
+}
+
+QLabel[class="code-strong"] {
+    font-weight: 600;
+    font-size: 11pt;
+}
+
+QTextEdit[class="code"], QPlainTextEdit[class="code"] {
+    font-family: "Consolas", "Monaco", "Courier New", monospace;
+    background-color: #f8f9fb;
+    border: 1px solid #bdc3c7;
+}
 """
 
 DARK_THEME = """
@@ -593,6 +657,21 @@ QLineEdit, QTextEdit, QPlainTextEdit {
     color: #e0e0e0;
 }
 
+QLineEdit:read-only, QTextEdit:read-only, QPlainTextEdit:read-only {
+    background-color: #252526;
+    color: #9da0a2;
+}
+
+QLineEdit[state="ok"] {
+    border: 2px solid #27ae60;
+    background-color: #1e2f24;
+}
+
+QLineEdit[state="error"] {
+    border: 2px solid #e74c3c;
+    background-color: #3a1f1f;
+}
+
 QComboBox {
     background-color: #2d2d30;
     border: 1px solid #3e3e42;
@@ -629,6 +708,60 @@ QScrollBar::handle:vertical, QScrollBar::handle:horizontal {
 
 QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover {
     background-color: #4e4e4e;
+}
+
+QDialog {
+    background-color: #1e1e1e;
+}
+
+QLabel[class="status"] {
+    font-size: 11pt;
+    font-weight: 600;
+    padding: 6px;
+}
+
+QLabel[status="info"] {
+    color: #4aa3ff;
+}
+
+QLabel[status="success"] {
+    color: #2ecc71;
+}
+
+QLabel[status="warning"] {
+    color: #f1c40f;
+}
+
+QLabel[status="error"] {
+    color: #e74c3c;
+}
+
+QLabel[class="note"] {
+    color: #a0a4a8;
+    font-size: 9pt;
+}
+
+QLabel[class="code"], QLabel[class="code-strong"] {
+    font-family: "Consolas", "Monaco", "Courier New", monospace;
+}
+
+QLabel[class="code"] {
+    background-color: #252526;
+    padding: 8px;
+    border: 1px solid #3e3e42;
+    border-radius: 4px;
+}
+
+QLabel[class="code-strong"] {
+    font-weight: 600;
+    font-size: 11pt;
+}
+
+QTextEdit[class="code"], QPlainTextEdit[class="code"] {
+    font-family: "Consolas", "Monaco", "Courier New", monospace;
+    background-color: #252526;
+    border: 1px solid #3e3e42;
+    color: #d4d4d4;
 }
 """
 
@@ -804,6 +937,21 @@ QLineEdit:focus {{
 QLineEdit:disabled {{
     background-color: #ecf0f1;
     color: #95a5a6;
+}}
+
+QLineEdit:read-only {{
+    background-color: #f0f2f4;
+    color: #7f8c8d;
+}}
+
+QLineEdit[state="ok"] {{
+    border: 2px solid {success_color};
+    background-color: rgba(39, 174, 96, 0.12);
+}}
+
+QLineEdit[state="error"] {{
+    border: 2px solid {error_color};
+    background-color: rgba(231, 76, 60, 0.12);
 }}
 
 /* ==================== Combo Box ==================== */
@@ -1185,5 +1333,54 @@ QLabel[class="status-warning"] {{
 QLabel[class="status-error"] {{
     color: {error_color};
     font-weight: bold;
+}}
+
+QLabel[class="status"] {{
+    font-size: 11pt;
+    font-weight: 600;
+    padding: 6px;
+}}
+
+QLabel[status="info"] {{
+    color: {primary_color};
+}}
+
+QLabel[status="success"] {{
+    color: {success_color};
+}}
+
+QLabel[status="warning"] {{
+    color: {warning_color};
+}}
+
+QLabel[status="error"] {{
+    color: {error_color};
+}}
+
+QLabel[class="note"] {{
+    color: {text_color};
+    font-size: 9pt;
+}}
+
+QLabel[class="code"], QLabel[class="code-strong"] {{
+    font-family: "Consolas", "Monaco", "Courier New", monospace;
+}}
+
+QLabel[class="code"] {{
+    background-color: #f0f0f0;
+    padding: 8px;
+    border: 1px solid #bdc3c7;
+    border-radius: 4px;
+}}
+
+QLabel[class="code-strong"] {{
+    font-weight: 600;
+    font-size: 11pt;
+}}
+
+QTextEdit[class="code"], QPlainTextEdit[class="code"] {{
+    font-family: "Consolas", "Monaco", "Courier New", monospace;
+    background-color: #f8f9fb;
+    border: 1px solid #bdc3c7;
 }}
 """

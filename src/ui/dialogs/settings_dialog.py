@@ -505,7 +505,10 @@ For more details, see README.md and docs/ folder.
                 self._dumpcap_warning_label.setText(
                     "dumpcap not found on PATH — install Wireshark/dumpcap or use the Copy setcap button."
                 )
-                self._dumpcap_warning_label.setStyleSheet("color: #c0392b;")
+                self._dumpcap_warning_label.setProperty("class", "status")
+                self._dumpcap_warning_label.setProperty("status", "warning")
+                self._dumpcap_warning_label.style().unpolish(self._dumpcap_warning_label)
+                self._dumpcap_warning_label.style().polish(self._dumpcap_warning_label)
                 self._dumpcap_warning_label.setVisible(True)
             else:
                 self._dumpcap_warning_label.setVisible(False)

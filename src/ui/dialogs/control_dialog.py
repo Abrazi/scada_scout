@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QDateTime
 import logging
 from datetime import datetime
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +56,7 @@ class ControlDialog(QDialog):
                 self.obj_ref = ".".join(parts)
         
         self.lbl_ref = QLabel(self.obj_ref)
-        self.lbl_ref.setStyleSheet("font-weight: bold")
+        self.lbl_ref.setProperty("class", "subheading")
         info_layout.addRow("Control Object:", self.lbl_ref)
         
         self.lbl_full_ref = QLabel(self.signal.address)
@@ -75,7 +76,7 @@ class ControlDialog(QDialog):
         model_row = QHBoxLayout()
         self.txt_control_model = QLineEdit()
         self.txt_control_model.setReadOnly(True)
-        self.txt_control_model.setStyleSheet("background-color: lightgray")
+        self._set_field_state(self.txt_control_model, None)
         model_row.addWidget(self.txt_control_model)
         
         self.btn_read_model = QPushButton("Read Model")
@@ -86,7 +87,8 @@ class ControlDialog(QDialog):
         # Current Value Row
         val_row = QHBoxLayout()
         self.lbl_current_val = QLabel("Reading...")
-        self.lbl_current_val.setStyleSheet("color: blue")
+        self.lbl_current_val.setProperty("class", "status")
+        self._set_label_status(self.lbl_current_val, "info")
         val_row.addWidget(self.lbl_current_val)
         
         self.btn_refresh = QPushButton("Refresh")
@@ -184,7 +186,8 @@ class ControlDialog(QDialog):
         
         self.lbl_status = QLabel("Ready. Please read control model first.")
         self.lbl_status.setWordWrap(True)
-        self.lbl_status.setStyleSheet("font-size: 14px; padding: 5px;")
+        self.lbl_status.setProperty("class", "status")
+        self._set_label_status(self.lbl_status, "info")
         status_layout.addWidget(self.lbl_status)
         
         main_layout.addWidget(status_group)
@@ -193,27 +196,22 @@ class ControlDialog(QDialog):
         btn_layout = QHBoxLayout()
         
         self.btn_select = QPushButton("1. Select (SBO)")
-        self.btn_select.setFixedHeight(40)
         self.btn_select.clicked.connect(self._on_select)
         self.btn_select.setEnabled(False)
         
         self.btn_operate = QPushButton("2. Operate")
-        self.btn_operate.setFixedHeight(40)
         self.btn_operate.clicked.connect(self._on_operate)
         self.btn_operate.setEnabled(False)
         
         self.btn_direct = QPushButton("Direct Control")
-        self.btn_direct.setFixedHeight(40)
         self.btn_direct.clicked.connect(self._on_direct)
         self.btn_direct.setEnabled(False)
         
         self.btn_abort = QPushButton("Abort Selection (Cancel)")
-        self.btn_abort.setFixedHeight(40)
         self.btn_abort.clicked.connect(self._on_abort)
         self.btn_abort.setEnabled(False)
         
         self.btn_close = QPushButton("Close")
-        self.btn_close.setFixedHeight(40)
         self.btn_close.clicked.connect(self.reject)
         
         btn_layout.addWidget(self.btn_select)
@@ -225,6 +223,22 @@ class ControlDialog(QDialog):
         
         main_layout.addLayout(btn_layout)
 
+    def _set_label_status(self, label: QLabel, status: Optional[str]):
+        if status:
+            label.setProperty("status", status)
+        else:
+            label.setProperty("status", "")
+        label.style().unpolish(label)
+        label.style().polish(label)
+
+    def _set_field_state(self, field: QLineEdit, state: Optional[str]):
+        if state:
+            field.setProperty("state", state)
+        else:
+            field.setProperty("state", "")
+        field.style().unpolish(field)
+        field.style().polish(field)
+
     def _get_adapter(self):
         """Get the protocol adapter for this device."""
         return self.device_manager.get_protocol(self.device_name)
@@ -235,7 +249,7 @@ class ControlDialog(QDialog):
         Step 1 of the strict control lifecycle.
         """
         self.lbl_status.setText("Initializing control context...")
-        self.lbl_status.setStyleSheet("color: blue")
+        self._set_label_status(self.lbl_status, "info")
         
         try:
             adapter = self._get_adapter()
@@ -273,23 +287,23 @@ class ControlDialog(QDialog):
                     self.txt_control_model.setText(f"{name}{cap_str}")
                     
                     if self.detected_control_model == 0:
-                        self.txt_control_model.setStyleSheet("background-color: #ffcccc") 
+                        self._set_field_state(self.txt_control_model, "error")
                     else:
-                        self.txt_control_model.setStyleSheet("background-color: #ccffcc") 
+                        self._set_field_state(self.txt_control_model, "ok")
                     
                     self._update_button_states()
                     self.lbl_status.setText(f"Context Initialized: {name}")
-                    self.lbl_status.setStyleSheet("color: green")
+                    self._set_label_status(self.lbl_status, "success")
                 else:
                     self.lbl_status.setText("Control NOT support (ctlModel=0 or missing)")
                     self.txt_control_model.setText("Not Supported")
-                    self.txt_control_model.setStyleSheet("background-color: #ffcccc")
+                    self._set_field_state(self.txt_control_model, "error")
             else:
                 self.lbl_status.setText("Error: Adapter does not support JIT Context")
 
         except Exception as e:
             self.lbl_status.setText(f"Error initializing context: {e}")
-            self.lbl_status.setStyleSheet("color: red")
+            self._set_label_status(self.lbl_status, "error")
 
     def _update_button_states(self):
         model = self.detected_control_model
@@ -329,10 +343,10 @@ class ControlDialog(QDialog):
                 
                 if res.value is not None:
                     self.lbl_current_val.setText(str(res.value))
-                    self.lbl_current_val.setStyleSheet("color: blue")
+                    self._set_label_status(self.lbl_current_val, "info")
                 else:
                     self.lbl_current_val.setText("NULL (Read Failed)")
-                    self.lbl_current_val.setStyleSheet("color: red")
+                    self._set_label_status(self.lbl_current_val, "error")
         except Exception as e:
             self.lbl_current_val.setText(str(e))
 
@@ -377,24 +391,24 @@ class ControlDialog(QDialog):
             val = self._get_value()
             
             self.lbl_status.setText("Selecting Module...")
-            self.lbl_status.setStyleSheet("color: blue")
+            self._set_label_status(self.lbl_status, "info")
             QApplication.processEvents()
 
             if adapter.select(self.signal, value=val, params=params):
                 self.lbl_status.setText("SELECT Successful (Ready to Operate)")
-                self.lbl_status.setStyleSheet("color: green")
+                self._set_label_status(self.lbl_status, "success")
                 self.selected = True 
                 self._update_button_states()
             else:
                 self.lbl_status.setText("SELECT FAILED (Check device logs)")
-                self.lbl_status.setStyleSheet("color: red")
+                self._set_label_status(self.lbl_status, "error")
         except Exception as e:
             self.lbl_status.setText(f"Select Error: {e}")
-            self.lbl_status.setStyleSheet("color: red")
+            self._set_label_status(self.lbl_status, "error")
 
     def _on_operate(self):
         self.lbl_status.setText("Operating...")
-        self.lbl_status.setStyleSheet("color: blue")
+        self._set_label_status(self.lbl_status, "info")
         QApplication.processEvents()
         
         try:
@@ -417,7 +431,7 @@ class ControlDialog(QDialog):
                 success = adapter.send_command(self.signal, val, params=params)
                 if success:
                     self.lbl_status.setText("SBO SEQUENCE SUCCESSFUL")
-                    self.lbl_status.setStyleSheet("color: green")
+                    self._set_label_status(self.lbl_status, "success")
                     self.selected = False  # Reset selection state
                     
                     # Update ctlNum in UI for next time (auto-incremented in adapter)
@@ -428,14 +442,14 @@ class ControlDialog(QDialog):
                     self._load_current_value()
                 else:
                     self.lbl_status.setText("SBO SEQUENCE FAILED")
-                    self.lbl_status.setStyleSheet("color: red")
+                    self._set_label_status(self.lbl_status, "error")
             else:
                 # Direct operate or already selected SBO
                 success = adapter.operate(self.signal, val, params=params)
                 
                 if success:
                     self.lbl_status.setText("OPERATE SUCCESSFUL")
-                    self.lbl_status.setStyleSheet("color: green")
+                    self._set_label_status(self.lbl_status, "success")
                     self.selected = False 
                     
                     # Update ctlNum in UI for next time (auto-incremented in adapter)
@@ -446,10 +460,10 @@ class ControlDialog(QDialog):
                     self._load_current_value()
                 else:
                     self.lbl_status.setText("OPERATE FAILED")
-                    self.lbl_status.setStyleSheet("color: red")
+                    self._set_label_status(self.lbl_status, "error")
         except Exception as e:
             self.lbl_status.setText(f"Error: {e}")
-            self.lbl_status.setStyleSheet("color: red")
+            self._set_label_status(self.lbl_status, "error")
 
     def _on_direct(self):
         # Same as operate, but without selection check (adapter handles it)
@@ -462,17 +476,17 @@ class ControlDialog(QDialog):
             if not adapter: return
             
             self.lbl_status.setText("Aborting Selection...")
-            self.lbl_status.setStyleSheet("color: blue")
+            self._set_label_status(self.lbl_status, "info")
             QApplication.processEvents()
             
             if adapter.cancel(self.signal):
                 self.lbl_status.setText("Selection Aborted Successfully")
-                self.lbl_status.setStyleSheet("color: green")
+                self._set_label_status(self.lbl_status, "success")
                 self.selected = False
                 self._update_button_states()
             else:
                 self.lbl_status.setText("Abort Failed")
-                self.lbl_status.setStyleSheet("color: red")
+                self._set_label_status(self.lbl_status, "error")
         except Exception as e:
             self.lbl_status.setText(f"Abort Error: {e}")
 
