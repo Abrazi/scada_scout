@@ -37,6 +37,12 @@ class SimulateIEDDialog(QDialog):
         self.txt_ied_name = QLineEdit(device_config.name)
         self.txt_ied_name.setReadOnly(True)
         config_layout.addRow("IED Name:", self.txt_ied_name)
+
+        # Simulator Name (editable to avoid conflicts)
+        default_sim_name = f"{device_config.name}_sim"
+        self.txt_sim_name = QLineEdit(default_sim_name)
+        self.txt_sim_name.setPlaceholderText(default_sim_name)
+        config_layout.addRow("Simulator Name:", self.txt_sim_name)
         
         # IP Address (default to 0.0.0.0 for network accessibility)
         self.txt_ip = QLineEdit("0.0.0.0")  # Listen on all interfaces by default
@@ -147,8 +153,9 @@ class SimulateIEDDialog(QDialog):
         """
         Create a new DeviceConfig for the simulator based on the original.
         """
+        sim_name = self.txt_sim_name.text().strip() or f"{self.original_config.name}_sim"
         return DeviceConfig(
-            name=self.original_config.name,
+            name=sim_name,
             description=f"Simulator: {self.original_config.description}" if self.original_config.description else "IEC 61850 Simulator",
             ip_address=self.txt_ip.text().strip() or "0.0.0.0",  # Default to all interfaces
             port=self.spin_port.value(),

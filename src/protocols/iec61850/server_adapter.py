@@ -136,16 +136,25 @@ class IEC61850ServerAdapter(BaseProtocol):
                 logger.warning(f"Failed to register SBO handlers: {e}")
 
             # Start the server
-            logger.info(f"Starting IEC61850 server on {self.config.ip_address}:{self.config.port}")
+            logger.info(f"Starting IEC61850 server on {bind_ip}:{self.config.port}")
             start_result = lib.IedServer_start(self.server, int(self.config.port))
 
             # Some libiec61850 builds return void; check isRunning if so
             if start_result is None:
                 is_running = False
-                try:
-                    is_running = bool(lib.IedServer_isRunning(self.server))
-                except Exception:
-                    is_running = False
+                # Retry a few times to avoid false negatives right after start
+                for _ in range(5):
+                    try:
+                        is_running = bool(lib.IedServer_isRunning(self.server))
+                    except Exception:
+                        is_running = False
+                    if is_running:
+                        break
+                    try:
+                        import time
+                        time.sleep(0.1)
+                    except Exception:
+                        pass
                 if is_running:
                     self.connected = True
                     logger.info("IEC61850 server started successfully")
@@ -157,7 +166,7 @@ class IEC61850ServerAdapter(BaseProtocol):
                             f"✅ Started IEC 61850 server '{self.ied_name}' on {bind_info}"
                         )
                     return True
-                raise RuntimeError("Failed to start IEC61850 server (isRunning=false)")
+                raise RuntimeError(f"Failed to start IEC61850 server (isRunning=false) on {bind_ip}:{self.config.port}")
 
             # Check if server actually started (when return code is available)
             if start_result == 0:  # 0 = success in libiec61850

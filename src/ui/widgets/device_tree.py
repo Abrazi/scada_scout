@@ -1598,6 +1598,14 @@ class DeviceTreeWidget(QWidget):
         dialog = SimulateIEDDialog(device.config, self)
         if dialog.exec() == QDialog.Accepted:
             sim_config = dialog.get_simulator_config()
+
+            # Ensure unique simulator name to avoid overwriting existing device
+            base_name = sim_config.name
+            if self.device_manager.get_device(base_name):
+                idx = 1
+                while self.device_manager.get_device(f"{base_name}_{idx}"):
+                    idx += 1
+                sim_config.name = f"{base_name}_{idx}"
             
             # Add the simulator as a new device
             try:
@@ -1613,7 +1621,7 @@ class DeviceTreeWidget(QWidget):
                     self,
                     "Simulator Starting",
                     f"✅ IEC 61850 simulator is starting...\n\n"
-                    f"IED Name: {sim_config.name}\n"
+                    f"Simulator Name: {sim_config.name}\n"
                     f"Listen Port: {sim_config.port} {bind_msg}\n\n"
                     f"Clients can connect to:\n"
                     f"  • Localhost: 127.0.0.1:{sim_config.port}\n"
