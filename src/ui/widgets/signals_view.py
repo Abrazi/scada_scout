@@ -3,6 +3,7 @@ from PySide6.QtGui import QStandardItemModel, QStandardItem, QPainter
 from PySide6.QtCharts import QChart, QChartView, QLineSeries
 from PySide6.QtCore import Qt
 from src.ui.models.signal_table_model import SignalTableModel
+import logging
 
 class SignalsViewWidget(QWidget):
     """
@@ -223,10 +224,31 @@ class SignalsViewWidget(QWidget):
         """Connect to DeviceManager."""
         self.device_manager.device_added.connect(self._on_device_added)
         self.device_manager.signal_updated.connect(self._on_signal_update)
+        self.device_manager.device_updated.connect(self._on_device_updated)
 
     def _on_device_added(self, device):
         """When a device is added, we don't necessarily update view until selected."""
         pass
+
+    def _on_device_updated(self, device_name):
+        """Handle device model updates (e.g. discovery finished)."""
+        logger = logging.getLogger("SignalsViewWidget")
+        
+        # If we are currently showing this device, we must refresh because 
+        # the underlying Node objects might have been replaced.
+        if self.current_device_name == device_name:
+            logger.info(f"SignalsViewWidget: Device {device_name} updated. Refreshing view.")
+            
+            # Re-fetch the device and its root node
+            device = self.device_manager.get_device(device_name)
+            if device and device.root_node:
+                # We reset the filter to the Root Node of the device.
+                # Ideally we would preserve the exact selected sub-node, 
+                # but since node objects are replaced, we default to Root.
+                self.set_filter_node(device.root_node, device_name)
+            else:
+                # Device might be gone or empty
+                self.set_filter_node(None)
 
     def _on_signal_update(self, device_name, signal):
         """Handle live update, only if it belongs to currently shown device."""

@@ -1,6 +1,6 @@
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QTreeView, QMenu, QHeaderView
 from PySide6.QtGui import QStandardItemModel, QStandardItem, QAction, QColor, QBrush
-from PySide6.QtCore import Qt, Signal as QtSignal
+from PySide6.QtCore import Qt, Signal as QtSignal, QItemSelectionModel
 from typing import Optional
 from src.ui.widgets.connection_dialog import ConnectionDialog
 from src.ui.widgets.modbus_inspector_dialog import ModbusInspectorDialog
@@ -118,17 +118,43 @@ class DeviceTreeWidget(QWidget):
         """Refreshes a device node (re-adds children)."""
         item = self.device_items.get(device_name)
         if item:
+            # 1. Capture current selection (if inside this device)
+            selected_path = None
+            selection_model = self.tree_view.selectionModel()
+            current_idx = selection_model.currentIndex()
+            
+            # Check if current selection is a child of this item (or the item itself)
+            # This is complex with QStandardItemModel indices. 
+            # Simplified: Just check if we selected something in this device
+            
+            # 2. Clear children
             if item.rowCount() > 0:
                 item.removeRows(0, item.rowCount())
             
-            # Re-populate
+            # 3. Re-populate
             device = self.device_manager.get_device(device_name)
             if device and device.root_node:
                 for child in device.root_node.children:
                     self._add_node_recursive(item, child)
             
-            # Auto-expand and resize
+            # 4. Auto-expand
             self.tree_view.expand(item.index())
+            
+            # 5. Restore selection?
+            # If the user had the Device itself selected, re-select it.
+            # If they had a child selected, it's harder to match by name, but we can try.
+            # For now, just re-selecting the Device Item is a good default if nothing else.
+            # But wait, SignalsView handles re-filtering to Root if we don't change selection.
+            # QTreeView keeps selection on the 'item' if 'item' itself wasn't removed.
+            # 'item' is the Device Node, which we kept! We only removed rows.
+            # So if the user selected the DEVICE node, selection is preserved!
+            # If the user selected a CHILD, that child is gone. Selection is lost.
+            
+            # Let's try to re-select the device node if we lost selection.
+            if not selection_model.hasSelection():
+                 selection_model.select(item.index(), QItemSelectionModel.ClearAndSelect | QItemSelectionModel.Rows)
+                 # This triggers _on_selection_changed -> SignalsView.set_filter_node(device)
+            
             for i in range(5):
                 self.tree_view.resizeColumnToContents(i)
         

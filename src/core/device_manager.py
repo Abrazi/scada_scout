@@ -51,6 +51,11 @@ class DeviceManager(QObject):
         logger.info(f"Device added: {config.name} ({config.device_type.value})")
         self.device_added.emit(device)
         self.save_configuration()
+        
+        # Try to populate tree immediately (Offline Discovery)
+        # This handles Modbus maps/blocks and SCD files
+        self.load_offline_scd(config.name)
+        
         return device
 
     def remove_device(self, device_name: str):
@@ -182,9 +187,11 @@ class DeviceManager(QObject):
         if not device:
             return
         
-        # Require either SCD path OR it's a Modbus device with maps
+        # Require either SCD path OR it's a Modbus device with maps or blocks
         is_modbus = device.config.device_type in [DeviceType.MODBUS_TCP, DeviceType.MODBUS_SERVER]
-        has_maps = len(device.config.modbus_register_maps) > 0 or len(device.config.modbus_slave_mappings) > 0
+        has_maps = (len(device.config.modbus_register_maps) > 0 or 
+                    len(device.config.modbus_slave_mappings) > 0 or
+                    len(device.config.modbus_slave_blocks) > 0)
         
         if not device.config.scd_file_path and not (is_modbus and has_maps):
             return

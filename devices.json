@@ -16,7 +16,19 @@
             "modbus_unit_id": 1,
             "modbus_timeout": 3.0,
             "modbus_register_maps": [],
-            "modbus_slave_mappings": [],
+            "modbus_slave_mappings": [
+                {
+                    "address": 300,
+                    "name": "Point_300",
+                    "description": "",
+                    "data_type": "Signed 32-bit",
+                    "endianness": "Big-endian (ABCD)",
+                    "scale": 1.0,
+                    "offset": 0.0,
+                    "writable": true,
+                    "string_length": 10
+                }
+            ],
             "modbus_slave_blocks": [
                 {
                     "name": "Block 1",
@@ -26,6 +38,37 @@
                     "description": ""
                 }
             ]
+        },
+        {
+            "name": "2",
+            "ip_address": "127.0.0.1",
+            "port": 5020,
+            "folder": "20",
+            "description": "",
+            "device_type": "Modbus TCP",
+            "enabled": true,
+            "scd_file_path": null,
+            "use_scd_discovery": true,
+            "protocol_params": {},
+            "polling_enabled": false,
+            "poll_interval": 1.0,
+            "modbus_unit_id": 1,
+            "modbus_timeout": 3.0,
+            "modbus_register_maps": [
+                {
+                    "start_address": 300,
+                    "count": 10,
+                    "function_code": 3,
+                    "data_type": "Signed 16-bit",
+                    "name_prefix": "g1",
+                    "description": "3: Read Holding Registers range",
+                    "scale": 1.0,
+                    "offset": 0.0,
+                    "endianness": "Big-endian (ABCD)"
+                }
+            ],
+            "modbus_slave_mappings": [],
+            "modbus_slave_blocks": []
         }
     ],
     "folders": {}

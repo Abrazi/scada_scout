@@ -8,6 +8,9 @@ from typing import Dict, Callable, Optional, Any, List
 from datetime import datetime
 from dataclasses import dataclass, field
 
+
+logger = logging.getLogger(__name__)
+
 try:
     # pymodbus 3.x imports (verified for 3.11.x)
     from pymodbus.server import StartTcpServer, StartAsyncTcpServer, ServerAsyncStop
@@ -237,7 +240,8 @@ class ModbusSlaveServer:
             # Create server context (supports multiple slaves)
             # Use the specified unit_id from config
             # FIX: Use 'devices' instead of 'slaves' for pymodbus 3.x
-            self.context = ModbusServerContext(devices={self.config.unit_id: store}, single=True)
+            # FIX: Set single=False because we are passing a dict of {unit_id: store}
+            self.context = ModbusServerContext(devices={self.config.unit_id: store}, single=False)
             
             # Device identification
             identity = ModbusDeviceIdentification()
