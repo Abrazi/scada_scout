@@ -49,7 +49,12 @@ class ModbusSlaveWidget(QWidget):
             self.btn_start.setEnabled(False)
             self.btn_stop.setEnabled(True)
             self.lbl_status.setText(f"Server: Running on port {self.server.config.port}")
-            self.lbl_status.setStyleSheet("font-weight: bold; color: green; padding: 5px;")
+            try:
+                self.lbl_status.setProperty("status", "success")
+                self.lbl_status.style().unpolish(self.lbl_status)
+                self.lbl_status.style().polish(self.lbl_status)
+            except Exception:
+                pass
             self.update_timer.start(1000)
     
     def _setup_ui(self):
@@ -94,20 +99,32 @@ class ModbusSlaveWidget(QWidget):
         
         self.btn_start = QPushButton("Start Server")
         self.btn_start.clicked.connect(self._start_server)
-        self.btn_start.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
+        # Use themed button class
+        self.btn_start.setProperty("class", "success")
+        self.btn_start.style().unpolish(self.btn_start)
+        self.btn_start.style().polish(self.btn_start)
         btn_layout.addWidget(self.btn_start)
         
         self.btn_stop = QPushButton("Stop Server")
         self.btn_stop.clicked.connect(self._stop_server)
         self.btn_stop.setEnabled(False)
-        self.btn_stop.setStyleSheet("background-color: #f44336; color: white; font-weight: bold;")
+        self.btn_stop.setProperty("class", "danger")
+        self.btn_stop.style().unpolish(self.btn_stop)
+        self.btn_stop.style().polish(self.btn_stop)
         btn_layout.addWidget(self.btn_stop)
         
         control_layout.addLayout(btn_layout)
         
         # Status display
         self.lbl_status = QLabel("Server: Stopped")
-        self.lbl_status.setStyleSheet("font-weight: bold; color: red; padding: 5px;")
+        self.lbl_status.setProperty("class", "status")
+        # default to error status visual
+        try:
+            self.lbl_status.setProperty("status", "error")
+            self.lbl_status.style().unpolish(self.lbl_status)
+            self.lbl_status.style().polish(self.lbl_status)
+        except Exception:
+            pass
         control_layout.addWidget(self.lbl_status)
         
         layout.addWidget(control_group)
@@ -546,7 +563,9 @@ class ModbusSlaveWidget(QWidget):
         
         self.txt_stats = QTextEdit()
         self.txt_stats.setReadOnly(True)
-        self.txt_stats.setStyleSheet("font-family: monospace;")
+        self.txt_stats.setProperty("class", "code")
+        self.txt_stats.style().unpolish(self.txt_stats)
+        self.txt_stats.style().polish(self.txt_stats)
         
         layout.addWidget(self.txt_stats)
         
@@ -601,7 +620,12 @@ class ModbusSlaveWidget(QWidget):
             self.btn_stop.setEnabled(True)
             port = self.spin_port.value()
             self.lbl_status.setText(f"Server: Running on port {port}")
-            self.lbl_status.setStyleSheet("font-weight: bold; color: green; padding: 5px;")
+            try:
+                self.lbl_status.setProperty("status", "success")
+                self.lbl_status.style().unpolish(self.lbl_status)
+                self.lbl_status.style().polish(self.lbl_status)
+            except Exception:
+                pass
             
             # Start update timer
             self.update_timer.start(1000)
@@ -635,7 +659,12 @@ class ModbusSlaveWidget(QWidget):
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
         self.lbl_status.setText("Server: Stopped")
-        self.lbl_status.setStyleSheet("font-weight: bold; color: red; padding: 5px;")
+        try:
+            self.lbl_status.setProperty("status", "error")
+            self.lbl_status.style().unpolish(self.lbl_status)
+            self.lbl_status.style().polish(self.lbl_status)
+        except Exception:
+            pass
         
         self.server_stopped.emit()
     

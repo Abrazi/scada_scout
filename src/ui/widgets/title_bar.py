@@ -19,9 +19,8 @@ class TitleBarWidget(QWidget):
         self.setAttribute(Qt.WA_TransparentForMouseEvents, False)
         self.setFixedHeight(36)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        # Background to match the QMenuBar color from styles.PROFESSIONAL_STYLE
-        # Use an exact color so the title area and menu blend seamlessly.
-        self.setStyleSheet("background-color: #2c3e50;")
+        # Mark titlebar widget so theme can style it (matches QMenuBar)
+        self.setProperty("class", "titlebar")
         # Allow custom context menu handling (right-click)
         self.setContextMenuPolicy(Qt.DefaultContextMenu)
 
@@ -54,24 +53,19 @@ class TitleBarWidget(QWidget):
         for b in (self.btn_min, self.btn_max, self.btn_close):
             b.setFlat(True)
             b.setCursor(Qt.ArrowCursor)
-            # stronger hover colors and visible icons
+            # Use button class to let stylesheet control hover/pressed styles
             if b is self.btn_close:
-                b.setStyleSheet("""
-                    QPushButton { background: transparent; border: none; }
-                    QPushButton:hover { background: #e74c3c; border-radius: 4px; }
-                    QPushButton:pressed { background: #c0392b; }
-                """)
+                b.setProperty("class", "danger")
             else:
-                b.setStyleSheet("""
-                    QPushButton { background: transparent; border: none; }
-                    QPushButton:hover { background: rgba(255,255,255,0.08); border-radius: 4px; }
-                    QPushButton:pressed { background: rgba(255,255,255,0.14); }
-                """)
+                b.setProperty("class", "")
+            b.style().unpolish(b)
+            b.style().polish(b)
 
         # Title label on the left
         self.title_label = QLabel(self._window.windowTitle() if self._window else "")
         self.title_label.setObjectName("TitleBarTitle")
-        self.title_label.setStyleSheet("color: #e6e6e6; font-weight: 600; font-size: 11pt;")
+        # Let stylesheet control title label appearance
+        self.title_label.setProperty("class", "title")
         layout.addWidget(self.title_label)
         layout.addStretch()
         layout.addWidget(self.btn_min)

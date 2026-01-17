@@ -107,7 +107,12 @@ class SCDImportDialog(QDialog):
              return
 
         if self.event_logger:
-            self.event_logger.info("SCDImport", f"Successfully parsed SCD: {len(ieds)} IEDs found")
+            # Keep Event Log tidy: demote detailed parse info to debug-only
+            try:
+                logger = __import__('logging').getLogger(__name__)
+                logger.debug(f"Parsed SCD: {len(ieds)} IEDs found in {self.scd_path}")
+            except Exception:
+                pass
 
         self.parsed_ieds = ieds
         self._populate_table()

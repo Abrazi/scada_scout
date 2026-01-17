@@ -480,4 +480,58 @@ class ModbusTCPAdapter(BaseProtocol):
         """
         Cancel selection. No-op for Modbus.
         """
-        return True
+        return True    
+    # Device Properties Retrieval Methods
+    
+    def get_device_info(self) -> dict:
+        """Get comprehensive device information for properties dialog."""
+        info = {
+            "unit_id": self.unit_id,
+            "timeout": self.timeout,
+            "connected": self.connected,
+            "register_maps_count": len(self.config.modbus_register_maps),
+            "total_registers": 0,
+            "function_codes_used": set()
+        }
+        
+        # Calculate total registers and function codes
+        for reg_map in self.config.modbus_register_maps:
+            info["total_registers"] += reg_map.count
+            info["function_codes_used"].add(reg_map.function_code)
+        
+        info["function_codes_used"] = list(info["function_codes_used"])
+        
+        return info
+    
+    def get_register_map_details(self) -> list:
+        """Get detailed information about register mappings."""
+        details = []
+        
+        for reg_map in self.config.modbus_register_maps:
+            map_info = {
+                "name": reg_map.name,
+                "function_code": reg_map.function_code,
+                "start_address": reg_map.start_address,
+                "count": reg_map.count,
+                "data_type": reg_map.data_type.value if hasattr(reg_map, 'data_type') else "Default",
+                "endianness": reg_map.endianness.value if hasattr(reg_map, 'endianness') else "Big-endian",
+                "scale": getattr(reg_map, 'scale', 1.0),
+                "offset": getattr(reg_map, 'offset', 0.0),
+                "description": getattr(reg_map, 'description', "")
+            }
+            details.append(map_info)
+        
+        return details
+    
+    def get_connection_stats(self) -> dict:
+        """Get connection statistics."""
+        stats = {
+            "connected": self.connected,
+            "ip_address": self.config.ip_address,
+            "port": self.config.port,
+            "unit_id": self.unit_id,
+            "timeout": self.timeout,
+            "pymodbus_available": HAS_PYMODBUS
+        }
+        
+        return stats

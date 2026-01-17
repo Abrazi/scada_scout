@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+"""
+Quick diagnostic: What to check in the GUI
+"""
+
+print("""
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                  SIMULATOR NOT ACCESSIBLE - DIAGNOSIS                        ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+The code changes are CORRECT (verified by tests).
+The issue is the server isn't running. Here's how to fix it:
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ STEP 1: CHECK IF SIMULATOR IS ACTUALLY RUNNING                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+In SCADA Scout GUI, look in the Device Tree (left panel):
+
+  ❓ Do you see a device with type "IEC61850_SERVER"?
+  ❓ Does it have a green "connected" icon?
+  ❓ Is it listed under "Devices"?
+
+If NO → The simulator wasn't started! Continue to Step 2.
+If YES → Skip to Step 3.
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ STEP 2: START THE SIMULATOR PROPERLY                                        │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+METHOD A: From Imported IED
+────────────────────────────
+1. You must first IMPORT an IED from SCD/ICD:
+   • File → Import SCD/ICD  (or Add Device → Import from SCD/ICD)
+   • Select your test.scd or test.icd file
+   • Choose ONE IED to import
+   • It will appear in device tree
+
+2. RIGHT-CLICK on that imported IED
+   • Select "Start Simulator for this IED..."
+   • Dialog appears with settings:
+     ┌─────────────────────────────────────┐
+     │ IED Name: <pre-filled>              │
+     │ Listen IP: 0.0.0.0                  │  ← Leave as is!
+     │ Listen Port: 10002                  │  ← Choose any port
+     │ SCD/ICD File: <pre-filled>          │
+     └─────────────────────────────────────┘
+   • Click OK
+
+3. A NEW device will be created (type: IEC61850_SERVER)
+   • This is the SIMULATOR
+   • It will have a different icon
+   • It should show "connected" status
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ STEP 3: VERIFY IN EVENT LOG                                                 │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+Check the Event Log panel (bottom of window) for these messages:
+
+  ✅ [INFO] IEC61850Server: Successfully created dynamic model from SCD/ICD
+     IED: <name>
+     Logical Devices: 33 (or similar number)
+     Total Attributes: 7898 (or similar number)
+
+  ✅ [INFO] IEC61850Server: Started IEC 61850 server '<name>' on 
+     0.0.0.0:10002 (accessible on all network interfaces)
+
+If you see these → Server is running! Continue to Step 4.
+If NOT → Check for ERROR messages in Event Log.
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ STEP 4: VERIFY WITH TERMINAL CHECK                                          │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+Open terminal in SCADA Scout directory and run:
+
+  python3 check_server_status.py
+
+Expected output if server IS running:
+  ✅ 127.0.0.1:10002 - Port is OPEN (server listening)
+
+If you see CLOSED → Server isn't actually running despite what GUI shows!
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ STEP 5: CONNECT CLIENT TO SIMULATOR                                         │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+Once server is verified running:
+
+1. Add a NEW device (not the simulator):
+   • Add Device → IEC 61850 IED
+   • Name: TestClient
+   • IP Address: 127.0.0.1  (localhost)
+   • Port: 10002  (SAME as simulator port)
+   • Click OK
+
+2. Connect to it:
+   • Right-click TestClient
+   • Click "Connect"
+   • Watch Event Log for:
+     ✅ [INFO] Connection: IEC 61850 connection established
+     ✅ [INFO] Connection: Connection ready for operations
+
+3. If you see ERROR:
+   • "Connection rejected" → Server not running, go back to Step 1
+   • Check port number matches
+   • Make sure simulator device shows "connected" status
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ COMMON MISTAKES                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+❌ Trying to connect to the WRONG device
+   → Don't connect to the imported IED
+   → Don't connect to the simulator device  
+   → Create a NEW client device with same IP:port as simulator
+
+❌ Not starting simulator at all
+   → You must right-click IED and choose "Start Simulator..."
+   → This creates a NEW device in the tree
+
+❌ Port mismatch
+   → Simulator port: 10002
+   → Client port: Must be 10002 (same!)
+
+❌ Simulator stopped
+   → Check if simulator device shows "disconnected"
+   → Right-click → Connect to restart it
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║ SUMMARY: The code is FIXED. You just need to start the simulator properly! ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+""")

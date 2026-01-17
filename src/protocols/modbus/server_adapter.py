@@ -191,4 +191,67 @@ class ModbusServerAdapter(BaseProtocol):
             return None
 
     def set_data_callback(self, callback):
-        self._data_callback = callback
+        self._data_callback = callback    
+    # Device Properties Retrieval Methods
+    
+    def get_device_info(self) -> dict:
+        """Get comprehensive device information for properties dialog."""
+        info = {
+            "listen_address": self.config.ip_address,
+            "port": self.config.port,
+            "unit_id": self.config.modbus_unit_id,
+            "running": self.is_connected(),
+            "slave_blocks_count": len(getattr(self.config, 'modbus_slave_blocks', [])),
+            "slave_mappings_count": len(getattr(self.config, 'modbus_slave_mappings', [])),
+            "total_holding_registers": 0,
+            "total_input_registers": 0,
+            "total_coils": 0,
+            "total_discrete_inputs": 0
+        }
+        
+        # Calculate totals from blocks
+        for block in getattr(self.config, 'modbus_slave_blocks', []):
+            if block.register_type == "holding":
+                info["total_holding_registers"] += block.count
+            elif block.register_type == "input":
+                info["total_input_registers"] += block.count
+            elif block.register_type == "coils":
+                info["total_coils"] += block.count
+            elif block.register_type == "discrete":
+                info["total_discrete_inputs"] += block.count
+        
+        return info
+    
+    def get_slave_block_details(self) -> list:
+        """Get detailed information about slave register blocks."""
+        details = []
+        
+        for block in getattr(self.config, 'modbus_slave_blocks', []):
+            block_info = {
+                "name": block.name,
+                "register_type": block.register_type,
+                "start_address": block.start_address,
+                "count": block.count,
+                "default_value": block.default_value,
+                "description": getattr(block, 'description', "")
+            }
+            details.append(block_info)
+        
+        return details
+    
+    def get_slave_mapping_details(self) -> list:
+        """Get detailed information about slave signal mappings."""
+        details = []
+        
+        for mapping in getattr(self.config, 'modbus_slave_mappings', []):
+            mapping_info = {
+                "source": mapping.source_device + "::" + mapping.source_signal,
+                "address": mapping.address,
+                "register_type": getattr(mapping, 'register_type', 'holding'),
+                "data_type": mapping.data_type.value if hasattr(mapping, 'data_type') else "Default",
+                "scale": getattr(mapping, 'scale', 1.0),
+                "offset": getattr(mapping, 'offset', 0.0)
+            }
+            details.append(mapping_info)
+        
+        return details

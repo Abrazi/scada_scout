@@ -106,7 +106,8 @@ class SignalsViewWidget(QWidget):
         from PySide6.QtWidgets import QLabel
         self.lbl_no_signals = QLabel("No signals found (Select a node)", self.table_view)
         self.lbl_no_signals.setAlignment(Qt.AlignCenter)
-        self.lbl_no_signals.setStyleSheet("font-size: 16px; color: gray; background: rgba(255, 255, 255, 128);")
+        # Use themed note/empty overlay style
+        self.lbl_no_signals.setProperty("class", "note")
         self.lbl_no_signals.hide()
         
         self.tabs.addTab(self.table_tab, "Live Data")

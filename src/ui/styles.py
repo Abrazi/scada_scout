@@ -39,6 +39,19 @@ QMenuBar::item:pressed {
     background-color: #1abc9c;
 }
 
+/* Titlebar / Menu container (custom) */
+QWidget[class="titlebar"] {
+    background-color: #2c3e50;
+    padding: 8px 12px;
+}
+
+QLabel[class="title"] {
+    color: #e6e6e6;
+    font-weight: 700;
+    font-size: 12pt;
+    padding-left: 6px;
+}
+
 QMenu {
     background-color: white;
     border: 1px solid #bdc3c7;
@@ -131,10 +144,10 @@ QDockWidget::close-button:hover, QDockWidget::float-button:hover {
 QPushButton {
     background-color: #3498db;
     color: white;
-    border: none;
-    border-radius: 4px;
-    padding: 8px 16px;
-    font-weight: 500;
+    border: 1px solid rgba(0,0,0,0.06);
+    border-radius: 6px;
+    padding: 8px 14px;
+    font-weight: 600;
 }
 
 QPushButton:hover {
@@ -519,6 +532,21 @@ QLabel[class="heading"] {
     color: #2c3e50;
 }
 
+/* Dialog-specific headings for clearer hierarchy */
+QDialog QLabel[class="heading"] {
+    font-size: 13pt;
+    font-weight: 700;
+    color: #2c3e50;
+    padding: 6px 0 8px 0;
+}
+
+QDialog QLabel[class="subheading"] {
+    font-size: 10.5pt;
+    font-weight: 600;
+    color: #34495e;
+    margin-bottom: 6px;
+}
+
 QLabel[class="subheading"] {
     font-size: 11pt;
     font-weight: 600;
@@ -635,12 +663,25 @@ QDockWidget::title {
     color: white;
 }
 
+/* Titlebar / Menu container (dark theme) */
+QWidget[class="titlebar"] {
+    background-color: #2d2d30;
+    padding: 8px 12px;
+}
+
+QLabel[class="title"] {
+    color: #e0e0e0;
+    font-weight: 700;
+    font-size: 12pt;
+    padding-left: 6px;
+}
+
 QPushButton {
     background-color: #0e639c;
     color: white;
-    border: none;
-    border-radius: 4px;
-    padding: 8px 16px;
+    border: 1px solid rgba(0,0,0,0.08);
+    border-radius: 6px;
+    padding: 8px 14px;
 }
 
 QPushButton:hover {

@@ -1,0 +1,81 @@
+#!/usr/bin/env python3
+"""
+Instructions for starting and verifying IEC 61850 simulator
+"""
+
+print("""
+═══════════════════════════════════════════════════════════════════════════════
+  HOW TO START AND VERIFY IEC 61850 SIMULATOR
+═══════════════════════════════════════════════════════════════════════════════
+
+STEP 1: Import an IED from SCD/ICD File
+─────────────────────────────────────────
+1. Open SCADA Scout
+2. Click "Add Device" → "Import from SCD/ICD"
+3. Select your test.scd or test.icd file
+4. Choose an IED to import
+5. The IED will appear in the device tree
+
+STEP 2: Start the Simulator
+─────────────────────────────
+1. Right-click on the imported IED
+2. Select "Start Simulator for this IED..."
+3. In the dialog:
+   • Listen IP: Leave as 0.0.0.0 (listens on all interfaces)
+   • Port: Choose a port (e.g., 10002, 10102)
+   • SCD/ICD File: Should be pre-filled
+4. Click OK
+
+STEP 3: Check Event Log
+────────────────────────
+Look at the Event Log panel (bottom of screen) for:
+   ✅ "Successfully created dynamic model from SCD/ICD"
+   ✅ "Started IEC 61850 server on 0.0.0.0:<port>"
+
+If you see these messages, the server is running!
+
+STEP 4: Verify Server is Running (Terminal Check)
+──────────────────────────────────────────────────
+Open a terminal and run:
+
+   python3 check_server_status.py
+
+You should see:
+   ✅ Port <port> is OPEN (server listening)
+
+STEP 5: Connect a Client
+─────────────────────────
+1. Click "Add Device" → "IEC 61850 IED"
+2. Enter:
+   • Name: Any name (e.g., "TestClient")  
+   • IP: 127.0.0.1 (or your machine's IP from network)
+   • Port: Same port as server (e.g., 10002)
+3. Click OK
+4. Right-click device → Connect
+5. Check Event Log for connection success
+
+TROUBLESHOOTING
+───────────────
+❌ If you see "Connection rejected" error:
+   → The server is NOT running
+   → Go back to Event Log and check for server startup errors
+   → Try restarting the simulator
+
+❌ If server won't start:
+   → Check if port is already in use
+   → Try a different port (10002, 10102, 10202, etc.)
+   → Make sure you have libiec61850 installed
+
+❌ To check if server is really running:
+   → Run: python3 check_server_status.py
+   → Look for ✅ Port is OPEN
+
+KEY POINTS
+──────────
+• Server binding to 0.0.0.0 means it listens on ALL network interfaces
+• Clients can connect via 127.0.0.1 (localhost) or your actual IP
+• Server stays running until you disconnect it or close SCADA Scout
+• Check Event Log - it shows detailed status of everything
+
+═══════════════════════════════════════════════════════════════════════════════
+""")

@@ -107,9 +107,39 @@ class IEC61850Adapter(BaseProtocol):
             )
             
             if error != 0:
-                error_msg = f"Connection error code: {error}"
+                # Map error codes to human-readable messages
+                error_messages = {
+                    1: "Not connected",
+                    2: "Already connected",
+                    3: "Connection lost",
+                    4: "Service not supported",
+                    5: "Connection rejected (no server responding on this port)",
+                    6: "Outstanding call limit reached",
+                    10: "Invalid argument provided",
+                    20: "Timeout",
+                    21: "Access denied",
+                    22: "Object does not exist",
+                }
+                
+                error_description = error_messages.get(error, f"Unknown error ({error})")
+                error_msg = f"Error code {error}: {error_description}"
+                
                 if self.event_logger:
-                    self.event_logger.error("Connection", f"❌ IEC 61850 connection FAILED - {error_msg}")
+                    if error == 5:
+                        self.event_logger.error(
+                            "Connection", 
+                            f"❌ IEC 61850 connection FAILED\n"
+                            f"   {error_msg}\n"
+                            f"   \n"
+                            f"   Possible causes:\n"
+                            f"   • No IEC 61850 server running on {self.config.ip_address}:{self.config.port}\n"
+                            f"   • Server is running on a different port\n"
+                            f"   • Firewall blocking the connection\n"
+                            f"   \n"
+                            f"   💡 To start a simulator: Right-click an IED → 'Start Simulator for this IED...'"
+                        )
+                    else:
+                        self.event_logger.error("Connection", f"❌ IEC 61850 connection FAILED - {error_msg}")
                 logger.error(f"Failed to connect: {error_msg}")
                 iec61850.IedConnection_destroy(self.connection)
                 self.connection = None
@@ -253,8 +283,12 @@ class IEC61850Adapter(BaseProtocol):
         # If SCD file is available and preferred, use it
         if self.config.scd_file_path and self.config.use_scd_discovery:
             if self.event_logger:
-                self.event_logger.info("Discovery", f"Using SCD file: {self.config.scd_file_path}")
-            logger.info(f"Using SCD file for discovery: {self.config.scd_file_path}")
+                # Demote SCD discovery notification to debug to keep Event Log tidy
+                try:
+                    self.event_logger.transaction("Discovery", f"Using SCD file: {self.config.scd_file_path}")
+                except Exception:
+                    pass
+            logger.debug(f"Using SCD file for discovery: {self.config.scd_file_path}")
             return self._discover_from_scd()
         
         # Otherwise, use online discovery
@@ -2009,4 +2043,499 @@ class IEC61850Adapter(BaseProtocol):
             return False
 
     def _detect_vendor_pre_connect(self):
-        pass
+        pass    
+    # Device Properties Retrieval Methods
+    
+    def get_device_info(self) -> Dict[str, Any]:
+        """Get comprehensive device information for properties dialog."""
+        info = {
+            "vendor": "Unknown",
+            "model": "Unknown",
+            "revision": "Unknown",
+            "server_identity": None,
+            "datasets_count": 0,
+            "reports_count": 0,
+            "goose_count": 0,
+            "control_objects_count": len(self.controls) if hasattr(self, 'controls') else 0,
+            "logical_devices": [],
+            "communication_params": {}
+        }
+        
+        if not self.connected or not self.connection:
+            return info
+        
+        try:
+            # Try to read server identity
+            with self._lock:
+                server_identity = iec61850.IedConnection_getServerIdentity(self.connection)
+                if server_identity:
+                    info["server_identity"] = server_identity
+                    # Parse vendor, model info from identity string if available
+                    # Format varies by vendor
+        except Exception as e:
+            logger.debug(f"Could not retrieve server identity: {e}")
+        
+        return info
+    
+    def get_datasets_info(self) -> list:
+        """Get detailed information about all datasets."""
+        datasets = []
+        
+        if not self.connected or not self.connection:
+            return datasets
+        
+        try:
+            # Get logical device list
+            with self._lock:
+                ret = iec61850.IedConnection_getLogicalDeviceList(self.connection)
+            
+            ld_list = ret[0] if isinstance(ret, (list, tuple)) else ret
+            if not ld_list:
+                return datasets
+            
+            ld_names = self._extract_string_list(ld_list)
+            
+            for ld_name in ld_names:
+                # Get logical nodes
+                with self._lock:
+                    ret_ln = iec61850.IedConnection_getLogicalDeviceDirectory(self.connection, ld_name)
+                ln_list = ret_ln[0] if isinstance(ret_ln, (list, tuple)) else ret_ln
+                
+                if ln_list:
+                    ln_names = self._extract_string_list(ln_list)
+                    
+                    for ln_name in ln_names:
+                        full_ln_ref = f"{ld_name}/{ln_name}"
+                        
+                        # Get datasets for this LN
+                        with self._lock:
+                            ret_ds = iec61850.IedConnection_getLogicalNodeDirectory(
+                                self.connection,
+                                full_ln_ref,
+                                iec61850.ACSI_CLASS_DATA_SET
+                            )
+                        
+                        ds_list = ret_ds[0] if isinstance(ret_ds, (list, tuple)) else ret_ds
+                        if ds_list:
+                            ds_names = self._extract_string_list(ds_list)
+                            
+                            for ds_name in ds_names:
+                                dataset_ref = self._normalize_dataset_ref(full_ln_ref, ds_name)
+                                
+                                # Get dataset entries
+                                entries = []
+                                try:
+                                    with self._lock:
+                                        ret_entries = iec61850.IedConnection_getDataSetDirectory(
+                                            self.connection, dataset_ref
+                                        )
+                                    
+                                    if ret_entries and len(ret_entries) > 1:
+                                        entry_list = ret_entries[1]
+                                        if entry_list:
+                                            entry_names = self._extract_string_list(entry_list)
+                                            entries = entry_names if entry_names else []
+                                except Exception as e:
+                                    logger.debug(f"Could not read dataset entries for {dataset_ref}: {e}")
+                                
+                                datasets.append({
+                                    "name": ds_name,
+                                    "logical_node": full_ln_ref,
+                                    "reference": dataset_ref,
+                                    "entries": entries,
+                                    "entry_count": len(entries)
+                                })
+                            
+                            try:
+                                iec61850.LinkedList_destroy(ds_list)
+                            except Exception:
+                                pass
+                    
+                    try:
+                        iec61850.LinkedList_destroy(ln_list)
+                    except Exception:
+                        pass
+            
+            try:
+                iec61850.LinkedList_destroy(ld_list)
+            except Exception:
+                pass
+        
+        except Exception as e:
+            logger.error(f"Error retrieving datasets info: {e}")
+        
+        return datasets
+    
+    def get_reports_info(self) -> list:
+        """Get detailed information about all report control blocks."""
+        reports = []
+        
+        if not self.connected or not self.connection:
+            return reports
+        
+        try:
+            # Get logical device list
+            with self._lock:
+                ret = iec61850.IedConnection_getLogicalDeviceList(self.connection)
+            
+            ld_list = ret[0] if isinstance(ret, (list, tuple)) else ret
+            if not ld_list:
+                return reports
+            
+            ld_names = self._extract_string_list(ld_list)
+            
+            for ld_name in ld_names:
+                # Get logical nodes
+                with self._lock:
+                    ret_ln = iec61850.IedConnection_getLogicalDeviceDirectory(self.connection, ld_name)
+                ln_list = ret_ln[0] if isinstance(ret_ln, (list, tuple)) else ret_ln
+                
+                if ln_list:
+                    ln_names = self._extract_string_list(ln_list)
+                    
+                    for ln_name in ln_names:
+                        full_ln_ref = f"{ld_name}/{ln_name}"
+                        
+                        # Get URCBs
+                        try:
+                            with self._lock:
+                                ret_urcb = iec61850.IedConnection_getLogicalNodeDirectory(
+                                    self.connection,
+                                    full_ln_ref,
+                                    iec61850.ACSI_CLASS_URCB
+                                )
+                            
+                            urcb_list = ret_urcb[0] if isinstance(ret_urcb, (list, tuple)) else ret_urcb
+                            if urcb_list:
+                                urcb_names = self._extract_string_list(urcb_list)
+                                
+                                for rcb_name in urcb_names:
+                                    rcb_info = self._read_report_attributes(
+                                        full_ln_ref, rcb_name, "URCB", iec61850.IEC61850_FC_RP
+                                    )
+                                    if rcb_info:
+                                        reports.append(rcb_info)
+                                
+                                try:
+                                    iec61850.LinkedList_destroy(urcb_list)
+                                except Exception:
+                                    pass
+                        except Exception as e:
+                            logger.debug(f"Error reading URCBs for {full_ln_ref}: {e}")
+                        
+                        # Get BRCBs
+                        try:
+                            with self._lock:
+                                ret_brcb = iec61850.IedConnection_getLogicalNodeDirectory(
+                                    self.connection,
+                                    full_ln_ref,
+                                    iec61850.ACSI_CLASS_BRCB
+                                )
+                            
+                            brcb_list = ret_brcb[0] if isinstance(ret_brcb, (list, tuple)) else ret_brcb
+                            if brcb_list:
+                                brcb_names = self._extract_string_list(brcb_list)
+                                
+                                for rcb_name in brcb_names:
+                                    rcb_info = self._read_report_attributes(
+                                        full_ln_ref, rcb_name, "BRCB", iec61850.IEC61850_FC_BR
+                                    )
+                                    if rcb_info:
+                                        reports.append(rcb_info)
+                                
+                                try:
+                                    iec61850.LinkedList_destroy(brcb_list)
+                                except Exception:
+                                    pass
+                        except Exception as e:
+                            logger.debug(f"Error reading BRCBs for {full_ln_ref}: {e}")
+                    
+                    try:
+                        iec61850.LinkedList_destroy(ln_list)
+                    except Exception:
+                        pass
+            
+            try:
+                iec61850.LinkedList_destroy(ld_list)
+            except Exception:
+                pass
+        
+        except Exception as e:
+            logger.error(f"Error retrieving reports info: {e}")
+        
+        return reports
+    
+    def _read_report_attributes(self, full_ln_ref: str, rcb_name: str, rcb_type: str, fc: int) -> Optional[Dict[str, Any]]:
+        """Read all attributes of a report control block."""
+        rcb_ref = f"{full_ln_ref}.{rcb_name}"
+        
+        rcb_info = {
+            "name": rcb_name,
+            "logical_node": full_ln_ref,
+            "reference": rcb_ref,
+            "type": rcb_type,
+            "rpt_id": "",
+            "dataset": "",
+            "conf_rev": 0,
+            "opt_flds": "",
+            "buf_time": 0,
+            "trg_ops": "",
+            "intg_pd": 0,
+            "gi": False,
+            "enabled": False
+        }
+        
+        try:
+            # RptID
+            try:
+                with self._lock:
+                    rpt_id, err = iec61850.IedConnection_readStringValue(self.connection, f"{rcb_ref}.RptID", fc)
+                if err == iec61850.IED_ERROR_OK:
+                    rcb_info["rpt_id"] = rpt_id
+            except Exception:
+                pass
+            
+            # DatSet
+            try:
+                with self._lock:
+                    dat_set, err = iec61850.IedConnection_readStringValue(self.connection, f"{rcb_ref}.DatSet", fc)
+                if err == iec61850.IED_ERROR_OK:
+                    rcb_info["dataset"] = dat_set
+            except Exception:
+                pass
+            
+            # ConfRev
+            try:
+                with self._lock:
+                    conf_rev, err = iec61850.IedConnection_readUnsigned32Value(self.connection, f"{rcb_ref}.ConfRev", fc)
+                if err == iec61850.IED_ERROR_OK:
+                    rcb_info["conf_rev"] = conf_rev
+            except Exception:
+                pass
+            
+            # BufTm
+            try:
+                with self._lock:
+                    buf_tm, err = iec61850.IedConnection_readUnsigned32Value(self.connection, f"{rcb_ref}.BufTm", fc)
+                if err == iec61850.IED_ERROR_OK:
+                    rcb_info["buf_time"] = buf_tm
+            except Exception:
+                pass
+            
+            # IntgPd
+            try:
+                with self._lock:
+                    intg_pd, err = iec61850.IedConnection_readUnsigned32Value(self.connection, f"{rcb_ref}.IntgPd", fc)
+                if err == iec61850.IED_ERROR_OK:
+                    rcb_info["intg_pd"] = intg_pd
+            except Exception:
+                pass
+            
+            # TrgOps (bit string)
+            try:
+                with self._lock:
+                    trg_ops, err = iec61850.IedConnection_readBitStringValue(self.connection, f"{rcb_ref}.TrgOps", fc)
+                if err == iec61850.IED_ERROR_OK:
+                    rcb_info["trg_ops"] = str(trg_ops)
+            except Exception:
+                pass
+            
+            # OptFlds (bit string)
+            try:
+                with self._lock:
+                    opt_flds, err = iec61850.IedConnection_readBitStringValue(self.connection, f"{rcb_ref}.OptFlds", fc)
+                if err == iec61850.IED_ERROR_OK:
+                    rcb_info["opt_flds"] = str(opt_flds)
+            except Exception:
+                pass
+            
+            # RptEna (enabled)
+            try:
+                with self._lock:
+                    rpt_ena, err = iec61850.IedConnection_readBooleanValue(self.connection, f"{rcb_ref}.RptEna", fc)
+                if err == iec61850.IED_ERROR_OK:
+                    rcb_info["enabled"] = rpt_ena
+            except Exception:
+                pass
+            
+            # GI (General Interrogation)
+            try:
+                with self._lock:
+                    gi, err = iec61850.IedConnection_readBooleanValue(self.connection, f"{rcb_ref}.GI", fc)
+                if err == iec61850.IED_ERROR_OK:
+                    rcb_info["gi"] = gi
+            except Exception:
+                pass
+        
+        except Exception as e:
+            logger.debug(f"Error reading report attributes for {rcb_ref}: {e}")
+        
+        return rcb_info
+    
+    def get_goose_info(self) -> list:
+        """Get detailed information about all GOOSE control blocks."""
+        goose_cbs = []
+        
+        if not self.connected or not self.connection:
+            return goose_cbs
+        
+        try:
+            # Get logical device list
+            with self._lock:
+                ret = iec61850.IedConnection_getLogicalDeviceList(self.connection)
+            
+            ld_list = ret[0] if isinstance(ret, (list, tuple)) else ret
+            if not ld_list:
+                return goose_cbs
+            
+            ld_names = self._extract_string_list(ld_list)
+            
+            for ld_name in ld_names:
+                # Get logical nodes
+                with self._lock:
+                    ret_ln = iec61850.IedConnection_getLogicalDeviceDirectory(self.connection, ld_name)
+                ln_list = ret_ln[0] if isinstance(ret_ln, (list, tuple)) else ret_ln
+                
+                if ln_list:
+                    ln_names = self._extract_string_list(ln_list)
+                    
+                    for ln_name in ln_names:
+                        full_ln_ref = f"{ld_name}/{ln_name}"
+                        
+                        # Get GOOSE control blocks
+                        try:
+                            with self._lock:
+                                ret_gocb = iec61850.IedConnection_getLogicalNodeDirectory(
+                                    self.connection,
+                                    full_ln_ref,
+                                    iec61850.ACSI_CLASS_GoCB
+                                )
+                            
+                            gocb_list = ret_gocb[0] if isinstance(ret_gocb, (list, tuple)) else ret_gocb
+                            if gocb_list:
+                                gocb_names = self._extract_string_list(gocb_list)
+                                
+                                for gocb_name in gocb_names:
+                                    gocb_info = self._read_goose_attributes(full_ln_ref, gocb_name)
+                                    if gocb_info:
+                                        goose_cbs.append(gocb_info)
+                                
+                                try:
+                                    iec61850.LinkedList_destroy(gocb_list)
+                                except Exception:
+                                    pass
+                        except Exception as e:
+                            logger.debug(f"Error reading GOOSE CBs for {full_ln_ref}: {e}")
+                    
+                    try:
+                        iec61850.LinkedList_destroy(ln_list)
+                    except Exception:
+                        pass
+            
+            try:
+                iec61850.LinkedList_destroy(ld_list)
+            except Exception:
+                pass
+        
+        except Exception as e:
+            logger.error(f"Error retrieving GOOSE info: {e}")
+        
+        return goose_cbs
+    
+    def _read_goose_attributes(self, full_ln_ref: str, gocb_name: str) -> Optional[Dict[str, Any]]:
+        """Read all attributes of a GOOSE control block."""
+        gocb_ref = f"{full_ln_ref}.{gocb_name}"
+        fc = iec61850.IEC61850_FC_GO
+        
+        gocb_info = {
+            "name": gocb_name,
+            "logical_node": full_ln_ref,
+            "reference": gocb_ref,
+            "go_id": "",
+            "dataset": "",
+            "app_id": "",
+            "conf_rev": 0,
+            "nds_com": False,
+            "min_time": 0,
+            "max_time": 0,
+            "fixed_offs": False,
+            "go_ena": False
+        }
+        
+        try:
+            # GoID
+            try:
+                with self._lock:
+                    go_id, err = iec61850.IedConnection_readStringValue(self.connection, f"{gocb_ref}.GoID", fc)
+                if err == iec61850.IED_ERROR_OK:
+                    gocb_info["go_id"] = go_id
+            except Exception:
+                pass
+            
+            # DatSet
+            try:
+                with self._lock:
+                    dat_set, err = iec61850.IedConnection_readStringValue(self.connection, f"{gocb_ref}.DatSet", fc)
+                if err == iec61850.IED_ERROR_OK:
+                    gocb_info["dataset"] = dat_set
+            except Exception:
+                pass
+            
+            # AppID
+            try:
+                with self._lock:
+                    app_id, err = iec61850.IedConnection_readStringValue(self.connection, f"{gocb_ref}.AppID", fc)
+                if err == iec61850.IED_ERROR_OK:
+                    gocb_info["app_id"] = app_id
+            except Exception:
+                pass
+            
+            # ConfRev
+            try:
+                with self._lock:
+                    conf_rev, err = iec61850.IedConnection_readUnsigned32Value(self.connection, f"{gocb_ref}.ConfRev", fc)
+                if err == iec61850.IED_ERROR_OK:
+                    gocb_info["conf_rev"] = conf_rev
+            except Exception:
+                pass
+            
+            # MinTime
+            try:
+                with self._lock:
+                    min_time, err = iec61850.IedConnection_readUnsigned32Value(self.connection, f"{gocb_ref}.MinTime", fc)
+                if err == iec61850.IED_ERROR_OK:
+                    gocb_info["min_time"] = min_time
+            except Exception:
+                pass
+            
+            # MaxTime
+            try:
+                with self._lock:
+                    max_time, err = iec61850.IedConnection_readUnsigned32Value(self.connection, f"{gocb_ref}.MaxTime", fc)
+                if err == iec61850.IED_ERROR_OK:
+                    gocb_info["max_time"] = max_time
+            except Exception:
+                pass
+            
+            # GoEna (enabled)
+            try:
+                with self._lock:
+                    go_ena, err = iec61850.IedConnection_readBooleanValue(self.connection, f"{gocb_ref}.GoEna", fc)
+                if err == iec61850.IED_ERROR_OK:
+                    gocb_info["go_ena"] = go_ena
+            except Exception:
+                pass
+            
+            # NdsCom (needs commissioning)
+            try:
+                with self._lock:
+                    nds_com, err = iec61850.IedConnection_readBooleanValue(self.connection, f"{gocb_ref}.NdsCom", fc)
+                if err == iec61850.IED_ERROR_OK:
+                    gocb_info["nds_com"] = nds_com
+            except Exception:
+                pass
+        
+        except Exception as e:
+            logger.debug(f"Error reading GOOSE attributes for {gocb_ref}: {e}")
+        
+        return gocb_info

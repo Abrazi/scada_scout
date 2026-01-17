@@ -837,6 +837,13 @@ class DeviceTreeWidget(QWidget):
 
                     menu.addSeparator()
 
+                # Properties
+                properties_action = QAction("Properties...", self)
+                properties_action.triggered.connect(lambda: self._show_device_properties(device_name))
+                menu.addAction(properties_action)
+                
+                menu.addSeparator()
+                
                 edit_action = QAction("Edit Connection", self)
                 edit_action.triggered.connect(lambda: self._edit_device(device_name))
                 menu.addAction(edit_action)
@@ -1085,6 +1092,16 @@ class DeviceTreeWidget(QWidget):
         if dialog.exec():
             new_config = dialog.get_config()
             self.device_manager.update_device_config(new_config)
+    
+    def _show_device_properties(self, device_name):
+        """Opens device properties dialog."""
+        device = self.device_manager.get_device(device_name)
+        if not device:
+            return
+        
+        from src.ui.dialogs.device_properties_dialog import DevicePropertiesDialog
+        dialog = DevicePropertiesDialog(device, self.device_manager, self.watch_list_manager, self)
+        dialog.exec()
 
     def _copy_to_clipboard(self, text):
         """Copies given text to system clipboard."""
@@ -1302,14 +1319,17 @@ class DeviceTreeWidget(QWidget):
                 
                 # Show success message - the Event Log will show detailed status
                 # Note: Connection happens asynchronously, so we show this immediately
+                bind_msg = "on all network interfaces" if sim_config.ip_address == "0.0.0.0" else f"on {sim_config.ip_address}"
                 QMessageBox.information(
                     self,
                     "Simulator Starting",
                     f"✅ IEC 61850 simulator is starting...\n\n"
                     f"IED Name: {sim_config.name}\n"
-                    f"Listen Address: {sim_config.ip_address}:{sim_config.port}\n\n"
-                    f"Check the Event Log panel for detailed startup status.\n"
-                    f"If successful, other IEC 61850 clients can connect to this address."
+                    f"Listen Port: {sim_config.port} {bind_msg}\n\n"
+                    f"Clients can connect to:\n"
+                    f"  • Localhost: 127.0.0.1:{sim_config.port}\n"
+                    f"  • Network: <your-ip>:{sim_config.port}\n\n"
+                    f"Check the Event Log panel for detailed startup status."
                 )
                     
             except Exception as e:

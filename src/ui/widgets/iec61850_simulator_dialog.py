@@ -108,7 +108,12 @@ class IEC61850SimulatorDialog(QDialog):
             return
 
         if self.event_logger:
-            self.event_logger.info("Simulator", f"Successfully parsed SCD: {len(ieds)} IEDs found")
+            # Do not spam Event Log with parsing details; keep detailed parsing in debug logs
+            try:
+                logger = __import__('logging').getLogger(__name__)
+                logger.debug(f"Parsed SCD: {len(ieds)} IEDs found in {self.scd_path}")
+            except Exception:
+                pass
 
         self.parsed_ieds = ieds
         self._populate_table()

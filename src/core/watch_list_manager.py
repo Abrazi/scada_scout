@@ -102,6 +102,14 @@ class WatchListManager(QObject):
     def get_all_watched(self) -> List[WatchedSignal]:
         """Get all watched signals."""
         return list(self._watched_signals.values())
+    
+    def get_signals_for_device(self, device_name: str) -> List[Signal]:
+        """Get all signals being watched for a specific device."""
+        signals = []
+        for watched in self._watched_signals.values():
+            if watched.device_name == device_name:
+                signals.append(watched.signal)
+        return signals
 
     def get_watched(self, watch_id: str) -> Optional[WatchedSignal]:
         """Get a watched signal by watch_id."""

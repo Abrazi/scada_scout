@@ -50,8 +50,8 @@ class IEC61850ServerAdapter(BaseProtocol):
                 raise RuntimeError(f"SCD file is empty: {scd_path}")
             
             logger.info(f"Loading IED model from: {scd_path} ({file_size} bytes)")
-            if self.event_logger:
-                self.event_logger.info("IEC61850Server", f"Loading model for {self.ied_name} from {scd_path}")
+            # Keep parsing info out of the Event Log to reduce noise; keep it in the normal logger for debugging
+            logger.debug(f"Parsing SCD/ICD for {self.ied_name} from {scd_path}")
 
             # Try to create model from SCD/ICD
             # Note: libiec61850 might not fully support SCD files for server creation
@@ -78,9 +78,7 @@ class IEC61850ServerAdapter(BaseProtocol):
             
             # If we still don't have a model, try creating it dynamically from parsed SCD/ICD
             if not self.model:
-                logger.info("Attempting to create dynamic model from parsed SCD/ICD...")
-                if self.event_logger:
-                    self.event_logger.info("IEC61850Server", "Creating dynamic model from parsed SCD/ICD...")
+                logger.debug("Attempting to create dynamic model from parsed SCD/ICD...")
 
                 # Try building a dynamic model from parsed SCD/ICD
                 self.model = self._create_model_from_scd_parser()
@@ -106,8 +104,16 @@ class IEC61850ServerAdapter(BaseProtocol):
             # Configure server settings
             try:
                 # Bind to specific interface IP
-                lib.IedServer_setLocalIpAddress(self.server, self.config.ip_address.encode("utf-8"))
-                logger.info(f"Set server IP address: {self.config.ip_address}")
+                # Note: Use "0.0.0.0" to listen on all interfaces (network accessible)
+                # Use "127.0.0.1" for localhost only
+                bind_ip = self.config.ip_address
+                if bind_ip == "127.0.0.1":
+                    # Don't restrict to localhost - make accessible on network
+                    bind_ip = "0.0.0.0"
+                    logger.info("Converting 127.0.0.1 to 0.0.0.0 to allow network access")
+                
+                lib.IedServer_setLocalIpAddress(self.server, bind_ip.encode("utf-8"))
+                logger.info(f"Server will listen on: {bind_ip} (all interfaces)" if bind_ip == "0.0.0.0" else f"Server bound to: {bind_ip}")
             except Exception as e:
                 logger.warning(f"Could not set server IP address: {e}")
 
@@ -144,9 +150,11 @@ class IEC61850ServerAdapter(BaseProtocol):
                     self.connected = True
                     logger.info("IEC61850 server started successfully")
                     if self.event_logger:
+                        # Show actual binding info
+                        bind_info = f"0.0.0.0:{self.config.port} (accessible on all network interfaces)"
                         self.event_logger.info(
                             "IEC61850Server",
-                            f"✅ Started IEC 61850 server '{self.ied_name}' on {self.config.ip_address}:{self.config.port}"
+                            f"✅ Started IEC 61850 server '{self.ied_name}' on {bind_info}"
                         )
                     return True
                 raise RuntimeError("Failed to start IEC61850 server (isRunning=false)")
@@ -157,9 +165,11 @@ class IEC61850ServerAdapter(BaseProtocol):
                 logger.info("IEC61850 server started successfully")
 
                 if self.event_logger:
+                    # Show actual binding info
+                    bind_info = f"0.0.0.0:{self.config.port} (accessible on all network interfaces)"
                     self.event_logger.info(
                         "IEC61850Server",
-                        f"✅ Started IEC 61850 server '{self.ied_name}' on {self.config.ip_address}:{self.config.port}"
+                        f"✅ Started IEC 61850 server '{self.ied_name}' on {bind_info}"
                     )
                 return True
 
@@ -440,12 +450,7 @@ class IEC61850ServerAdapter(BaseProtocol):
                 logger.error("Failed to create one or more data attributes")
                 return None
 
-            logger.info(f"Successfully created minimal dynamic model for {self.ied_name}")
-            if self.event_logger:
-                self.event_logger.info(
-                    "IEC61850Server",
-                    f"Created minimal dynamic model for {self.ied_name} (LD0/LLN0/Mod)"
-                )
+            logger.debug(f"Successfully created minimal dynamic model for {self.ied_name}")
 
             return model
             
@@ -573,10 +578,10 @@ class IEC61850ServerAdapter(BaseProtocol):
                 except Exception as e:
                     logger.debug(f"Failed to create DA {da_name} in {addr_ld_norm}/{ln_name}: {e}")
 
-            logger.info(
+            logger.debug(
                 f"Dynamic model build: LDs={ld_created}, LNs={ln_created}, attrs={created_attrs}"
             )
-            logger.info(
+            logger.debug(
                 f"Skipped: no_slash={skipped_no_slash}, no_dot={skipped_no_dot}, "
                 f"no_lnode={skipped_no_lnode}, short_path={skipped_short_path}, processed={processed}"
             )
@@ -590,16 +595,7 @@ class IEC61850ServerAdapter(BaseProtocol):
                     )
                 return None
 
-            logger.info(f"Created dynamic model from SCD/ICD for {root.name} with {created_attrs} attributes")
-            if self.event_logger:
-                self.event_logger.info(
-                    "IEC61850Server",
-                    f"✅ Successfully created dynamic model from SCD/ICD\n"
-                    f"   IED: {root.name}\n"
-                    f"   Logical Devices: {ld_created}\n"
-                    f"   Logical Nodes: {ln_created}\n"
-                    f"   Total Attributes: {created_attrs}"
-                )
+            logger.debug(f"Created dynamic model from SCD/ICD for {root.name} with {created_attrs} attributes")
             return model
 
         except Exception as e:

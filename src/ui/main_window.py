@@ -88,8 +88,8 @@ class MainWindow(QMainWindow):
         from PySide6.QtWidgets import QMenuBar, QVBoxLayout
 
         menu_container = QWidget(self)
-        # Match the title bar color so the stacked title + menu area appears seamless
-        menu_container.setStyleSheet("background-color: #2c3e50;")
+        # Mark menu container so stylesheet can match title/menu area
+        menu_container.setProperty("class", "titlebar")
         vlayout = QVBoxLayout(menu_container)
         vlayout.setContentsMargins(0, 0, 0, 0)
         vlayout.setSpacing(0)

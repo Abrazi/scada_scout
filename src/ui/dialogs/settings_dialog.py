@@ -7,8 +7,8 @@ from PySide6.QtWidgets import (
     QFormLayout, QColorDialog, QFontComboBox, QCheckBox,
     QDialogButtonBox, QMessageBox, QApplication, QPlainTextEdit
 )
-from PySide6.QtCore import Qt, QSettings, Signal, QTimer
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtCore import Qt, QSettings, Signal, QTimer, QSize
+from PySide6.QtGui import QColor, QFont, QIcon, QPixmap
 import sys
 import shutil
 import subprocess
@@ -391,25 +391,26 @@ For more details, see README.md and docs/ folder.
     def _create_color_button(self, default_color):
         """Create a button for color selection."""
         button = QPushButton()
-        button.setFixedSize(100, 30)
+        button.setFixedSize(120, 30)
         button.setProperty("color", default_color)
         self._update_color_button(button, default_color)
         button.clicked.connect(lambda: self._choose_color(button))
         return button
         
     def _update_color_button(self, button, color):
-        """Update color button appearance."""
-        button.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {color};
-                border: 2px solid #bdc3c7;
-                border-radius: 4px;
-            }}
-            QPushButton:hover {{
-                border: 2px solid #3498db;
-            }}
-        """)
+        """Update color button appearance using an icon (no stylesheet)."""
+        try:
+            pix = QPixmap(18, 18)
+            pix.fill(QColor(color))
+            # Draw a subtle border so the swatch is visible on light backgrounds
+            # (QPixmap.fill replaces the content; small border handled by icon padding)
+            icon = QIcon(pix)
+            button.setIcon(icon)
+            button.setIconSize(QSize(18, 18))
+        except Exception:
+            button.setIcon(QIcon())
         button.setText(color)
+        button.setToolTip(color)
         
     def _choose_color(self, button):
         """Open color picker dialog."""

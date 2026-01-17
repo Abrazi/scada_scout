@@ -23,17 +23,8 @@ class EventLogWidget(QWidget):
         # Text display
         self.text_edit = QTextEdit()
         self.text_edit.setReadOnly(True)
-        self.text_edit.setStyleSheet("""
-            QTextEdit {
-                background-color: #1e1e1e;
-                color: #d4d4d4;
-                font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
-                font-size: 10pt;
-                border: 1px solid #3e3e42;
-                border-radius: 4px;
-                padding: 4px;
-            }
-        """)
+        # Use themed event log style from QSS (QTextEdit#eventLog)
+        self.text_edit.setObjectName("eventLog")
         layout.addWidget(self.text_edit)
         
         # Control buttons in two rows for better flexibility
@@ -269,19 +260,25 @@ class EventLogWidget(QWidget):
 
     def _update_capture_button_style(self, running: bool, error: bool = False):
         """Visually update the capture button to indicate running/stopped/error."""
+        # Use themed button classes instead of inline styles
+        def apply_button_class(btn, cls):
+            if cls:
+                btn.setProperty("class", cls)
+            else:
+                btn.setProperty("class", "")
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
+
         if error:
-            # Error — red
-            self.btn_capture.setStyleSheet("background-color: #e74c3c; color: white;")
+            apply_button_class(self.btn_capture, "danger")
             self.btn_capture.setText("📡 Capture")
             return
 
         if running:
-            # Running — green
-            self.btn_capture.setStyleSheet("background-color: #27ae60; color: white;")
+            apply_button_class(self.btn_capture, "success")
             self.btn_capture.setText("📡 Capturing...")
         else:
-            # Stopped — neutral
-            self.btn_capture.setStyleSheet("")
+            apply_button_class(self.btn_capture, None)
             self.btn_capture.setText("📡 Capture")
 
     def _has_raw_socket_privileges(self) -> bool:

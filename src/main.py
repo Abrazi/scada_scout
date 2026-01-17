@@ -7,7 +7,6 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QFont
 from src.ui.main_window import MainWindow
-from src.ui.styles import apply_dark_theme
 from src.core.device_manager import DeviceManager
 from src.core.app_controller import AppController
 import logging
@@ -51,12 +50,7 @@ def main():
         app = QApplication(sys.argv)
         app.setApplicationName("Scada Scout")
         
-        # Apply dark theme by default
-        apply_dark_theme(app)
-        
-        # Set application-wide font
-        font = QFont("Segoe UI", 10)
-        app.setFont(font)
+        # Theme and font are applied from saved settings (or defaults) by MainWindow
         
         print("Initializing core components...")
         # Core Logic Initialization
@@ -91,6 +85,12 @@ def main():
         # Ensure controller can clean up background threads on exit
         app.aboutToQuit.connect(controller.shutdown)
         
+        # Ensure application settings (theme, fonts, sizes) are applied before showing
+        try:
+            window._apply_settings()
+        except Exception:
+            pass
+
         # Show window after everything is initialized
         print("Showing main window...")
         window.show()

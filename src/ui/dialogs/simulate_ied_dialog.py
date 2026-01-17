@@ -38,9 +38,14 @@ class SimulateIEDDialog(QDialog):
         self.txt_ied_name.setReadOnly(True)
         config_layout.addRow("IED Name:", self.txt_ied_name)
         
-        # IP Address
-        self.txt_ip = QLineEdit(device_config.ip_address or "127.0.0.1")
-        self.txt_ip.setPlaceholderText("127.0.0.1")
+        # IP Address (default to 0.0.0.0 for network accessibility)
+        self.txt_ip = QLineEdit("0.0.0.0")  # Listen on all interfaces by default
+        self.txt_ip.setPlaceholderText("0.0.0.0 (all interfaces)")
+        self.txt_ip.setToolTip(
+            "0.0.0.0 = Listen on all network interfaces (recommended)\n"
+            "127.0.0.1 = Localhost only (not accessible from network)\n"
+            "Specific IP = Bind to that interface only"
+        )
         config_layout.addRow("Listen IP:", self.txt_ip)
         
         # Port
@@ -67,7 +72,8 @@ class SimulateIEDDialog(QDialog):
         # Note
         note_label = QLabel(
             "<i>Note: The simulator will use the IED model from the SCD/ICD file. "
-            "Other IEC 61850 clients can connect to this IP:Port.</i>"
+            "Using 0.0.0.0 makes the server accessible from any network interface. "
+            "Clients can connect using any of your machine's IP addresses with the specified port.</i>"
         )
         note_label.setWordWrap(True)
         note_label.setProperty("class", "note")
@@ -144,7 +150,7 @@ class SimulateIEDDialog(QDialog):
         return DeviceConfig(
             name=self.original_config.name,
             description=f"Simulator: {self.original_config.description}" if self.original_config.description else "IEC 61850 Simulator",
-            ip_address=self.txt_ip.text().strip() or "127.0.0.1",
+            ip_address=self.txt_ip.text().strip() or "0.0.0.0",  # Default to all interfaces
             port=self.spin_port.value(),
             device_type=DeviceType.IEC61850_SERVER,  # Convert to server
             scd_file_path=self.txt_scd.text().strip() or None,
