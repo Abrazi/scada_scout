@@ -18,6 +18,9 @@ class SignalsViewWidget(QWidget):
         self.watch_list_manager = watch_list_manager
         self.current_device_name = None  # Track which device's signals we're showing
         self.current_node = None        # Track current node for manual refresh
+        # Queue for chunked background reads to keep UI responsive on large selections
+        self._read_batch_queue = []  # list of (device_name, signal)
+        self._read_batch_timer = None
         
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(0, 0, 0, 0)
@@ -200,7 +203,9 @@ class SignalsViewWidget(QWidget):
         from PySide6.QtCore import QTimer
         self.refresh_timer = QTimer(self)
         self.refresh_timer.timeout.connect(self._on_refresh_clicked)
-        # self.refresh_timer.start(3000)
+        # Start auto-refresh if enabled by default
+        if self.chk_auto_refresh.isChecked():
+            self.refresh_timer.start(3000)
 
     def _on_auto_refresh_toggled(self, state):
         if state == Qt.Checked:
@@ -225,28 +230,24 @@ class SignalsViewWidget(QWidget):
 
     def _on_refresh_clicked(self):
         """Manually trigger a refresh for the currently shown signals."""
-        # Check if we have a current node, if not try to set one
-        if not self.current_node:
-            self._try_auto_select_node()
-            
-        if self.current_node:
-            device_name = self._get_current_device_name()
-            if device_name:
-                signals = self._collect_signals(self.current_node)
-                if signals:
-                    self._trigger_background_read(device_name, signals)
+        # Only refresh signals that are ACTUALLY in the live data table
+        signals = self.table_model.get_signals()
+        if not signals:
+            return
+        
+        device_name = self._get_current_device_name()
+        if device_name:
+            self._trigger_background_read(device_name, signals)
 
     def _on_refresh_selected_clicked(self):
-        """Refresh only the currently selected node/subbranch (does not auto-select)."""
-        if not self.current_node:
+        """Refresh only the signals currently shown in the live data table."""
+        # Only refresh signals that are ACTUALLY in the live data table
+        signals = self.table_model.get_signals()
+        if not signals:
             return
 
         device_name = self._get_current_device_name()
-        if not device_name:
-            return
-
-        signals = self._collect_signals(self.current_node)
-        if signals:
+        if device_name:
             self._trigger_background_read(device_name, signals)
 
     def _on_clear_clicked(self):
@@ -289,6 +290,7 @@ class SignalsViewWidget(QWidget):
         """Updates the view to show signals from the given node.
 
         Accepts optional device_name to scope live reads and UI labels.
+        Note: Does NOT load signals into table - use add_node_to_live for that.
         """
         self.current_node = node
         if device_name:
@@ -296,8 +298,10 @@ class SignalsViewWidget(QWidget):
         elif node is None:
             self.current_device_name = None
 
-        self.table_model.set_node_filter(node)
-        self.table_view.resizeColumnsToContents()
+        # DO NOT auto-populate table on selection - only track current node for manual refresh
+        # User must explicitly use "Add to Live Data" to populate signals
+        # self.table_model.set_node_filter(node)  # DISABLED to prevent auto-load
+        # self.table_view.resizeColumnsToContents()
         # Enable/disable selected refresh button based on whether there are signals
         try:
             has_signals = bool(self._collect_signals(node))
@@ -336,11 +340,20 @@ class SignalsViewWidget(QWidget):
             return
 
         try:
+            # Temporarily disable view updates to avoid UI stalls on large inserts
+            self.table_view.setUpdatesEnabled(False)
+            self.table_model.suspend_updates(True)
             self.table_model.add_signals(signals)
         except Exception:
             import logging
             logging.getLogger("SignalsView").exception("Failed to add signals to model")
             return
+        finally:
+            try:
+                self.table_model.suspend_updates(False)
+                self.table_view.setUpdatesEnabled(True)
+            except Exception:
+                pass
 
         # Event log
         try:
@@ -352,7 +365,9 @@ class SignalsViewWidget(QWidget):
             pass
 
         # Update UI elements
-        self.table_view.resizeColumnsToContents()
+        # Avoid expensive full resize for huge datasets
+        if len(signals) <= 1000:
+            self.table_view.resizeColumnsToContents()
         self.lbl_no_signals.hide()
         if hasattr(self, 'btn_refresh_selected'):
             self.btn_refresh_selected.setEnabled(True)
@@ -526,6 +541,22 @@ class SignalsViewWidget(QWidget):
         """Trigger a one-shot read for the provided signals."""
         if not device_name or not signals:
             return
+        # For large batches, queue and process in chunks to keep UI responsive
+        MAX_BATCH = 200
+        if len(signals) > MAX_BATCH:
+            # Lazy-init timer
+            if self._read_batch_timer is None:
+                from PySide6.QtCore import QTimer
+                self._read_batch_timer = QTimer(self)
+                self._read_batch_timer.setSingleShot(True)
+                self._read_batch_timer.timeout.connect(self._process_read_batch_queue)
+
+            # Enqueue work
+            self._read_batch_queue.extend([(device_name, sig) for sig in signals])
+            # Kick the processor if idle
+            if not self._read_batch_timer.isActive():
+                self._read_batch_timer.start(0)
+            return
 
         for sig in signals:
             try:
@@ -533,6 +564,24 @@ class SignalsViewWidget(QWidget):
             except Exception:
                 # Ignore individual read failures
                 continue
+
+    def _process_read_batch_queue(self):
+        """Process queued read requests in small chunks to avoid UI stalls."""
+        if not self._read_batch_queue:
+            return
+
+        MAX_BATCH = 200
+        batch = self._read_batch_queue[:MAX_BATCH]
+        del self._read_batch_queue[:MAX_BATCH]
+
+        for device_name, sig in batch:
+            try:
+                self.device_manager.read_signal(device_name, sig)
+            except Exception:
+                continue
+
+        if self._read_batch_queue and self._read_batch_timer is not None:
+            self._read_batch_timer.start(0)
 
     def _get_current_device_name(self):
         """Get the device name for current signals view."""

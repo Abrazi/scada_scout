@@ -26,6 +26,11 @@ class DeviceTreeWidget(QWidget):
         super().__init__(parent)
         self.device_manager = device_manager
         self.watch_list_manager = watch_list_manager
+        # Suppress selection events triggered programmatically (e.g., refresh/filter)
+        self._suppress_selection_changed = False
+        # Batch loading mode for bulk device additions
+        self._batch_loading = False
+        self._pending_devices = []
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(0, 0, 0, 0)
         
@@ -106,6 +111,11 @@ class DeviceTreeWidget(QWidget):
         self.device_items = {}  # device_name -> QStandardItem 
         self._setup_model()
         self._connect_signals()
+        
+        # Connect batch load signals
+        self.device_manager.batch_load_started.connect(self.start_batch_load)
+        self.device_manager.batch_load_finished.connect(self.finish_batch_load)
+        self.device_manager.batch_clear_started.connect(self._on_batch_clear_started)
         
         # Selection and Editing
         self.tree_view.selectionModel().selectionChanged.connect(self._on_selection_changed)
@@ -209,8 +219,10 @@ class DeviceTreeWidget(QWidget):
 
         index = item.index()
         selection_model = self.tree_view.selectionModel()
+        self._suppress_selection_changed = True
         selection_model.select(index, QItemSelectionModel.ClearAndSelect | QItemSelectionModel.Rows)
         selection_model.setCurrentIndex(index, QItemSelectionModel.ClearAndSelect | QItemSelectionModel.Rows)
+        self._suppress_selection_changed = False
         self.tree_view.scrollTo(index)
 
     def _show_all_items(self, parent):
@@ -269,6 +281,8 @@ class DeviceTreeWidget(QWidget):
 
     def _on_selection_changed(self, selected, deselected):
         try:
+            if getattr(self, "_suppress_selection_changed", False):
+                return
             indexes = self.tree_view.selectionModel().selectedIndexes()
             logger.info(f"DeviceTreeWidget: Selection changed. Index count: {len(indexes)}")
             
@@ -305,37 +319,115 @@ class DeviceTreeWidget(QWidget):
         self.tree_view.setSelectionMode(QTreeView.ExtendedSelection)  # Enable Ctrl/Shift multi-selection
         self.tree_view.setEditTriggers(QTreeView.DoubleClicked | QTreeView.EditKeyPressed)
         self.tree_view.header().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.tree_view.header().setMinimumSectionSize(120)  # Make cells bigger by default
         
         # Context Menu
         self.tree_view.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tree_view.customContextMenuRequested.connect(self._on_context_menu)
         
-        # UI Polish: Move Status column (logical 1) to visual position 0
+        # Double-click handler for status column
+        self.tree_view.doubleClicked.connect(self._on_double_click)
+        
         header = self.tree_view.header()
         header.setSectionsMovable(True)
-        # We need to wait for the model to be set or move it after?
-        # Let's move it here, it usually persists.
-        header.moveSection(1, 0)
         header.setSectionResizeMode(QHeaderView.ResizeToContents)
         header.setStretchLastSection(True)
+        
+        # Make cells bigger by default
+        self.tree_view.setStyleSheet("QTreeView::item { padding: 3px; }")
         
     def _setup_model(self):
         """Initializes the model and populates with existing devices."""
         self.model = QStandardItemModel()
-        # Logical order: Name, Status, Description, FC, Type
+        # Column order (logical): Name, Status, Description, FC, Type
         self.model.setHorizontalHeaderLabels(["Name", "Status", "Description", "FC", "Type"])
         self.tree_view.setModel(self.model)
-        
-        # After setting model, ensure Status is moved to start
-        self.tree_view.header().moveSection(1, 0)
+
+        # Keep tree hierarchy on logical column 0, but show Status first visually
+        header = self.tree_view.header()
+        header.moveSection(header.visualIndex(1), 0)
         
         self.folder_items.clear()
         self.device_items.clear()
+        
+        # Re-enable updates after clearing (in case batch clear disabled them)
+        self.tree_view.setUpdatesEnabled(True)
         
         # Populate existing devices
         for device in self.device_manager.get_all_devices():
             self._add_device_node(device)
 
+    def start_batch_load(self):
+        """Start batch loading mode - defers tree updates."""
+        self._batch_loading = True
+        self._pending_devices = []
+        self.tree_view.setUpdatesEnabled(False)
+    
+    def finish_batch_load(self):
+        """Finish batch loading - process all pending devices."""
+        if not self._batch_loading:
+            return
+        
+        self._batch_loading = False
+        
+        # Process pending devices in chunks to keep UI responsive
+        from PySide6.QtCore import QTimer
+        
+        def process_batch():
+            if not self._pending_devices:
+                self.tree_view.setUpdatesEnabled(True)
+                # Expand folders after load
+                for i in range(self.model.rowCount()):
+                    idx = self.model.index(i, 0)
+                    self.tree_view.expand(idx)
+                return
+            
+            # Process 5 devices at a time
+            batch = self._pending_devices[:5]
+            self._pending_devices = self._pending_devices[5:]
+            
+            for device in batch:
+                self._suppress_selection_changed = True
+                try:
+                    parent = self._get_folder_node(device.config.folder)
+                    
+                    # Name (column 0)
+                    name_item = QStandardItem(device.config.name)
+                    name_item.setEditable(True)
+                    name_item.setData(device.config.name, Qt.UserRole)
+
+                    # Status (column 1)
+                    status_text = "🟢" if device.connected else "🔴"
+                    status_item = QStandardItem(status_text)
+                    status_item.setEditable(False)
+                    status_item.setTextAlignment(Qt.AlignCenter)
+                    
+                    desc_text = device.config.description or device.config.device_type.value
+                    desc_item = QStandardItem(desc_text)
+                    desc_item.setEditable(True)
+                    fc_item = QStandardItem("")
+                    type_item = QStandardItem("Device")
+                    
+                    parent.appendRow([name_item, status_item, desc_item, fc_item, type_item])
+                    self.device_items[device.config.name] = name_item
+                    
+                    # Add children if discovery happened
+                    if device.root_node:
+                        for child in device.root_node.children:
+                            self._add_node_recursive(name_item, child)
+                finally:
+                    self._suppress_selection_changed = False
+            
+            # Schedule next batch
+            QTimer.singleShot(0, process_batch)
+        
+        # Start processing
+        QTimer.singleShot(0, process_batch)
+    
+    def _on_batch_clear_started(self):
+        """Disable updates during batch device removal."""
+        self.tree_view.setUpdatesEnabled(False)
+    
     def _connect_signals(self):
         """Connects to DeviceManager signals."""
         self.device_manager.device_added.connect(self._add_device_node)
@@ -388,7 +480,9 @@ class DeviceTreeWidget(QWidget):
             
             # Let's try to re-select the device node if we lost selection.
             if not selection_model.hasSelection():
-                 selection_model.select(item.index(), QItemSelectionModel.ClearAndSelect | QItemSelectionModel.Rows)
+                  self._suppress_selection_changed = True
+                  selection_model.select(item.index(), QItemSelectionModel.ClearAndSelect | QItemSelectionModel.Rows)
+                  self._suppress_selection_changed = False
                  # This triggers _on_selection_changed -> SignalsView.set_filter_node(device)
             
             for i in range(5):
@@ -420,33 +514,44 @@ class DeviceTreeWidget(QWidget):
 
     def _add_device_node(self, device):
         """Adds a device to the tree."""
-        parent = self._get_folder_node(device.config.folder)
+        # Queue for batch processing if in batch mode
+        if self._batch_loading:
+            self._pending_devices.append(device)
+            return
         
-        name_item = QStandardItem(device.config.name)
-        name_item.setEditable(True)
-        
-        # Connection status dot (logical column 1)
-        status_text = "🟢" if device.connected else "🔴"
-        status_item = QStandardItem(status_text)
-        status_item.setEditable(False)
-        status_item.setTextAlignment(Qt.AlignCenter)
-        
-        desc_text = device.config.description or device.config.device_type.value
-        desc_item = QStandardItem(desc_text)
-        desc_item.setEditable(True)
-        fc_item = QStandardItem("")
-        type_item = QStandardItem("Device")
-        
-        # Store device name in data for easy retrieval on the name_item (logical col 0)
-        name_item.setData(device.config.name, Qt.UserRole)
-        
-        parent.appendRow([name_item, status_item, desc_item, fc_item, type_item])
-        self.device_items[device.config.name] = name_item
-        
-        # Recursively add children if discovery happened
-        if device.root_node:
-            for child in device.root_node.children:
-                self._add_node_recursive(name_item, child)
+        # Suppress selection events while programmatically adding device
+        self._suppress_selection_changed = True
+        try:
+            parent = self._get_folder_node(device.config.folder)
+            
+            # Name (column 0)
+            name_item = QStandardItem(device.config.name)
+            name_item.setEditable(True)
+            # Store device name in data for easy retrieval on the name_item
+            name_item.setData(device.config.name, Qt.UserRole)
+
+            # Connection status dot (column 1)
+            status_text = "🟢" if device.connected else "🔴"
+            status_item = QStandardItem(status_text)
+            status_item.setEditable(False)
+            status_item.setTextAlignment(Qt.AlignCenter)
+            
+            desc_text = device.config.description or device.config.device_type.value
+            desc_item = QStandardItem(desc_text)
+            desc_item.setEditable(True)
+            fc_item = QStandardItem("")
+            type_item = QStandardItem("Device")
+            
+            # Row layout: [Name, Status, Description, FC, Type]
+            parent.appendRow([name_item, status_item, desc_item, fc_item, type_item])
+            self.device_items[device.config.name] = name_item
+            
+            # Recursively add children if discovery happened
+            if device.root_node:
+                for child in device.root_node.children:
+                    self._add_node_recursive(name_item, child)
+        finally:
+            self._suppress_selection_changed = False
 
     def _add_node_recursive(self, parent_item: QStandardItem, node):
         """Recursively adds nodes to the tree."""
@@ -454,7 +559,7 @@ class DeviceTreeWidget(QWidget):
         item_name = QStandardItem(node.name)
         item_name.setEditable(True)
         item_name.setData(node, Qt.UserRole)
-        
+
         # Col 1: Status (Empty for nodes)
         status_item = QStandardItem("")
         status_item.setEditable(False)
@@ -494,9 +599,14 @@ class DeviceTreeWidget(QWidget):
     
     def _add_signal_node(self, parent_item: QStandardItem, sig):
         """Adds a signal as a child row."""
+        # Col 0: Name
         sig_name_item = QStandardItem(sig.name)
         sig_name_item.setEditable(True)
         sig_name_item.setData(sig, Qt.UserRole)
+
+        # Col 1: Status (empty for signals)
+        sig_status_item = QStandardItem("")
+        sig_status_item.setEditable(False)
         
         sig_desc_item = QStandardItem(sig.description or "")
         sig_desc_item.setEditable(True)
@@ -531,14 +641,46 @@ class DeviceTreeWidget(QWidget):
         sig_type_item = QStandardItem(s_type)
         sig_type_item.setEditable(False)
         
-        parent_item.appendRow([sig_name_item, QStandardItem(""), sig_desc_item, sig_fc_item, sig_type_item])
+        parent_item.appendRow([sig_name_item, sig_status_item, sig_desc_item, sig_fc_item, sig_type_item])
         
     def _update_status_indicator(self, device_name, connected):
         """Updates the status dot for a device."""
         item = self.device_items.get(device_name)
         if item:
+            # Status is column 1, name is column 0
             status_item = item.index().siblingAtColumn(1).model().itemFromIndex(item.index().siblingAtColumn(1))
-            status_item.setText("🟢" if connected else "🔴")
+            if status_item:
+                status_item.setText("🟢" if connected else "🔴")
+    
+    def _on_double_click(self, index):
+        """Handle double-click on tree items."""
+        # Check if user double-clicked the status column (logical column 1)
+        if index.column() != 1:
+            return
+        
+        # Get the name item (column 0) to identify the device
+        name_index = index.siblingAtColumn(0)
+        if not name_index.isValid():
+            return
+        
+        name_item = self.model.itemFromIndex(name_index)
+        if not name_item:
+            return
+        
+        data = name_item.data(Qt.UserRole)
+        
+        # Check if this is a device node (data is device name string)
+        if isinstance(data, str):
+            device_name = data
+            device = self.device_manager.get_device(device_name)
+            if not device:
+                return
+            
+            # Toggle connection
+            if device.connected:
+                self.device_manager.disconnect_device(device_name)
+            else:
+                self.device_manager.connect_device(device_name)
 
     def _on_signal_updated(self, device_name: str, signal):
         """Update the tree row for a signal when live data arrives.

@@ -1,6 +1,7 @@
 from PySide6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QStatusBar, QMenuBar, QToolBar, QDockWidget, QFileDialog, QMessageBox
 from PySide6.QtGui import QAction
 from PySide6.QtCore import Qt, QTimer, QSettings
+from typing import List
 import os
 import platform
 
@@ -28,6 +29,7 @@ from src.ui.widgets.iec61850_simulator_dialog import IEC61850SimulatorDialog
 from src.ui.widgets.connection_progress_dialog import ConnectionProgressDialog
 from src.ui.widgets.import_progress_dialog import ImportProgressDialog
 from src.ui.dialogs.settings_dialog import SettingsDialog
+from src.core.workers import SCDImportWorker
 
 class MainWindow(QMainWindow):
     """
@@ -549,42 +551,29 @@ QTabBar::tab {{ padding: {widget_padding + 2}px {button_padding + 8}px; font-siz
             progress.set_progress(0, len(configs))
             progress.show()
             
-            count = 0
-            errors = []
-            
-            for i, config in enumerate(configs):
-                try:
-                    progress.add_log(f"[{i+1}/{len(configs)}] Importing {config.name} ({config.ip_address})...")
-                    progress.add_log(f"  → Adding device configuration...")
-                    self.device_manager.add_device(config)
-                    
-                    progress.add_log(f"  → Parsing SCD file for {config.name}...")
-                    self.device_manager.load_offline_scd(config.name)
-                    
-                    progress.add_log(f"  ✓ Successfully imported {config.name}")
-                    
-                    if self.event_logger:
-                        self.event_logger.info("SCDImport", f"Imported device: {config.name} ({config.ip_address})")
-                    
-                    count += 1
-                    progress.set_progress(i + 1)
-                except Exception as e:
-                    msg = f"Failed to add {config.name}: {e}"
-                    progress.add_log(f"  ✗ ERROR: {msg}")
-                    errors.append(msg)
-                    if self.event_logger:
-                        self.event_logger.error("SCDImport", f"Import failed for {config.name}: {e}")
-            
-            progress.add_log(f"\n{'='*50}")
-            progress.add_log(f"Import complete: {count}/{len(configs)} devices imported successfully")
-            if errors:
-                progress.add_log(f"Failed: {len(errors)} device(s)")
-            progress.finish()
-            
-            if errors:
-                show_scrollable_error(self, "Import Errors", "Some devices failed to import:", "\n".join(errors))
-            else:
-                self.status_bar.showMessage(f"Successfully imported {count} devices.", 5000)
+            # Pass core manager (not Qt wrapper) to avoid cross-thread issues
+            self.scd_import_worker = SCDImportWorker(self.device_manager._core, configs, self.event_logger)
+            self.scd_import_worker.log.connect(progress.add_log)
+            self.scd_import_worker.progress.connect(progress.set_progress)
+            # Handle device addition notifications to update UI tree
+            self.scd_import_worker.device_added.connect(lambda name: self.device_manager.device_updated.emit(name))
+            self.scd_import_worker.finished_import.connect(
+                lambda count, errors: self._on_scd_import_finished(progress, count, errors)
+            )
+            self.scd_import_worker.finished.connect(self.scd_import_worker.deleteLater)
+            self.scd_import_worker.start()
+
+    def _on_scd_import_finished(self, progress_dialog, count: int, errors: List[str]):
+        progress_dialog.finish()
+
+        if errors:
+            show_scrollable_error(self, "Import Errors", "Some devices failed to import:", "\n".join(errors))
+        else:
+            self.status_bar.showMessage(f"Successfully imported {count} devices.", 5000)
+        
+        # Collapse the device tree when importing multiple devices
+        if count > 1:
+            self.device_tree.tree_view.collapseAll()
 
     def _export_network_config(self):
         """Export network configuration script for current platform"""
@@ -784,12 +773,11 @@ QTabBar::tab {{ padding: {widget_padding + 2}px {button_padding + 8}px; font-siz
         import logging
         logger = logging.getLogger("MainWindow")
         logger.debug(f"MainWindow: Selection received for {device_name}. Node type: {type(node)}")
-        # Instead of replacing the live data, append the selected node's signals
+        # Only filter view on selection; do NOT auto-add to live data (avoids bulk DA adds during parsing)
         try:
-            self.signals_view.add_node_to_live(node, device_name)
-        except Exception:
-            # Fallback to replacing the filter
             self.signals_view.set_filter_node(node, device_name)
+        except Exception:
+            logger.exception("MainWindow: Failed to update signals view on selection")
 
     def _on_device_updated(self, device_name):
         """Called when a device configuration or internal model changes."""

@@ -118,48 +118,64 @@ class SCDImportDialog(QDialog):
         self._populate_table()
 
     def _populate_table(self):
-        from PySide6.QtWidgets import QComboBox
+        from PySide6.QtWidgets import QComboBox, QApplication
         
-        self.table.setRowCount(0)
-        # We need to sort or filter?
+        # Disable updates during bulk population for better performance
+        self.table.setUpdatesEnabled(False)
+        self.table.setSortingEnabled(False)
         
-        for ied in self.parsed_ieds:
-            row = self.table.rowCount()
-            self.table.insertRow(row)
+        try:
+            self.table.setRowCount(0)
+            # Pre-allocate all rows at once
+            self.table.setRowCount(len(self.parsed_ieds))
             
-            # Name
-            name_item = QTableWidgetItem(ied['name'])
-            name_item.setData(Qt.UserRole, ied.get('description', ''))
-            self.table.setItem(row, 0, name_item)
-            
-            # IP / Access Point Selection
-            # If multiple IPs, use ComboBox
-            ips = ied.get('ips', [])
-            
-            if not ips:
-                 self.table.setItem(row, 1, QTableWidgetItem("N/A"))
-                 self.table.setItem(row, 2, QTableWidgetItem("N/A"))
-            elif len(ips) == 1:
-                 # Simple Text
-                 ip_info = ips[0]
-                 self.table.setItem(row, 1, QTableWidgetItem(ip_info['ip']))
-                 self.table.setItem(row, 2, QTableWidgetItem(f"{ip_info['ap']} ({ip_info['subnetwork']})"))
-            else:
-                 # ComboBox
-                 combo = QComboBox()
-                 for ip_info in ips:
-                     # Item Data: IP, Item Text: IP - AP (SubNet)
-                     desc = f"{ip_info['ip']} - {ip_info['ap']} ({ip_info['subnetwork']})"
-                     combo.addItem(desc, ip_info) # Store full dict in userData
-                 
-                 self.table.setCellWidget(row, 1, combo)
-                 self.table.setItem(row, 2, QTableWidgetItem("Multiple (Select IP)"))
+            for row, ied in enumerate(self.parsed_ieds):
+                # Name
+                name_item = QTableWidgetItem(ied['name'])
+                name_item.setData(Qt.UserRole, ied.get('description', ''))
+                self.table.setItem(row, 0, name_item)
+                
+                # IP / Access Point Selection
+                # If multiple IPs, use ComboBox
+                ips = ied.get('ips', [])
+                
+                if not ips:
+                     self.table.setItem(row, 1, QTableWidgetItem("N/A"))
+                     self.table.setItem(row, 2, QTableWidgetItem("N/A"))
+                elif len(ips) == 1:
+                     # Simple Text
+                     ip_info = ips[0]
+                     self.table.setItem(row, 1, QTableWidgetItem(ip_info['ip']))
+                     # Store full ip info for later use
+                     try:
+                         self.table.item(row, 1).setData(Qt.UserRole, ip_info)
+                     except Exception:
+                         pass
+                     self.table.setItem(row, 2, QTableWidgetItem(f"{ip_info['ap']} ({ip_info['subnetwork']})"))
+                else:
+                     # ComboBox
+                     combo = QComboBox()
+                     for ip_info in ips:
+                         # Item Data: IP, Item Text: IP - AP (SubNet)
+                         desc = f"{ip_info['ip']} - {ip_info['ap']} ({ip_info['subnetwork']})"
+                         combo.addItem(desc, ip_info) # Store full dict in userData
+                     
+                     self.table.setCellWidget(row, 1, combo)
+                     self.table.setItem(row, 2, QTableWidgetItem("Multiple (Select IP)"))
 
-            # Checkbox
-            chk_item = QTableWidgetItem()
-            chk_item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
-            chk_item.setCheckState(Qt.Checked) 
-            self.table.setItem(row, 3, chk_item)
+                # Checkbox
+                chk_item = QTableWidgetItem()
+                chk_item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+                chk_item.setCheckState(Qt.Checked) 
+                self.table.setItem(row, 3, chk_item)
+                
+                # Process events periodically (every 50 rows) to keep UI responsive
+                if row % 50 == 0 and row > 0:
+                    QApplication.processEvents()
+        finally:
+            # Re-enable updates and trigger a single refresh
+            self.table.setSortingEnabled(True)
+            self.table.setUpdatesEnabled(True)
 
 
     def _select_all(self):
@@ -230,6 +246,7 @@ class SCDImportDialog(QDialog):
                 name = self.table.item(row, 0).text()
                 
                 ip = "127.0.0.1"
+                ip_info = None
                 # Check if it's a combobox
                 widget = self.table.cellWidget(row, 1)
                 if widget and isinstance(widget, QComboBox):
@@ -246,17 +263,35 @@ class SCDImportDialog(QDialog):
                         data = widget.currentData()
                         if isinstance(data, dict):
                             ip = data.get('ip', '127.0.0.1')
+                            ip_info = data
                 else:
                     ip_item = self.table.item(row, 1)
                     ip = ip_item.text() if ip_item else "127.0.0.1"
+                    if ip_item:
+                        try:
+                            data = ip_item.data(Qt.UserRole)
+                            if isinstance(data, dict):
+                                ip_info = data
+                        except Exception:
+                            pass
+
+                protocol_params = {}
+                if ip_info:
+                    if ip_info.get('vlan') is not None:
+                        protocol_params['vlan'] = ip_info.get('vlan')
+                    if ip_info.get('vlan_priority') is not None:
+                        protocol_params['vlan_priority'] = ip_info.get('vlan_priority')
+                    if ip_info.get('mac_address'):
+                        protocol_params['mac_address'] = ip_info.get('mac_address')
 
                 configs.append(DeviceConfig(
                     name=name,
                     description=self.table.item(row, 0).data(Qt.UserRole) or "",
                     ip_address=ip,
-                    port=102, 
+                    port=ip_info.get('port', 102) if ip_info else 102,
                     device_type=DeviceType.IEC61850_IED,
-                    scd_file_path=self.scd_path
+                    scd_file_path=self.scd_path,
+                    protocol_params=protocol_params
                 ))
         return configs
 

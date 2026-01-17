@@ -11,6 +11,35 @@ from src.models.device_models import Device
 
 logger = logging.getLogger(__name__)
 
+def _parse_scd_file(file_path):
+    """
+    Helper function for parallel SCD parsing.
+    Must be module-level to be picklable for ProcessPoolExecutor.
+    Returns: (mtime, tree, root, ns) tuple or None on failure
+    """
+    import os
+    import xml.etree.ElementTree as ET
+    
+    try:
+        if not os.path.exists(file_path):
+            return None
+        
+        mtime = os.path.getmtime(file_path)
+        tree = ET.parse(file_path)
+        root = tree.getroot()
+        
+        # Detect namespace
+        if '}' in root.tag:
+            ns_uri = root.tag.split('}')[0].strip('{')
+            ns = {'scl': ns_uri}
+        else:
+            ns = {}
+        
+        return (mtime, tree, root, ns)
+    except Exception as e:
+        logger.error(f"Failed to parse {file_path}: {e}")
+        return None
+
 class Worker(EventEmitter):
     """Base class for workers with event capabilities."""
     def __init__(self):
@@ -94,6 +123,130 @@ class SCDParseWorker(QThread):
             
         except Exception as e:
             self.finished_parsing.emit([], str(e))
+
+class SCDImportWorker(QThread):
+    """Worker to import multiple devices from SCD without blocking UI."""
+    log = Signal(str)
+    progress = Signal(int)
+    finished_import = Signal(int, list)
+    # Safe signal for Qt actions that must happen on main thread
+    device_added = Signal(str)  # device_name
+
+    def __init__(self, device_manager_core, configs, event_logger=None):
+        super().__init__()
+        # Use the CORE manager (not Qt wrapper) to avoid cross-thread Qt calls
+        self.device_manager_core = device_manager_core
+        self.configs = configs
+        self.event_logger = event_logger
+        self._stop_requested = False
+        self._scd_parser_cache = {}  # Cache SCD parsers by file path
+
+    def stop(self):
+        self._stop_requested = True
+
+    def run(self):
+        import time
+        import os
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+        from src.core.scd_parser import SCDParser
+        
+        total = len(self.configs)
+        count = 0
+        errors = []
+
+        # Pre-parse unique SCD files in parallel using multiple CPU cores
+        scd_files = set()
+        for config in self.configs:
+            if config.scd_file_path:
+                scd_files.add(config.scd_file_path)
+        
+        if scd_files:
+            self.log.emit(f"Pre-parsing {len(scd_files)} SCD file(s) using parallel processing...")
+            
+            # Use ProcessPoolExecutor to parse multiple SCD files on different CPU cores
+            max_workers = min(os.cpu_count() or 4, len(scd_files))
+            
+            try:
+                with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                    # Submit all SCD files for parallel parsing
+                    future_to_path = {
+                        executor.submit(_parse_scd_file, scd_path): scd_path 
+                        for scd_path in scd_files
+                    }
+                    
+                    # Collect results as they complete
+                    for future in as_completed(future_to_path):
+                        scd_path = future_to_path[future]
+                        try:
+                            result = future.result()
+                            if result:
+                                # Store pre-parsed result in class-level cache
+                                mtime, tree, root, ns = result
+                                SCDParser._cache[scd_path] = (mtime, tree, root, ns)
+                                self.log.emit(f"  ✓ Cached {os.path.basename(scd_path)}")
+                        except Exception as e:
+                            self.log.emit(f"  ⚠ Failed to parse {os.path.basename(scd_path)}: {e}")
+                            logger.exception(f"Parallel SCD parse error for {scd_path}")
+            except Exception as e:
+                self.log.emit(f"  ⚠ Parallel parsing setup failed, falling back to sequential: {e}")
+                # Fallback to sequential parsing
+                for scd_path in scd_files:
+                    try:
+                        parser = SCDParser(scd_path)
+                        self._scd_parser_cache[scd_path] = parser
+                        self.log.emit(f"  ✓ Cached {os.path.basename(scd_path)}")
+                    except Exception as e:
+                        self.log.emit(f"  ⚠ Failed to pre-parse {os.path.basename(scd_path)}: {e}")
+
+        # Import devices (structure expansion already cached from pre-parse)
+        for i, config in enumerate(self.configs):
+            if self._stop_requested:
+                break
+
+            try:
+                # Only log every 10th device or first/last to reduce UI overhead
+                should_log_detail = (i % 10 == 0 or i == 0 or i == total - 1)
+                
+                if should_log_detail:
+                    self.log.emit(f"[{i+1}/{total}] Importing {config.name} ({config.ip_address})...")
+                
+                # Use core manager directly - no Qt signals emitted here
+                self.device_manager_core.add_device(config)
+                
+                # Load offline SCD to build the device model tree
+                self.device_manager_core.load_offline_scd(config.name)
+                
+                # Notify main thread to update UI (safe cross-thread signal)
+                self.device_added.emit(config.name)
+
+                if should_log_detail:
+                    self.log.emit(f"  ✓ Successfully imported {config.name}")
+
+                if self.event_logger and should_log_detail:
+                    self.event_logger.info("SCDImport", f"Imported device: {config.name} ({config.ip_address})")
+
+                count += 1
+            except Exception as e:
+                import traceback
+                msg = f"Failed to add {config.name}: {e}"
+                self.log.emit(f"  ✗ ERROR: {msg}")
+                # Log full traceback for debugging
+                logger.error(f"Import error for {config.name}: {traceback.format_exc()}")
+                errors.append(msg)
+                if self.event_logger:
+                    self.event_logger.error("SCDImport", f"Import failed for {config.name}: {e}")
+
+            self.progress.emit(i + 1)
+            
+            # Small sleep to allow Qt event loop to process signals
+            time.sleep(0.01)
+
+        self.log.emit(f"\n{'='*50}")
+        self.log.emit(f"Import complete: {count}/{total} devices imported successfully")
+        if errors:
+            self.log.emit(f"Failed: {len(errors)} device(s)")
+
+        self.finished_import.emit(count, errors)
 
 class BulkReadWorker(Worker):
     """Worker to read multiple signals in a background thread."""

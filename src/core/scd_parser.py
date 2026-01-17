@@ -15,12 +15,15 @@ class SCDParser:
     
     # Class-level cache for parsed trees: {file_path: (mtime, tree, root, ns)}
     _cache = {}
+    # Class-level cache for parsed structures: {(file_path, mtime, ied_name): Node}
+    _structure_cache = {}
 
     def __init__(self, file_path: str):
         self.file_path = file_path
         self.tree = None
         self.root = None
         self.ns = {}
+        self.mtime = None
         self._parse()
 
     def _parse(self):
@@ -30,6 +33,7 @@ class SCDParser:
         
         try:
             mtime = os.path.getmtime(self.file_path)
+            file_size = os.path.getsize(self.file_path)
             
             # Check cache
             if self.file_path in self._cache:
@@ -38,9 +42,16 @@ class SCDParser:
                     self.tree = tree
                     self.root = root
                     self.ns = ns
+                    self.mtime = cached_mtime
                     # logger.debug(f"Using cached SCD parse for {self.file_path}")
                     return
 
+            # For large files (>10MB), log progress
+            if file_size > 10 * 1024 * 1024:
+                logger.info(f"Parsing large SCD file ({file_size / (1024*1024):.1f} MB)...")
+            
+            # Parse with iterparse for better memory handling on large files
+            # But still build full tree for compatibility
             self.tree = ET.parse(self.file_path)
             self.root = self.tree.getroot()
             
@@ -52,7 +63,11 @@ class SCDParser:
                 self.ns = {}
             
             # Update cache
+            self.mtime = mtime
             self._cache[self.file_path] = (mtime, self.tree, self.root, self.ns)
+            
+            if file_size > 10 * 1024 * 1024:
+                logger.info(f"SCD parsing complete")
                 
         except Exception as e:
             logger.error(f"Failed to parse SCD file: {e}")
@@ -64,6 +79,12 @@ class SCDParser:
         """
         if self.root is None:
             return Node(name="Error_No_SCD")
+
+        # Check structure cache first
+        cache_key = (self.file_path, self.mtime, ied_name if ied_name else "__first__")
+        if cache_key in self._structure_cache:
+            logger.debug(f"Using cached structure for {ied_name or 'first IED'}")
+            return self._structure_cache[cache_key]
 
         # Find IED element
         ied_element = None
@@ -80,7 +101,9 @@ class SCDParser:
                ied_element = self.root.find(".//IED")
 
         if ied_element is None:
-            return Node(name="IED_Not_Found")
+            result = Node(name="IED_Not_Found")
+            self._structure_cache[cache_key] = result
+            return result
 
         parsed_ied_name = ied_element.get("name", "Unknown_IED")
         ied_desc = ied_element.get("desc", "Offline IED from SCL")
@@ -228,6 +251,10 @@ class SCDParser:
                     
                     ln_node.children.append(goose_root)
 
+        # Cache the completed structure before returning
+        self._structure_cache[cache_key] = root_node
+        logger.debug(f"Cached structure for {parsed_ied_name}")
+        
         return root_node
 
     def _add_detail_leaf(self, parent_node: Node, label: str, value: Any) -> None:
@@ -362,6 +389,75 @@ class SCDParser:
         # Add more mappings as needed
         return SignalType.ANALOG # Default
 
+    def _build_full_address(self, path_prefix: str, elem_name: str, ld_name: str = "") -> str:
+        """Builds a full address with LD prefix if needed."""
+        if ld_name and not path_prefix.startswith(ld_name + "/"):
+            return f"{ld_name}/{path_prefix}.{elem_name}"
+        return f"{path_prefix}.{elem_name}"
+
+    def _is_da_type(self, type_def) -> bool:
+        """Check if a template definition is a DAType element."""
+        return hasattr(type_def, "tag") and type_def.tag.split('}')[-1] == "DAType"
+
+    def _expand_da_type(self, parent_node: Node, da_type_id: str, templates: dict, path_prefix: str, ld_name: str = "", parent_fc: str = ""):
+        """Recursively expand DAType (BDA elements) into signals/children."""
+        da_def = templates.get(da_type_id)
+        if not da_def or not self._is_da_type(da_def):
+            return
+
+        for bda in da_def.findall("scl:BDA", self.ns) + da_def.findall("BDA"):
+            bda_name = bda.get("name")
+            if not bda_name:
+                continue
+
+            bda_btype = bda.get("bType")
+            bda_type_id = bda.get("type")
+            bda_fc = bda.get("fc") or parent_fc
+
+            type_def = templates.get(bda_type_id) if bda_type_id else None
+            is_struct = bda_btype == "Struct" or self._is_da_type(type_def)
+
+            if is_struct:
+                sub_node = Node(name=bda_name, description="Data Attribute")
+                parent_node.children.append(sub_node)
+                new_path = f"{path_prefix}.{bda_name}"
+                self._expand_da_type(sub_node, bda_type_id, templates, new_path, ld_name, bda_fc)
+
+                if not sub_node.children and not sub_node.signals:
+                    parent_node.children.remove(sub_node)
+                    full_address = self._build_full_address(path_prefix, bda_name, ld_name)
+                    sig_type = self._map_btype_to_signal_type(bda_btype)
+                    access = "RW" if bda_fc == "CO" or bda_name == "ctlVal" else "RO"
+                    parent_node.signals.append(Signal(
+                        name=bda_name,
+                        address=full_address,
+                        signal_type=sig_type,
+                        description=f"FC:{bda_fc} Type:{bda_btype}",
+                        access=access,
+                        fc=bda_fc
+                    ))
+                continue
+
+            full_address = self._build_full_address(path_prefix, bda_name, ld_name)
+            sig_type = self._map_btype_to_signal_type(bda_btype)
+            access = "RW" if bda_fc == "CO" or bda_name == "ctlVal" else "RO"
+            signal = Signal(
+                name=bda_name,
+                address=full_address,
+                signal_type=sig_type,
+                description=f"FC:{bda_fc} Type:{bda_btype}",
+                access=access,
+                fc=bda_fc
+            )
+
+            # Enum mapping for BDA
+            if bda_type_id and bda_type_id in templates:
+                possible_enum = templates[bda_type_id]
+                if isinstance(possible_enum, dict):
+                    signal.enum_map = possible_enum
+
+            parent_node.signals.append(signal)
+
     def _expand_do_type(self, parent_node: Node, do_type_id: str, templates: dict, path_prefix: str, ld_name: str = ""):
         """Recursively expand a DO Type into DAs, using path_prefix for full address."""
         dotype_def = templates.get(do_type_id)
@@ -372,34 +468,47 @@ class SCDParser:
             tag = sdo_or_da.tag.split('}')[-1]  # Strip namespace
             elem_name = sdo_or_da.get("name")
             
-            if tag == "DA":  # Data Attribute - this is a signal
+            if tag == "DA":  # Data Attribute
                 fc = sdo_or_da.get("fc")
                 btype = sdo_or_da.get("bType")
+                type_id = sdo_or_da.get("type")
+
+                type_def = templates.get(type_id) if type_id else None
+                is_struct = btype == "Struct" or self._is_da_type(type_def)
+
+                if is_struct:
+                    da_node = Node(name=elem_name, description="Data Attribute")
+                    parent_node.children.append(da_node)
+                    new_path = f"{path_prefix}.{elem_name}"
+                    self._expand_da_type(da_node, type_id, templates, new_path, ld_name, fc)
+
+                    if not da_node.children and not da_node.signals:
+                        parent_node.children.remove(da_node)
+                        full_address = self._build_full_address(path_prefix, elem_name, ld_name)
+                        sig_type = self._map_btype_to_signal_type(btype)
+                        access = "RW" if fc == "CO" or elem_name == "ctVal" else "RO"
+                        parent_node.signals.append(Signal(
+                            name=elem_name,
+                            address=full_address,
+                            signal_type=sig_type,
+                            description=f"FC:{fc} Type:{btype}",
+                            access=access,
+                            fc=fc
+                        ))
+                    continue
+
                 sig_type = self._map_btype_to_signal_type(btype)
-                
-                if elem_name.lower().endswith(".t") or elem_name == "T":
+
+                if elem_name and (elem_name.lower().endswith(".t") or elem_name == "T"):
                     sig_type = SignalType.TIMESTAMP
 
                 # Control Check
                 access = "RO"
                 if fc == "CO" or elem_name == "ctVal":
-                     sig_type = SignalType.COMMAND
-                     access = "RW"
+                    sig_type = SignalType.COMMAND
+                    access = "RW"
 
-                # Build full address with LD prefix
-                # Fix: Check if path_prefix already starts with ld_name to avoid duplication
-                # Although path_prefix usually is LN.DO...
-                # The user reported "GPS...CB1/GPS...CB1/XCBR1.Beh.stVal"
-                # This suggests ld_name was added, and maybe path_prefix also contained it?
-                # Or maybe ld_name itself contained the slash?
-                
-                # Standard check:
-                if ld_name and not path_prefix.startswith(ld_name + "/"):
-                    full_address = f"{ld_name}/{path_prefix}.{elem_name}"
-                else:
-                    # If path_prefix already has the LD (unlikely but safe)
-                    full_address = f"{path_prefix}.{elem_name}"
-                
+                full_address = self._build_full_address(path_prefix, elem_name, ld_name)
                 signal = Signal(
                     name=elem_name,
                     address=full_address,
@@ -408,29 +517,26 @@ class SCDParser:
                     access=access,
                     fc=fc
                 )
-                
+
                 # Check for Enum Mapping
-                type_id = sdo_or_da.get("type")
                 logger.debug(f"DA '{elem_name}': bType={btype}, fc={fc}, type={type_id}")
-                
+
                 if type_id:
-                     # Check if it's an EnumType (dict)
-                     # In our parsing above, enum_types entries are Dicts, while others are xml Elements.
-                     # We stored enums in templates, but they're dicts while LNodeTypes/DOTypes/DATypes are Elements
-                     if type_id in templates:
-                         possible_enum = templates[type_id]
-                         if isinstance(possible_enum, dict):
-                             logger.info(f"✓ Enum mapping for {full_address} ({elem_name}): {possible_enum}")
-                             signal.enum_map = possible_enum
-                             if sig_type == SignalType.ANALOG:
-                                 # Optionally convert to State type for enum values
-                                 pass
-                         else:
-                             # It's a DAType or other complex type, not an enum
-                             logger.debug(f"  Type '{type_id}' is not an EnumType (it's {type(possible_enum).__name__})")
-                     else:
-                         logger.warning(f"  Type '{type_id}' not found in templates for DA '{elem_name}'")
-                
+                    # Check if it's an EnumType (dict)
+                    if type_id in templates:
+                        possible_enum = templates[type_id]
+                        if isinstance(possible_enum, dict):
+                            logger.debug(f"✓ Enum mapping for {full_address} ({elem_name}): {possible_enum}")
+                            signal.enum_map = possible_enum
+                            if sig_type == SignalType.ANALOG:
+                                # Optionally convert to State type for enum values
+                                pass
+                        else:
+                            # It's a DAType or other complex type, not an enum
+                            logger.debug(f"  Type '{type_id}' is not an EnumType (it's {type(possible_enum).__name__})")
+                    else:
+                        logger.warning(f"  Type '{type_id}' not found in templates for DA '{elem_name}'")
+
                 parent_node.signals.append(signal)
                 
             elif tag == "SDO":  # Sub Data Object
@@ -492,6 +598,9 @@ class SCDParser:
                     gateway = None
                     subnet_mask = None
                     port = None
+                    vlan = None
+                    vlan_priority = None
+                    mac_address = None
                     
                     if address:
                         for p in address.findall("scl:P", self.ns) + address.findall("P"):
@@ -503,6 +612,12 @@ class SCDParser:
                                 subnet_mask = p.text
                             elif ptype == "IP-GATEWAY":
                                 gateway = p.text
+                            elif ptype == "VLAN-ID":
+                                vlan = p.text
+                            elif ptype == "VLAN-PRIORITY":
+                                vlan_priority = p.text
+                            elif ptype == "MAC-Address":
+                                mac_address = p.text
                             elif "port" in ptype_norm and p.text:
                                 try:
                                     port = int(p.text)
@@ -523,7 +638,10 @@ class SCDParser:
                             'subnetwork': subnet_name,
                             'mask': subnet_mask,
                             'gateway': gateway,
-                            'port': port or 102
+                            'port': port or 102,
+                            'vlan': vlan,
+                            'vlan_priority': vlan_priority,
+                            'mac_address': mac_address
                         })
 
         # Strategy 2: IED Section (Fallback for IEDs with no Communication info)

@@ -20,6 +20,9 @@ class DeviceManager(QObject):
     connection_progress = QtSignal(str, str, int) 
     signal_updated = QtSignal(str, Signal) 
     project_cleared = QtSignal()
+    batch_load_started = QtSignal()
+    batch_load_finished = QtSignal()
+    batch_clear_started = QtSignal()
 
     def __init__(self, config_path="devices.json"):
         super().__init__()
@@ -33,6 +36,9 @@ class DeviceManager(QObject):
         self._core.on("connection_progress", self.connection_progress.emit)
         self._core.on("signal_updated", self.signal_updated.emit)
         self._core.on("project_cleared", self.project_cleared.emit)
+        self._core.on("batch_load_started", self.batch_load_started.emit)
+        self._core.on("batch_load_finished", self.batch_load_finished.emit)
+        self._core.on("batch_clear_started", self.batch_clear_started.emit)
 
     @property
     def event_logger(self):

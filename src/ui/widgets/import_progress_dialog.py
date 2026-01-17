@@ -45,8 +45,17 @@ class ImportProgressDialog(QDialog):
         sb.setValue(sb.maximum())
         # Update status label with last message
         self.lbl_status.setText(message)
-        from PySide6.QtWidgets import QApplication
-        QApplication.processEvents()
+        # Only process events for important messages to avoid excessive overhead
+        # Process events every ~5 messages or for key messages
+        if not hasattr(self, '_log_count'):
+            self._log_count = 0
+        self._log_count += 1
+        
+        # Process events for: completion messages, errors, or every 5th message
+        if ('✓' in message or '✗' in message or 'complete' in message.lower() or 
+            'failed' in message.lower() or self._log_count % 5 == 0):
+            from PySide6.QtWidgets import QApplication
+            QApplication.processEvents()
         
     def finish(self):
         self.progress.setValue(self.progress.maximum())

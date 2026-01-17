@@ -192,6 +192,9 @@ class DeviceManagerCore(EventEmitter):
 
     def clear_all_devices(self):
         """Remove all devices and cleanup protocols and workers."""
+        # Signal start of batch clear
+        self.emit("batch_clear_started")
+        
         names = list(self._devices.keys())
         for name in names:
             try:
@@ -257,12 +260,18 @@ class DeviceManagerCore(EventEmitter):
             
             self.folder_descriptions.update(folders)
             
+            # Signal start of batch load for UI optimization
+            self.emit("batch_load_started")
+            
             for config_data in configs:
                 try:
                     config = DeviceConfig.from_dict(config_data)
                     self.add_device(config)
                 except Exception as e:
                     logger.error(f"Failed to load device config: {e}")
+            
+            # Signal end of batch load
+            self.emit("batch_load_finished")
             
             logger.info(f"Configuration loaded from {target_path}")
         except Exception as e:
