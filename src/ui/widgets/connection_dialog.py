@@ -14,8 +14,9 @@ class ConnectionDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("🔌 Connect to Device")
-        self.resize(500, 300)
-        self.setMinimumWidth(450)
+        self.resize(600, 500)
+        self.setMinimumWidth(500)
+        self.setMinimumHeight(400)
         
         self.layout = QVBoxLayout(self)
         self.form = QFormLayout()
@@ -31,9 +32,12 @@ class ConnectionDialog(QDialog):
         
         # IP Input with stacking for switching between text and selection
         self.ip_container = QStackedWidget()
+        from PySide6.QtWidgets import QSizePolicy
+        self.ip_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.ip_input = QLineEdit("127.0.0.1")
         self.ip_select = QComboBox()
         self.ip_select.setEditable(True)
+        self.ip_select.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self._populate_local_ips()
         
         self.ip_container.addWidget(self.ip_input)
@@ -98,7 +102,11 @@ class ConnectionDialog(QDialog):
         # IP History
         self.layout.addWidget(QLabel("Recent Connections:"))
         self.history_list = QListWidget()
-        self.history_list.setMaximumHeight(100)
+        self.history_list.setMaximumHeight(200)
+        self.history_list.setMinimumHeight(100)
+        font = self.history_list.font()
+        font.setPointSize(10)
+        self.history_list.setFont(font)
         self.history_list.setToolTip("Double-click to select, Right-click to remove")
         self.history_list.itemDoubleClicked.connect(self._on_history_double_click)
         self.history_list.setContextMenuPolicy(Qt.CustomContextMenu)

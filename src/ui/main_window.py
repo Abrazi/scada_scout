@@ -30,6 +30,7 @@ from src.ui.widgets.connection_progress_dialog import ConnectionProgressDialog
 from src.ui.widgets.import_progress_dialog import ImportProgressDialog
 from src.ui.dialogs.settings_dialog import SettingsDialog
 from src.core.workers import SCDImportWorker
+from src.core.project_manager import ProjectManager
 
 class MainWindow(QMainWindow):
     """
@@ -40,7 +41,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.device_manager = device_manager
         self.event_logger = event_logger
-        self.setWindowTitle("SCADA Scout - Professional Edition")
+        self.setWindowTitle("Scada Scout")
         self.resize(1280, 800)
         
         # Set minimum size to ensure all controls fit in two-row layout
@@ -54,9 +55,10 @@ class MainWindow(QMainWindow):
         self.setAttribute(Qt.WA_ShowWithoutActivating, False)
         self.setFocusPolicy(Qt.StrongFocus)
         
-        # Central Widget (Placeholder for now)
-        self.central_widget = QWidget()
-        self.setCentralWidget(self.central_widget)
+        # Enable VSCode-style dock behavior
+        self.setDockNestingEnabled(True)
+        # Remove empty central widget so docks fill the space proportionally
+        self.setCentralWidget(None)
         
         # Initialize UI Components
         self._setup_ui()
@@ -77,6 +79,11 @@ class MainWindow(QMainWindow):
             self._floating_title = None
         
     def _setup_ui(self):
+        # Initialize Managers first
+        self.watch_list_manager = WatchListManager(self.device_manager)
+        self.project_manager = ProjectManager(self.device_manager, self.watch_list_manager, self.event_logger, self)
+        self._connect_project_signals()
+
         self._create_menus()
         self._create_toolbar()
         self._create_statusbar()
@@ -124,10 +131,15 @@ class MainWindow(QMainWindow):
         open_project_action.triggered.connect(self._on_open_project)
         file_menu.addAction(open_project_action)
         
-        save_project_action = QAction("&Save Project As...", self)
-        save_project_action.setShortcut("Ctrl+Shift+S")
-        save_project_action.triggered.connect(self._on_save_project_as)
+        save_project_action = QAction("&Save Project", self)
+        save_project_action.setShortcut("Ctrl+S")
+        save_project_action.triggered.connect(self._on_save_project)
         file_menu.addAction(save_project_action)
+        
+        save_project_as_action = QAction("Save Project &As...", self)
+        save_project_as_action.setShortcut("Ctrl+Shift+S")
+        save_project_as_action.triggered.connect(self._on_save_project_as)
+        file_menu.addAction(save_project_as_action)
         
         file_menu.addSeparator()
 
@@ -207,6 +219,12 @@ class MainWindow(QMainWindow):
         reset_layout_action.setStatusTip("Restore default panel arrangement")
         reset_layout_action.triggered.connect(self._on_reset_layout)
         self.view_menu.addAction(reset_layout_action)
+        
+        save_layout_action = QAction("&Save Layout as Default", self)
+        save_layout_action.setStatusTip("Save current window size and positions as the default for next startup")
+        save_layout_action.triggered.connect(self._on_save_default_layout)
+        self.view_menu.addAction(save_layout_action)
+        
         self.view_menu.addSeparator()
         
         # Settings action
@@ -222,13 +240,15 @@ class MainWindow(QMainWindow):
         
     def _create_toolbar(self):
         self.toolbar = QToolBar("Main Toolbar")
+        self.toolbar.setObjectName("MainToolbar")
         self.addToolBar(self.toolbar)
         
     def _create_statusbar(self):
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("Ready")
-        # Add a QSizeGrip to support resizing a frameless window
+        
+        # Theme and font are applied from saved settings (or defaults) by MainWindow
         try:
             from PySide6.QtWidgets import QSizeGrip
             grip = QSizeGrip(self)
@@ -239,12 +259,10 @@ class MainWindow(QMainWindow):
     def _create_dock_panels(self):
         from PySide6.QtWidgets import QSizePolicy
         
-        # Left Panel: Device Tree
         self.dock_left = QDockWidget("Device Explorer", self)
+        self.dock_left.setObjectName("DockDeviceExplorer")
         self.dock_left.setAllowedAreas(Qt.AllDockWidgetAreas)
         self.dock_left.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable | QDockWidget.DockWidgetClosable)
-        
-        self.watch_list_manager = WatchListManager(self.device_manager)
         
         self.device_tree = DeviceTreeWidget(self.device_manager, self.watch_list_manager)
         self.device_tree.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -261,6 +279,7 @@ class MainWindow(QMainWindow):
 
         # Right Panel: Signals & Charts (Data Visualization)
         self.dock_right = QDockWidget("Data Visualization", self)
+        self.dock_right.setObjectName("DockDataVisualization")
         self.dock_right.setAllowedAreas(Qt.AllDockWidgetAreas)
         self.dock_right.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable | QDockWidget.DockWidgetClosable)
         
@@ -275,6 +294,7 @@ class MainWindow(QMainWindow):
         
         # Watch List panel  
         self.dock_bottom = QDockWidget("Watch List", self)
+        self.dock_bottom.setObjectName("DockWatchList")
         self.dock_bottom.setAllowedAreas(Qt.AllDockWidgetAreas)
         self.dock_bottom.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable | QDockWidget.DockWidgetClosable)
         
@@ -285,16 +305,21 @@ class MainWindow(QMainWindow):
         
         # Event Log panel
         self.dock_events = QDockWidget("Event Log", self)
+        self.dock_events.setObjectName("DockEventLog")
         self.dock_events.setAllowedAreas(Qt.AllDockWidgetAreas)
         self.dock_events.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable | QDockWidget.DockWidgetClosable)
         
         self.event_log_widget = EventLogWidget()
+        if self.event_logger:
+            self.event_log_widget.set_event_logger(self.event_logger)
         self.event_log_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.dock_events.setWidget(self.event_log_widget)
         self.addDockWidget(Qt.RightDockWidgetArea, self.dock_events)
+        self.device_tree.show_event_log_requested.connect(self.dock_events.raise_)
         
         # Modbus Slave Server panel (hidden by default)
         self.dock_modbus_slave = QDockWidget("Modbus Slave Server", self)
+        self.dock_modbus_slave.setObjectName("DockModbusSlaveServer")
         self.dock_modbus_slave.setAllowedAreas(Qt.AllDockWidgetAreas)
         self.dock_modbus_slave.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable | QDockWidget.DockWidgetClosable)
         
@@ -312,7 +337,13 @@ class MainWindow(QMainWindow):
         self.dock_modbus_slave.setVisible(False)
         
         # Apply initial layout with proper sizing
-        QTimer.singleShot(50, self._apply_initial_layout)
+        # Attempt to load user-saved default layout first
+        if not self._load_default_layout():
+             # If no saved layout, use proportional starting defaults
+             QTimer.singleShot(50, self._apply_initial_layout)
+        else:
+             # Ensure floating title is correctly positioned even after restore
+             QTimer.singleShot(50, lambda: self.resizeEvent(None))
         
         # Add toggle actions to View menu
         self.view_menu.addAction(self.dock_left.toggleViewAction())
@@ -337,9 +368,8 @@ class MainWindow(QMainWindow):
         right_panel_width = max(400, right_panel_width) # Minimum 400px
         bottom_panel_height = max(150, bottom_panel_height) # Minimum 150px
         
-        # Set horizontal dock sizes
-        self.resizeDocks([self.dock_left], [left_panel_width], Qt.Horizontal)
-        self.resizeDocks([self.dock_right], [right_panel_width], Qt.Horizontal)
+        # Set horizontal dock sizes proportionally (Qt uses these as relative weights)
+        self.resizeDocks([self.dock_left, self.dock_right], [left_panel_width, right_panel_width], Qt.Horizontal)
         
         # Set vertical dock sizes  
         self.resizeDocks([self.dock_bottom], [bottom_panel_height], Qt.Vertical)
@@ -358,6 +388,15 @@ class MainWindow(QMainWindow):
     def mousePressEvent(self, event):
         # Only begin drag on left button within title area region (top 40px)
         if event.button() == Qt.LeftButton and event.pos().y() <= 40:
+            # Try native system move first (Wayland friendly)
+            try:
+                if self.windowHandle() and hasattr(self.windowHandle(), 'startSystemMove'):
+                    if self.windowHandle().startSystemMove():
+                        event.accept()
+                        return
+            except Exception:
+                pass
+                
             self._drag_pos_main = event.globalPosition().toPoint()
             event.accept()
             return
@@ -379,8 +418,27 @@ class MainWindow(QMainWindow):
         self._drag_pos_main = None
         return super().mouseReleaseEvent(event)
 
+    def _on_save_default_layout(self):
+        """Saves current geometry and state as the user default."""
+        settings = QSettings("ScadaScout", "Layout")
+        settings.setValue("geometry", self.saveGeometry())
+        settings.setValue("windowState", self.saveState())
+        self.status_bar.showMessage("Default layout saved.", 3000)
+
+    def _load_default_layout(self):
+        """Restores the user's saved default layout if it exists."""
+        settings = QSettings("ScadaScout", "Layout")
+        geometry = settings.value("geometry")
+        state = settings.value("windowState")
+        
+        if geometry:
+            self.restoreGeometry(geometry)
+        if state:
+            return self.restoreState(state)
+        return False
+
     def _on_reset_layout(self):
-        """Restores the default docking layout with flexible sizing."""
+        """Restores the basic docking layout with flexible sizing."""
         self.dock_left.setVisible(True)
         self.dock_right.setVisible(True)
         self.dock_bottom.setVisible(True)
@@ -409,7 +467,8 @@ class MainWindow(QMainWindow):
         settings = QSettings("ScadaScout", "UI")
         
         # Get theme
-        theme = settings.value("theme", "Dark")
+        # Get theme
+        theme = settings.value("theme", "IED Scout-like")
         
         # Check if we need to use custom colors
         custom_colors = settings.value("use_custom_colors", False, type=bool)
@@ -434,6 +493,12 @@ class MainWindow(QMainWindow):
             # Use predefined theme
             if theme == "Dark":
                 base_style = styles.DARK_THEME
+            elif theme == "IED Scout-like":
+                base_style = styles.IED_SCOUT_STYLE
+            elif theme == "Windows 11":
+                base_style = styles.WINDOWS_11_STYLE
+            elif theme == "iOS Style":
+                base_style = styles.IOS_STYLE
             else:
                 base_style = styles.PROFESSIONAL_STYLE
         
@@ -571,7 +636,17 @@ QTabBar::tab {{ padding: {widget_padding + 2}px {button_padding + 8}px; font-siz
         else:
             self.status_bar.showMessage(f"Successfully imported {count} devices.", 5000)
         
-        # Collapse the device tree when importing multiple devices
+        # Refresh and collapse the device tree when importing multiple devices
+        self.event_log_widget.update_device_list(self.device_manager.get_all_devices())
+        
+        # Trigger full tree reload
+        # We need to signal that the device list has changed massively
+        self.device_tree.clear() # Optional clear if supported, or just let update handle it
+        # Re-fetch all devices
+        all_devices = self.device_manager.get_all_devices()
+        for device in all_devices:
+             self.device_tree.add_device(device)
+             
         if count > 1:
             self.device_tree.tree_view.collapseAll()
 
@@ -741,32 +816,86 @@ QTabBar::tab {{ padding: {widget_padding + 2}px {button_padding + 8}px; font-siz
                 f"Successfully started {len(configs)} IEC 61850 simulated IEDs.\nCheck the Device Explorer for status."
             )
 
+    def _connect_project_signals(self):
+        """Connect project manager signals for UI feedback."""
+        self.project_manager.progress_updated.connect(self._on_project_progress)
+        self.project_manager.project_loaded.connect(self._on_project_loaded)
+        self.project_manager.project_saved.connect(self._on_project_saved)
+        self.project_manager.error_occurred.connect(self._on_project_error)
+
+    def _on_project_progress(self, percentage, message):
+        self.status_bar.showMessage(f"{message} ({percentage}%)")
+        if percentage == 100:
+            QTimer.singleShot(3000, lambda: self.status_bar.showMessage("Ready"))
+
+    def _on_project_loaded(self):
+        # Restore UI state
+        data = getattr(self.project_manager, 'ui_data', {})
+        if data.get('window_state'):
+            self.restoreState(data['window_state'])
+        if data.get('window_geometry'):
+            self.restoreGeometry(data['window_geometry'])
+        
+        # Clear/Refresh UI components
+        self.device_tree.clear()
+        for device in self.device_manager.get_all_devices():
+            self.device_tree.add_device(device)
+            
+        self.status_bar.showMessage(f"Project loaded: {os.path.basename(self.project_manager.current_project_path)}", 5000)
+        self.event_logger.info("Project", f"Successfully loaded project from {self.project_manager.current_project_path}")
+
+    def _on_project_saved(self, filepath):
+        self.status_bar.showMessage(f"Project saved to: {os.path.basename(filepath)}", 5000)
+        self.event_logger.info("Project", f"Successfully saved project to {filepath}")
+
+    def _on_project_error(self, message):
+        QMessageBox.critical(self, "Project Error", message)
+
     # Project Management Handlers
     def _on_new_project(self):
         """Clears the workspace for a new project."""
         reply = QMessageBox.question(self, 'New Project', 
-                                    "This will clear all current devices and settings. Continue?",
+                                    "This will clear all current devices and signals. Continue?",
                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if reply == QMessageBox.Yes:
             self.device_manager.clear_all_devices()
-            self.statusBar().showMessage("New project started", 3000)
+            self.watch_list_manager.clear_all()
+            self.project_manager.current_project_path = None
+            self.status_bar.showMessage("New project started", 3000)
 
     def _on_open_project(self):
         """Opens a project file."""
-        file_path, _ = QFileDialog.getOpenFileName(self, "Open Project", "", "Project Files (*.json);;All Files (*)")
+        file_path, _ = QFileDialog.getOpenFileName(self, "Open Project", "", "Project Files (*.mss);;All Files (*)")
         if file_path:
-            # We don't need to manually clear, device_manager.load_configuration emits project_cleared
-            self.device_manager.load_configuration(file_path)
-            self.statusBar().showMessage(f"Loaded project: {os.path.basename(file_path)}", 3000)
+            self.project_manager.load_project(file_path)
+
+    def _on_save_project(self):
+        """Saves current project to the current file path."""
+        if self.project_manager.current_project_path:
+            self._save_project_to_path(self.project_manager.current_project_path)
+        else:
+            self._on_save_project_as()
 
     def _on_save_project_as(self):
         """Saves current state to a new project file."""
-        file_path, _ = QFileDialog.getSaveFileName(self, "Save Project As", "", "Project Files (*.json);;All Files (*)")
+        file_path, _ = QFileDialog.getSaveFileName(self, "Save Project As", "", "Project Files (*.mss);;All Files (*)")
         if file_path:
-            if not file_path.endswith('.json'):
-                file_path += '.json'
-            self.device_manager.save_configuration(file_path)
-            self.statusBar().showMessage(f"Project saved to: {os.path.basename(file_path)}", 3000)
+            if not file_path.endswith('.mss'):
+                file_path += '.mss'
+            self._save_project_to_path(file_path)
+
+    def _save_project_to_path(self, file_path):
+        # Capture current UI state
+        state = self.saveState().data()
+        geometry = self.saveGeometry().data()
+        
+        # Get current settings
+        app_settings = {
+            'theme': QSettings().value("theme", "Professional"),
+            'font_size': QSettings().value("font_size", 10)
+        }
+        
+        self.project_manager.save_project(file_path, state, geometry, app_settings)
 
     def _on_tree_selection_changed(self, node, device_name):
         """Updates the signals view based on selected tree node."""
@@ -792,4 +921,9 @@ QTabBar::tab {{ padding: {widget_padding + 2}px {button_padding + 8}px; font-siz
 
     def closeEvent(self, event):
         """Handle window close event."""
+        # Auto-save layout if enabled in settings
+        settings = QSettings("ScadaScout", "UI")
+        if settings.value("auto_save_layout", True, type=bool):
+            self._on_save_default_layout()
+            
         super().closeEvent(event)

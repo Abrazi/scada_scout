@@ -30,11 +30,11 @@ class DeviceManagerCore(EventEmitter):
         # Authoritative Subscription Manager
         self.subscription_manager = IECSubscriptionManager()
 
-    def add_device(self, config: DeviceConfig):
+    def add_device(self, config: DeviceConfig, save: bool = True):
         """Creates a new device from config and registers it."""
         if config.name in self._devices:
             logger.warning(f"Device '{config.name}' already exists.")
-            return
+            return None
         
         device = Device(config=config)
         self._devices[config.name] = device
@@ -48,15 +48,16 @@ class DeviceManagerCore(EventEmitter):
             
         logger.info(f"Device added: {config.name} ({config.device_type.value})")
         self.emit("device_added", device)
-        self.save_configuration()
+        if save:
+            self.save_configuration()
         
         # Try to populate tree immediately (Offline Discovery)
         self.load_offline_scd(config.name)
         
         return device
 
-    def remove_device(self, device_name: str):
-        """Removes a device and cleans up its connection."""
+    def remove_device(self, device_name: str, save: bool = True):
+        """Removes a device and cleans up its connection. Set save=False for batch operations."""
         if device_name in self._devices:
             # Disconnect protocol and cleanup
             try:
@@ -90,7 +91,20 @@ class DeviceManagerCore(EventEmitter):
 
             logger.info(f"Device removed: {device_name}")
             self.emit("device_removed", device_name)
-            self.save_configuration()
+            if save:
+                self.save_configuration()
+
+    def remove_devices_bulk(self, device_names: List[str]):
+        """Removes multiple devices efficiently with single save operation."""
+        # Log batch start
+        logger.info(f"Batch removing {len(device_names)} devices...")
+        self.emit("batch_clear_started") # Signal UI to pause updates
+        
+        for name in device_names:
+            self.remove_device(name, save=False)
+            
+        self.save_configuration()
+        self.emit("project_cleared") # Trigger full UI refresh (easiest way to sync)
 
     def set_discovery_mode(self, device_name: str, use_scd: bool):
         """Switches between SCD and Online discovery for a device."""
@@ -266,12 +280,13 @@ class DeviceManagerCore(EventEmitter):
             for config_data in configs:
                 try:
                     config = DeviceConfig.from_dict(config_data)
-                    self.add_device(config)
+                    self.add_device(config, save=False)
                 except Exception as e:
                     logger.error(f"Failed to load device config: {e}")
             
             # Signal end of batch load
             self.emit("batch_load_finished")
+            self.save_configuration()
             
             logger.info(f"Configuration loaded from {target_path}")
         except Exception as e:

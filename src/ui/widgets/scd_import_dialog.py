@@ -64,11 +64,57 @@ class SCDImportDialog(QDialog):
         self.parsed_ieds = []
 
     def _browse_file(self):
-        fname, _ = QFileDialog.getOpenFileName(self, "Open SCL File", "", "SCL Files (*.scd *.cid *.icd *.xml)")
+        filters = "SCL Files (*.scd *.cid *.icd *.xml *.zip *.tar *.gz *.tgz *.7z *.rar *.sz);;All Files (*)"
+        fname, _ = QFileDialog.getOpenFileName(self, "Open SCL File", "", filters)
         if fname:
-            self.scd_path = fname
-            self.lbl_file.setText(fname)
-            self._parse_and_list_with_progress(fname)
+            from src.utils.archive_utils import ArchiveExtractor
+            import os
+            import tempfile
+            
+            # Check if it's an archive
+            if ArchiveExtractor.is_archive(fname):
+                self.lbl_file.setText(f"Archive: {os.path.basename(fname)}")
+                
+                # List files
+                files = ArchiveExtractor.list_files(fname)
+                if not files:
+                    QMessageBox.warning(self, "Empty Archive", "Could not list files in the archive or archive is empty.")
+                    return
+
+                # Filter for likely SCL files
+                scl_files = [f for f in files if f.lower().endswith(('.scd', '.cid', '.icd', '.xml'))]
+                
+                if not scl_files:
+                     if len(files) > 0:
+                        # If no obvious SCL files, show all
+                        scl_files = files
+                     else:
+                        QMessageBox.warning(self, "No SCL Files", "No .scd, .cid, .icd, or .xml files found in archive.")
+                        return
+
+                # Ask user to pick one
+                from PySide6.QtWidgets import QInputDialog
+                item, ok = QInputDialog.getItem(self, "Select SCL File", 
+                                              "Found the following files in archive:\nSelect one to parse:", 
+                                              scl_files, 0, False)
+                
+                if ok and item:
+                    try:
+                        # Extract to temp
+                        temp_dir = tempfile.mkdtemp(prefix="scada_scout_scd_")
+                        self.temp_dir = temp_dir # Keep ref to clean up later? 
+                        # Actually standard practice is clean up on close, mostly fine to leave in tmp for session
+                        
+                        extracted_path = ArchiveExtractor.extract_file(fname, item, temp_dir)
+                        self.scd_path = extracted_path
+                        self.lbl_file.setText(f"{os.path.basename(fname)} / {item}")
+                        self._parse_and_list_with_progress(extracted_path)
+                    except Exception as e:
+                        QMessageBox.critical(self, "Extraction Error", f"Failed to extract file:\n{str(e)}")
+            else:
+                self.scd_path = fname
+                self.lbl_file.setText(fname)
+                self._parse_and_list_with_progress(fname)
     
     def _parse_and_list_with_progress(self, path):
         """Parse SCD file with progress feedback using background thread."""

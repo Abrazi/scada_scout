@@ -90,7 +90,8 @@ class SettingsDialog(QDialog):
         theme_layout = QFormLayout(theme_group)
         
         self.theme_combo = QComboBox()
-        self.theme_combo.addItems(["Professional (Light)", "Dark", "Custom"])
+        self.theme_combo.addItems(["IED Scout-like", "Windows 11", "iOS Style", "Professional (Light)", "Dark", "Custom"])
+        self.theme_combo.currentTextChanged.connect(self._on_theme_changed)
         theme_layout.addRow("Color Theme:", self.theme_combo)
 
         # Use custom colors (enabled automatically when theme = Custom)
@@ -140,6 +141,8 @@ class SettingsDialog(QDialog):
         
         self.font_family = QFontComboBox()
         font_layout.addRow("Font Family:", self.font_family)
+        
+
         
         self.font_size = QSpinBox()
         self.font_size.setRange(8, 20)
@@ -241,11 +244,12 @@ class SettingsDialog(QDialog):
         self.button_padding.setSuffix(" px")
         spacing_layout.addRow("Button Padding:", self.button_padding)
         
-        self.border_radius = QSpinBox()
-        self.border_radius.setRange(0, 12)
-        self.border_radius.setValue(4)
         self.border_radius.setSuffix(" px")
         spacing_layout.addRow("Border Radius:", self.border_radius)
+        
+        self.auto_save_layout = QCheckBox("Auto-save window layout on exit")
+        self.auto_save_layout.setChecked(True)
+        spacing_layout.addRow("", self.auto_save_layout)
         
         layout.addWidget(spacing_group)
         
@@ -425,7 +429,7 @@ For more details, see README.md and docs/ folder.
     def _load_settings(self):
         """Load saved settings."""
         # Appearance
-        self.theme_combo.setCurrentText(self.settings.value("theme", "Dark"))
+        self.theme_combo.setCurrentText(self.settings.value("theme", "IED Scout-like"))
         self.use_custom_colors.setChecked(self.settings.value("use_custom_colors", False, type=bool))
         # capture_backend moved to Network tab
         try:
@@ -467,6 +471,7 @@ For more details, see README.md and docs/ folder.
         self.widget_padding.setValue(int(self.settings.value("widget_padding", 8)))
         self.button_padding.setValue(int(self.settings.value("button_padding", 8)))
         self.border_radius.setValue(int(self.settings.value("border_radius", 4)))
+        self.auto_save_layout.setChecked(self.settings.value("auto_save_layout", True, type=bool))
         self.button_height.setValue(int(self.settings.value("button_height", 32)))
         self.input_height.setValue(int(self.settings.value("input_height", 32)))
         self.icon_size.setValue(int(self.settings.value("icon_size", 24)))
@@ -554,6 +559,7 @@ For more details, see README.md and docs/ folder.
         self.settings.setValue("widget_padding", self.widget_padding.value())
         self.settings.setValue("button_padding", self.button_padding.value())
         self.settings.setValue("border_radius", self.border_radius.value())
+        self.settings.setValue("auto_save_layout", self.auto_save_layout.isChecked())
         self.settings.setValue("button_height", self.button_height.value())
         self.settings.setValue("input_height", self.input_height.value())
         self.settings.setValue("icon_size", self.icon_size.value())
@@ -775,6 +781,7 @@ For more details, see README.md and docs/ folder.
         self.widget_padding.valueChanged.connect(self._schedule_apply)
         self.button_padding.valueChanged.connect(self._schedule_apply)
         self.border_radius.valueChanged.connect(self._schedule_apply)
+        self.auto_save_layout.stateChanged.connect(self._schedule_apply)
         self.button_height.valueChanged.connect(self._schedule_apply)
         self.input_height.valueChanged.connect(self._schedule_apply)
         self.icon_size.valueChanged.connect(self._schedule_apply)
@@ -801,3 +808,98 @@ For more details, see README.md and docs/ folder.
             self.default_max_files.valueChanged.connect(self._schedule_apply)
         except Exception:
             pass
+
+    def _on_theme_changed(self, theme_name):
+        """Update settings based on selected theme."""
+        # Define theme defaults
+        defaults = {}
+        if theme_name == "IED Scout-like":
+            defaults = {
+                "style": "Modern", 
+                "primary_color": "#005baa", 
+                "bg_main": "#ffffff",
+                "bg_widget": "#ffffff",
+                "bg_alternate": "#f8f9fa",
+                "widget_padding": 8,
+                "button_padding": 8,
+                "border_radius": 4
+            }
+        elif theme_name == "Windows 11":
+            defaults = {
+                "style": "Modern", 
+                "primary_color": "#0067c0", 
+                "bg_main": "#f3f3f3",
+                "bg_widget": "#ffffff",
+                "bg_alternate": "#f0f0f0",
+                "widget_padding": 12,
+                "button_padding": 10,
+                "border_radius": 8
+            }
+        elif theme_name == "iOS Style":
+            defaults = {
+                "style": "Flat", 
+                "primary_color": "#007aff", 
+                "bg_main": "#f2f2f7",
+                "bg_widget": "#ffffff",
+                "bg_alternate": "#e5e5ea",
+                "widget_padding": 10,
+                "button_padding": 12,
+                "border_radius": 10
+            }
+        elif theme_name == "Dark":
+             defaults = {
+                "style": "Modern", 
+                "primary_color": "#3498db", 
+                "bg_main": "#1e1e1e",
+                "bg_widget": "#2d2d2d",
+                "bg_alternate": "#252525",
+                "widget_padding": 8,
+                "button_padding": 8,
+                "border_radius": 4
+            }
+        else: # Professional (Light) or Custom
+             defaults = {
+                "style": "Modern", 
+                "primary_color": "#3498db", 
+                "bg_main": "#f5f6f7",
+                "bg_widget": "#ffffff",
+                "bg_alternate": "#f8f9fa",
+                "widget_padding": 8,
+                "button_padding": 8,
+                "border_radius": 4
+            }
+            
+        # Apply defaults to UI controls if not custom
+        if theme_name != "Custom":
+            self.use_custom_colors.setChecked(False) # Do not check this automatically to avoid confusing override behavior
+            
+            # Update Appearance tab
+            index = self.style_combo.findText(defaults["style"])
+            if index >= 0:
+                self.style_combo.setCurrentIndex(index)
+            
+            # Update Layout Tab
+            self.widget_padding.setValue(defaults["widget_padding"])
+            self.button_padding.setValue(defaults["button_padding"])
+            self.border_radius.setValue(defaults["border_radius"])
+                
+            # Update Colors tab (populate inputs)
+            self._update_color_button(self.primary_color, defaults["primary_color"])
+            self._update_color_button(self.bg_main, defaults["bg_main"])
+            self._update_color_button(self.bg_widget, defaults["bg_widget"])
+            self._update_color_button(self.bg_alternate, defaults["bg_alternate"])
+            
+            # Set other colors to common defaults
+            if theme_name == "Dark":
+                self._update_color_button(self.accent_color, "#2980b9")
+                self._update_color_button(self.success_color, "#2ecc71")
+                self._update_color_button(self.warning_color, "#f1c40f")
+                self._update_color_button(self.error_color, "#e74c3c")
+            else: # Light themes
+                self._update_color_button(self.accent_color, "#1abc9c")
+                self._update_color_button(self.success_color, "#27ae60")
+                self._update_color_button(self.warning_color, "#f39c12")
+                self._update_color_button(self.error_color, "#e74c3c")
+
+        # Trigger a live apply to show changes immediately
+        self._live_apply_timer.start(100)

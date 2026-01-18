@@ -9,6 +9,8 @@ from datetime import datetime
 from src.core.packet_capture import PacketCaptureWorker
 import psutil
 
+from src.core.event_logger import EventLogger
+
 class EventLogWidget(QWidget):
     """
     Widget for displaying diagnostic events and IEC 61850 transactions.
@@ -137,13 +139,15 @@ class EventLogWidget(QWidget):
         # Populate interfaces initially
         self._populate_ifaces()
 
-        self.all_events = [] # Store all events to support filtering
         self.is_paused = False
         self.source_filter = "All Sources" # or specific device name
         
         self.capture_worker = PacketCaptureWorker()
         self.capture_worker.packet_captured.connect(self._on_packet_captured)
         self.capture_worker.error_occurred.connect(self._on_capture_error)
+        
+        # New: If logger is provided, connect to it
+        self.event_logger = None
 
         # Apply saved defaults from settings (if any)
         try:
@@ -371,7 +375,9 @@ class EventLogWidget(QWidget):
         self.combo_source.insertSeparator(2)
         
         for dev in devices:
-            self.combo_source.addItem(dev)
+            # Handle if dev is a Device object or a string name
+            name = dev.config.name if hasattr(dev, 'config') else str(dev)
+            self.combo_source.addItem(name)
             
         # restore selection if possible
         idx = self.combo_source.findText(current)
@@ -395,18 +401,34 @@ class EventLogWidget(QWidget):
     def _apply_source_filter(self, text):
         self.source_filter = text
         self._refresh_log_view()
-        
+
+    def set_event_logger(self, logger: EventLogger):
+        """Connects the widget to a core event logger."""
+        self.event_logger = logger
+        self.event_logger.event_logged.connect(self.log_event)
+        self.event_logger.history_cleared.connect(self._on_history_cleared)
+        # Load existing history
+        self._refresh_log_view()
+
+    def _on_history_cleared(self):
+        self._refresh_log_view()
+
     def _refresh_log_view(self):
         """Re-populates the text area based on current filter."""
         self.text_edit.clear()
-        for event in self.all_events:
+        if not self.event_logger:
+            return
+            
+        for event in self.event_logger.get_history():
             self._display_event(event)
 
     def log_event(self, level: str, source: str, message: str):
-        """Add an event to the log with timestamp and color coding."""
+        """Processes an event from the logger or direct call."""
         if self.is_paused:
             return
 
+        # Create a display-only event dict if it wasn't already in history
+        # (Though usually this will be called via Signal)
         timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
         
         event = {
@@ -415,7 +437,6 @@ class EventLogWidget(QWidget):
             'source': source,
             'message': message
         }
-        self.all_events.append(event)
         
         self._display_event(event)
         
@@ -496,9 +517,11 @@ class EventLogWidget(QWidget):
     
     def clear_log(self):
         """Clear all log entries."""
-        self.text_edit.clear()
-        self.all_events = []
-        self.log_event("INFO", "EventLog", "Log cleared")
+        if self.event_logger:
+            self.event_logger.clear_history()
+        else:
+            self.text_edit.clear()
+            self.log_event("INFO", "EventLog", "Log cleared")
     
     def _export_log(self):
         """Export log to file."""
@@ -515,40 +538,5 @@ class EventLogWidget(QWidget):
             try:
                 with open(filename, 'w') as f:
                     f.write(self.text_edit.toPlainText())
-                self.log_event("INFO", "EventLog", f"Exported to {filename}")
             except Exception as e:
-                self.log_event("ERROR", "EventLog", f"Export failed: {e}")
-
-
-class EventLogger(QObject):
-    """
-    Centralized event logger that can be used across the application.
-    """
-    event_logged = QtSignal(str, str, str)  # level, source, message
-    
-    def __init__(self):
-        super().__init__()
-        
-    def log(self, level: str, source: str, message: str):
-        """Emit a log event."""
-        self.event_logged.emit(level, source, message)
-        
-    def transaction(self, source: str, message: str):
-        """Log an IEC 61850 transaction."""
-        self.event_logged.emit("TRANSACTION", source, message)
-        
-    def error(self, source: str, message: str):
-        """Log an error."""
-        self.event_logged.emit("ERROR", source, message)
-        
-    def warning(self, source: str, message: str):
-        """Log a warning."""
-        self.event_logged.emit("WARNING", source, message)
-        
-    def info(self, source: str, message: str):
-        """Log info."""
-        self.event_logged.emit("INFO", source, message)
-        
-    def debug(self, source: str, message: str):
-        """Log debug."""
-        self.event_logged.emit("DEBUG", source, message)
+                pass

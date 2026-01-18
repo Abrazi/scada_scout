@@ -24,6 +24,7 @@ class SCDParser:
         self.root = None
         self.ns = {}
         self.mtime = None
+        self._templates = None  # Cache for parsed data type templates
         self._parse()
 
     def _parse(self):
@@ -45,7 +46,7 @@ class SCDParser:
                     self.mtime = cached_mtime
                     # logger.debug(f"Using cached SCD parse for {self.file_path}")
                     return
-
+        
             # For large files (>10MB), log progress
             if file_size > 10 * 1024 * 1024:
                 logger.info(f"Parsing large SCD file ({file_size / (1024*1024):.1f} MB)...")
@@ -65,6 +66,7 @@ class SCDParser:
             # Update cache
             self.mtime = mtime
             self._cache[self.file_path] = (mtime, self.tree, self.root, self.ns)
+            self._templates = None # Reset templates cache on new parse
             
             if file_size > 10 * 1024 * 1024:
                 logger.info(f"SCD parsing complete")
@@ -300,17 +302,22 @@ class SCDParser:
 
         parent_node.children.append(entries_root)
 
-    def _expand_ln_type_with_path(self, ln_node: Node, ln_type_id: str, path_prefix: str, ld_name: str = ""):
-        """
-        Recursively expand an LN Type into DOs and DAs.
-        path_prefix is typically 'LD_NAME/LN_NAME' (e.g., 'GPS01ECB01/XCBR1')
-        """
+
+    def _get_templates(self):
+        """Lazy load and cache DataTypeTemplates."""
+        if self._templates is not None:
+            return self._templates
+            
+        if self.root is None:
+            return {}
+
         # Find DataTypeTemplates (not DataModelDirectory!)
         templates_root = self.root.find("scl:DataTypeTemplates", self.ns)
         if not templates_root:
             templates_root = self.root.find("DataTypeTemplates")
         if not templates_root:
-            return
+            self._templates = {}
+            return {}
 
         # Build template dictionaries
         lnode_types = {}
@@ -344,13 +351,19 @@ class SCDParser:
                              enums[int(ord_val)] = text_val
                          except: pass
                 enum_types[eid] = enums
-                logger.debug(f"Parsed EnumType '{eid}' with {len(enums)} values: {enums}")
+        
+        # Combine all into one lookup (IDs should be unique across types mostly, or context aware)
+        # Storing combined for simplicity as per original design
+        self._templates = {**lnode_types, **do_types, **da_types, **enum_types}
+        logger.debug(f"Cached {len(self._templates)} templates")
+        return self._templates
 
-        logger.debug(f"Total EnumTypes found: {len(enum_types)}")
-        templates = {**lnode_types, **do_types, **da_types, **enum_types} # Include enums in templates for easy lookup if needed (though we separate them mostly)
-        # Store enums separately or mix them? 
-        # _expand_do_type receives `templates`. Let's assume we can lookup enums by ID in `templates`.
-        # Since ids are unique across types usually, this should be fine.
+    def _expand_ln_type_with_path(self, ln_node: Node, ln_type_id: str, path_prefix: str, ld_name: str = ""):
+        """
+        Recursively expand an LN Type into DOs and DAs.
+        path_prefix is typically 'LD_NAME/LN_NAME' (e.g., 'GPS01ECB01/XCBR1')
+        """
+        templates = self._get_templates()
 
         # Lookup LNType
         lntype_def = templates.get(ln_type_id)

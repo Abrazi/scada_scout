@@ -18,3 +18,9 @@ psutil>=5.9.0
 pytest>=7.4.0
 pytest-qt>=4.2.0
 ipython>=8.14.0
+
+# Archive Support
+py7zr>=0.20.0
+rarfile>=4.0
+patool>=1.12
+cramjam>=2.7.0

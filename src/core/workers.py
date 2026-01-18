@@ -161,42 +161,20 @@ class SCDImportWorker(QThread):
                 scd_files.add(config.scd_file_path)
         
         if scd_files:
-            self.log.emit(f"Pre-parsing {len(scd_files)} SCD file(s) using parallel processing...")
+            self.log.emit(f"Parsing {len(scd_files)} SCD file(s)...")
             
-            # Use ProcessPoolExecutor to parse multiple SCD files on different CPU cores
-            max_workers = min(os.cpu_count() or 4, len(scd_files))
-            
-            try:
-                with ProcessPoolExecutor(max_workers=max_workers) as executor:
-                    # Submit all SCD files for parallel parsing
-                    future_to_path = {
-                        executor.submit(_parse_scd_file, scd_path): scd_path 
-                        for scd_path in scd_files
-                    }
+            # Sequential parsing to avoid multiprocessing/Qt issues
+            for scd_path in scd_files:
+                if self._stop_requested:
+                    break
                     
-                    # Collect results as they complete
-                    for future in as_completed(future_to_path):
-                        scd_path = future_to_path[future]
-                        try:
-                            result = future.result()
-                            if result:
-                                # Store pre-parsed result in class-level cache
-                                mtime, tree, root, ns = result
-                                SCDParser._cache[scd_path] = (mtime, tree, root, ns)
-                                self.log.emit(f"  ✓ Cached {os.path.basename(scd_path)}")
-                        except Exception as e:
-                            self.log.emit(f"  ⚠ Failed to parse {os.path.basename(scd_path)}: {e}")
-                            logger.exception(f"Parallel SCD parse error for {scd_path}")
-            except Exception as e:
-                self.log.emit(f"  ⚠ Parallel parsing setup failed, falling back to sequential: {e}")
-                # Fallback to sequential parsing
-                for scd_path in scd_files:
-                    try:
-                        parser = SCDParser(scd_path)
-                        self._scd_parser_cache[scd_path] = parser
-                        self.log.emit(f"  ✓ Cached {os.path.basename(scd_path)}")
-                    except Exception as e:
-                        self.log.emit(f"  ⚠ Failed to pre-parse {os.path.basename(scd_path)}: {e}")
+                try:
+                    parser = SCDParser(scd_path)
+                    self._scd_parser_cache[scd_path] = parser
+                    self.log.emit(f"  ✓ Parsed {os.path.basename(scd_path)}")
+                except Exception as e:
+                    self.log.emit(f"  ⚠ Failed to parse {os.path.basename(scd_path)}: {e}")
+
 
         # Import devices (structure expansion already cached from pre-parse)
         for i, config in enumerate(self.configs):
@@ -210,14 +188,16 @@ class SCDImportWorker(QThread):
                 if should_log_detail:
                     self.log.emit(f"[{i+1}/{total}] Importing {config.name} ({config.ip_address})...")
                 
-                # Use core manager directly - no Qt signals emitted here
-                self.device_manager_core.add_device(config)
+                # Use core manager directly - pass save=False to avoid redundant disk writes
+                self.device_manager_core.add_device(config, save=False)
                 
-                # Load offline SCD to build the device model tree
-                self.device_manager_core.load_offline_scd(config.name)
+                # Note: load_offline_scd is already called inside add_device(), 
+                # no need to call it manually here.
                 
                 # Notify main thread to update UI (safe cross-thread signal)
-                self.device_added.emit(config.name)
+                # PERFORMANCE: Disable per-device UI update for bulk imports to prevent freezing
+                # The UI will be refreshed once at the end.
+                # self.device_added.emit(config.name)
 
                 if should_log_detail:
                     self.log.emit(f"  ✓ Successfully imported {config.name}")
@@ -240,6 +220,13 @@ class SCDImportWorker(QThread):
             
             # Small sleep to allow Qt event loop to process signals
             time.sleep(0.01)
+
+        # PERFORMANCE: Perform a single bulk save after all devices are added
+        try:
+            self.device_manager_core.save_configuration()
+            self.log.emit("✓ Persisted device configurations")
+        except Exception as e:
+            self.log.emit(f"⚠ Failed to save final configuration: {e}")
 
         self.log.emit(f"\n{'='*50}")
         self.log.emit(f"Import complete: {count}/{total} devices imported successfully")

@@ -35,8 +35,8 @@ def main():
         # theme plugin DBus logging which fails under some desktop sandboxes.
         os.environ.setdefault("QT_QPA_PLATFORMTHEME", "")
         os.environ.setdefault("QT_STYLE_OVERRIDE", "Fusion")
-        # Silence specific noisy theme plugin messages (qt.qpa.theme.gnome)
-        os.environ.setdefault("QT_LOGGING_RULES", "qt.qpa.theme.gnome=false;qt.qpa.theme=false")
+        # Silence specific noisy theme plugin messages and Wayland grab warnings
+        os.environ.setdefault("QT_LOGGING_RULES", "qt.qpa.theme.gnome=false;qt.qpa.theme=false;qt.qpa.wayland=false")
 
         # Detect and set appropriate Qt platform plugin for Wayland/X11 compatibility
         session_type = os.environ.get("XDG_SESSION_TYPE", "").lower()
@@ -44,7 +44,9 @@ def main():
             os.environ["QT_QPA_PLATFORM"] = "wayland"
         elif session_type == "x11" or os.environ.get("DISPLAY"):
             os.environ["QT_QPA_PLATFORM"] = "xcb"
-        # Let Qt auto-detect for other cases
+        
+        # Performance: Use hardware acceleration for graphics if possible
+        os.environ.setdefault("QT_QUICK_BACKEND", "software") # Fallback to stable software rendering if needed
 
         print("Initializing QApplication...")
         app = QApplication(sys.argv)
@@ -63,14 +65,12 @@ def main():
         print("Creating main window...")
         window = MainWindow(device_manager, event_logger=controller.event_logger)
         
-        # Connect event logger to event log widget (Internal App Events)
-        if hasattr(window, 'event_log_widget'):
-            controller.event_logger.event_logged.connect(window.event_log_widget.log_event)
-        
         # Connect Python Logging to event log widget
+        # Centralized via QtLogHandler which signals the UI
         from src.core.logging_handler import QtLogHandler
         qt_handler = QtLogHandler()
         if hasattr(window, 'event_log_widget'):
+            # This is the only place Python logs are connected to the UI
             qt_handler.new_record.connect(window.event_log_widget.log_event)
         
         # Add handler to root logger

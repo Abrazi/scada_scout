@@ -5,7 +5,7 @@ from src.core.device_manager import DeviceManager
 from src.core.update_engine import UpdateEngine
 from src.core.watch_list_manager import WatchListManager
 from src.models.device_models import DeviceConfig, DeviceType
-from src.ui.widgets.event_log_widget import EventLogger
+from src.core.event_logger import EventLogger
 
 logger = logging.getLogger(__name__)
 

@@ -21,6 +21,7 @@ class DeviceTreeWidget(QWidget):
     # For now, let's emit the Node object so the SignalsView can filter.
     selection_changed = QtSignal(object, str) # Node or Device or Signal, device_name
     add_to_live_data_requested = QtSignal(object) # Emits signal definition payload (allow node objects)
+    show_event_log_requested = QtSignal() # Requests bringing Event Log to focus
 
     def __init__(self, device_manager, watch_list_manager=None, parent=None):
         super().__init__(parent)
@@ -111,6 +112,14 @@ class DeviceTreeWidget(QWidget):
         self.device_items = {}  # device_name -> QStandardItem 
         self._setup_model()
         self._connect_signals()
+
+    def clear(self):
+        """Clears all devices and folders from the tree."""
+        self._setup_model(populate=False)
+
+    def add_device(self, device):
+        """Public method to add a device node to the tree."""
+        self._add_device_node(device)
         
         # Connect batch load signals
         self.device_manager.batch_load_started.connect(self.start_batch_load)
@@ -336,8 +345,8 @@ class DeviceTreeWidget(QWidget):
         # Make cells bigger by default
         self.tree_view.setStyleSheet("QTreeView::item { padding: 3px; }")
         
-    def _setup_model(self):
-        """Initializes the model and populates with existing devices."""
+    def _setup_model(self, populate=True):
+        """Initializes the model and optionally populates with existing devices."""
         self.model = QStandardItemModel()
         # Column order (logical): Name, Status, Description, FC, Type
         self.model.setHorizontalHeaderLabels(["Name", "Status", "Description", "FC", "Type"])
@@ -353,9 +362,10 @@ class DeviceTreeWidget(QWidget):
         # Re-enable updates after clearing (in case batch clear disabled them)
         self.tree_view.setUpdatesEnabled(True)
         
-        # Populate existing devices
-        for device in self.device_manager.get_all_devices():
-            self._add_device_node(device)
+        # Populate existing devices if requested
+        if populate:
+            for device in self.device_manager.get_all_devices():
+                self._add_device_node(device)
 
     def start_batch_load(self):
         """Start batch loading mode - defers tree updates."""
@@ -681,6 +691,9 @@ class DeviceTreeWidget(QWidget):
                 self.device_manager.disconnect_device(device_name)
             else:
                 self.device_manager.connect_device(device_name)
+                
+            # Bring Event Log to focus to show connection progress
+            self.show_event_log_requested.emit()
 
     def _on_signal_updated(self, device_name: str, signal):
         """Update the tree row for a signal when live data arrives.
@@ -1349,8 +1362,16 @@ class DeviceTreeWidget(QWidget):
             QMessageBox.No
         )
         if reply == QMessageBox.Yes:
-            for device_name in device_names:
-                self.device_manager.remove_device(device_name)
+            if len(device_names) == 1:
+                self.device_manager.remove_device(device_names[0])
+            else:
+                try:
+                     # Use efficient bulk removal
+                     self.device_manager.remove_devices_bulk(device_names)
+                except AttributeError:
+                     # Fallback
+                     for device_name in device_names:
+                        self.device_manager.remove_device(device_name)
     
     def _confirm_remove_device(self, device_name):
         """Asks user for confirmation before removing device."""

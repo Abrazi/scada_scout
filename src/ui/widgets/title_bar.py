@@ -106,11 +106,11 @@ class TitleBarWidget(QWidget):
             return
         if w.isMaximized():
             w.showNormal()
-            self.btn_max.setText("▢")
+            self.btn_max.setIcon(self._icon_max)
             self.btn_max.setToolTip("Maximize")
         else:
             w.showMaximized()
-            self.btn_max.setText("❐")
+            self.btn_max.setIcon(self._icon_restore)
             self.btn_max.setToolTip("Restore")
 
     def _on_close(self):
