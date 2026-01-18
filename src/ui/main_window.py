@@ -4,12 +4,14 @@ from PySide6.QtCore import Qt, QTimer, QSettings
 from typing import List
 import os
 import platform
+import socket
+import getpass
 
 from src.ui.widgets.device_tree import DeviceTreeWidget
 from src.ui.widgets.signals_view import SignalsViewWidget
 from src.ui.widgets.connection_dialog import ConnectionDialog
 from src.ui.widgets.scd_import_dialog import SCDImportDialog
-from src.ui.widgets.scrollable_message_box import show_scrollable_error
+from src.ui.widgets.scrollable_message_box import show_scrollable_error, ScrollableMessageBox
 from src.models.device_models import DeviceType
 from src.core.exporters import (
     export_network_config_script, 
@@ -31,6 +33,7 @@ from src.ui.widgets.import_progress_dialog import ImportProgressDialog
 from src.ui.dialogs.settings_dialog import SettingsDialog
 from src.core.workers import SCDImportWorker
 from src.core.project_manager import ProjectManager
+from src.utils.network_utils import NetworkUtils
 
 class MainWindow(QMainWindow):
     """
@@ -233,6 +236,11 @@ class MainWindow(QMainWindow):
         settings_action.setStatusTip("Customize application appearance and behavior")
         settings_action.triggered.connect(self._show_settings_dialog)
         self.view_menu.addAction(settings_action)
+
+        system_properties_action = QAction("System &Properties...", self)
+        system_properties_action.setStatusTip("View system and network adapter details")
+        system_properties_action.triggered.connect(self._show_system_properties)
+        self.view_menu.addAction(system_properties_action)
         self.view_menu.addSeparator()
         
         # Help Menu
@@ -780,6 +788,83 @@ QTabBar::tab {{ padding: {widget_padding + 2}px {button_padding + 8}px; font-siz
                 QMessageBox.information(self, "Export Successful", f"Diagnostics report saved to:\n{fname}\n\nThis report includes:\n• System information\n• Network interfaces\n• Device status\n• Connectivity tests")
             else:
                 show_scrollable_error(self, "Export Failed", "Failed to export diagnostics:", msg)
+
+    def _show_system_properties(self):
+        """Show detailed system and network adapter properties."""
+        try:
+            import psutil
+        except Exception:
+            psutil = None
+
+        details_lines = []
+
+        platform_info = NetworkUtils.get_platform_info()
+        details_lines.append("SYSTEM")
+        details_lines.append(f"Hostname: {platform_info.get('hostname', 'unknown')}")
+        details_lines.append(f"FQDN: {socket.getfqdn()}")
+        details_lines.append(f"User: {getpass.getuser()}")
+        details_lines.append(f"OS: {platform_info.get('system', '')} {platform_info.get('release', '')} ({platform_info.get('version', '')})")
+        details_lines.append(f"Machine: {platform_info.get('machine', 'unknown')}")
+        details_lines.append(f"Processor: {platform_info.get('processor', 'unknown') or 'unknown'}")
+        details_lines.append(f"Python: {platform.python_version()}")
+        details_lines.append(f"Local IP: {platform_info.get('local_ip', 'unknown')}")
+        details_lines.append("")
+        details_lines.append("NETWORK INTERFACES")
+
+        if psutil:
+            addrs = psutil.net_if_addrs()
+            stats = psutil.net_if_stats()
+            link_families = set(filter(None, [getattr(psutil, "AF_LINK", None), getattr(socket, "AF_PACKET", None)]))
+
+            for name in sorted(addrs.keys()):
+                stat = stats.get(name)
+                status = "UP" if stat and stat.isup else "DOWN"
+                speed = f"{stat.speed} Mbps" if stat and stat.speed else "unknown"
+                mtu = f"{stat.mtu}" if stat and stat.mtu else "unknown"
+                details_lines.append(f"{name}  [{status}]  speed={speed}  mtu={mtu}")
+
+                addr_list = addrs.get(name, [])
+                macs = []
+                had_ip = False
+                for addr in addr_list:
+                    if addr.family in link_families:
+                        if addr.address:
+                            macs.append(addr.address)
+                    elif addr.family == socket.AF_INET:
+                        had_ip = True
+                        details_lines.append(
+                            f"  IPv4: {addr.address}  netmask={addr.netmask or 'n/a'}  broadcast={addr.broadcast or 'n/a'}"
+                        )
+                    elif addr.family == socket.AF_INET6:
+                        had_ip = True
+                        details_lines.append(
+                            f"  IPv6: {addr.address}  netmask={addr.netmask or 'n/a'}  scope={getattr(addr, 'scope_id', 'n/a')}"
+                        )
+
+                if macs:
+                    details_lines.append(f"  MAC: {', '.join(macs)}")
+                if not had_ip:
+                    details_lines.append("  IP: (none)")
+
+                details_lines.append("")
+        else:
+            interfaces = NetworkUtils.get_network_interfaces()
+            for iface in interfaces:
+                status = "UP" if iface.is_up else "DOWN"
+                details_lines.append(f"{iface.name}  [{status}]")
+                details_lines.append(f"  IPv4: {iface.ip_address}  netmask={iface.netmask}")
+                if iface.mac_address:
+                    details_lines.append(f"  MAC: {iface.mac_address}")
+                details_lines.append("")
+
+        details = "\n".join(details_lines).strip()
+        dlg = ScrollableMessageBox(
+            "System Properties",
+            "System and network adapter details",
+            details,
+            self
+        )
+        dlg.exec()
 
     def _show_modbus_slave(self):
         """Show and activate Modbus slave server dock"""

@@ -183,17 +183,31 @@ class ProjectManager(QObject):
             cfg_dict = device.config.to_dict()
             scd_path = device.config.scd_file_path
             
+            # Case 1: Device has an existing SCD/ICD file
             if scd_path and os.path.exists(scd_path):
                 # Copy file to resources
                 filename = os.path.basename(scd_path)
                 dest_path = os.path.join(resources_dir, filename)
-                
-                # Avoid collision if multiple devices use different files with same name
-                # (Simple overwrite for now, or could use hash)
                 shutil.copy2(scd_path, dest_path)
-                
-                # Update path in exported config to be relative to the bundle root
                 cfg_dict['scd_file_path'] = os.path.join("resources", filename)
+            
+            # Case 2: No SCD file, but device has a discovered tree (Online Discovery)
+            elif device.root_node and device.config.device_type.value == "IEC 61850 IED":
+                from src.core.exporters import export_ied_from_online_discovery
+                
+                filename = f"{device.config.name}_discovered.icd"
+                dest_path = os.path.join(resources_dir, filename)
+                
+                logger.info(f"Generating reconstructed ICD for {device.config.name}...")
+                success, msg = export_ied_from_online_discovery(device, dest_path)
+                
+                if success:
+                    # Update path in exported config to use the newly generated ICD
+                    cfg_dict['scd_file_path'] = os.path.join("resources", filename)
+                    # Force use_scd_discovery to True so it loads the recovered structure on next run
+                    cfg_dict['use_scd_discovery'] = True
+                else:
+                    logger.error(f"Failed to reconstruct ICD for {device.config.name}: {msg}")
             
             # Also handle any extra Modbus mapping files if they existed as external files
             # (Currently they seem to be embedded in JSON, but good to keep in mind)

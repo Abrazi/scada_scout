@@ -136,6 +136,34 @@ class IEC61850ServerAdapter(BaseProtocol):
                 logger.warning(f"Failed to register SBO handlers: {e}")
 
             # Start the server
+            if int(self.config.port) < 1024:
+                try:
+                    if hasattr(os, "geteuid") and os.geteuid() != 0:
+                        raise RuntimeError(
+                            f"Port {self.config.port} requires root/administrator privileges. "
+                            f"Use a port >= 1024 (e.g., 10002)."
+                        )
+                except Exception as e:
+                    # If privilege check itself fails, continue to start attempt
+                    logger.debug(f"Privilege check skipped or failed: {e}")
+
+            # Verify model is valid before attempting start
+            if not self.model:
+                raise RuntimeError("Cannot start server: model is NULL")
+            
+            # Check if port is available
+            import socket
+            try:
+                test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                test_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                test_sock.bind((bind_ip, int(self.config.port)))
+                test_sock.close()
+                logger.debug(f"Port {self.config.port} is available for binding")
+            except OSError as e:
+                logger.warning(f"Port {self.config.port} may be in use or unavailable: {e}")
+                if self.event_logger:
+                    self.event_logger.warning("IEC61850Server", f"⚠️ Port {self.config.port} may already be in use")
+
             logger.info(f"Starting IEC61850 server on {bind_ip}:{self.config.port}")
             start_result = lib.IedServer_start(self.server, int(self.config.port))
 
@@ -143,18 +171,19 @@ class IEC61850ServerAdapter(BaseProtocol):
             if start_result is None:
                 is_running = False
                 # Retry a few times to avoid false negatives right after start
-                for _ in range(5):
-                    try:
-                        is_running = bool(lib.IedServer_isRunning(self.server))
-                    except Exception:
-                        is_running = False
-                    if is_running:
-                        break
+                for attempt in range(10):  # Increased retries
                     try:
                         import time
-                        time.sleep(0.1)
-                    except Exception:
-                        pass
+                        time.sleep(0.05)  # Small delay before check
+                        is_running = bool(lib.IedServer_isRunning(self.server))
+                        if is_running:
+                            logger.debug(f"Server running check succeeded on attempt {attempt + 1}")
+                            break
+                        logger.debug(f"Server not running on attempt {attempt + 1}, retrying...")
+                    except Exception as e:
+                        logger.debug(f"Exception checking isRunning on attempt {attempt + 1}: {e}")
+                        is_running = False
+                
                 if is_running:
                     self.connected = True
                     logger.info("IEC61850 server started successfully")
@@ -166,7 +195,26 @@ class IEC61850ServerAdapter(BaseProtocol):
                             f"✅ Started IEC 61850 server '{self.ied_name}' on {bind_info}"
                         )
                     return True
-                raise RuntimeError(f"Failed to start IEC61850 server (isRunning=false) on {bind_ip}:{self.config.port}")
+                
+                # Gather diagnostic info
+                diag_info = []
+                diag_info.append(f"Bind IP: {bind_ip}")
+                diag_info.append(f"Port: {self.config.port}")
+                diag_info.append(f"Model valid: {self.model is not None}")
+                try:
+                    state = lib.IedServer_getState(self.server)
+                    diag_info.append(f"Server state: {state}")
+                except Exception:
+                    diag_info.append("Server state: unknown")
+                
+                error_msg = f"Failed to start IEC61850 server (isRunning=false). {', '.join(diag_info)}"
+                if self.event_logger:
+                    self.event_logger.error("IEC61850Server", 
+                        f"❌ Server start failed\n" +
+                        "\n".join([f"   • {d}" for d in diag_info]) +
+                        "\n   • Try a different port or check if libiec61850 is properly installed"
+                    )
+                raise RuntimeError(error_msg)
 
             # Check if server actually started (when return code is available)
             if start_result == 0:  # 0 = success in libiec61850

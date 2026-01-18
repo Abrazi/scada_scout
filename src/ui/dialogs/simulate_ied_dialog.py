@@ -57,7 +57,7 @@ class SimulateIEDDialog(QDialog):
         # Port
         self.spin_port = QSpinBox()
         self.spin_port.setRange(1, 65535)
-        self.spin_port.setValue(device_config.port or 102)
+        self.spin_port.setValue(device_config.port or 10002)
         config_layout.addRow("Listen Port:", self.spin_port)
         
         # SCD/ICD File Path
