@@ -151,8 +151,15 @@ class DevicePropertiesDialog(QDialog):
         row += 1
         
         # Get VLAN info if available from protocol params
-        vlan = self.device.config.protocol_params.get("vlan", "Not configured")
-        self._add_property_row(grid, row, "VLAN:", str(vlan))
+        vlan = None
+        vlan_keys = ("vlan", "vlan_id", "vlanId", "vlanID", "VLAN-ID", "VLANID")
+        for key in vlan_keys:
+            if key in self.device.config.protocol_params:
+                value = self.device.config.protocol_params.get(key)
+                if value is not None and str(value).strip() != "":
+                    vlan = value
+                    break
+        self._add_property_row(grid, row, "VLAN:", self._format_vlan_value(vlan))
         row += 1
         
         # Polling settings
@@ -214,6 +221,28 @@ class DevicePropertiesDialog(QDialog):
         self._measure_rtt_on_refresh()
         # Refresh display
         self._populate_connection_content(layout)
+
+    def _format_vlan_value(self, value):
+        if value is None:
+            return "Not configured"
+
+        text = str(value).strip()
+        if text == "":
+            return "Not configured"
+
+        try:
+            if text.lower().startswith("0x"):
+                dec_value = int(text, 16)
+                return f"{text} ({dec_value})"
+
+            if all(c in "0123456789abcdefABCDEF" for c in text) and any(c.isalpha() for c in text):
+                dec_value = int(text, 16)
+                return f"0x{text.lower()} ({dec_value})"
+
+            dec_value = int(text)
+            return f"0x{dec_value:x} ({dec_value})"
+        except Exception:
+            return text
     
     def _create_datasets_tab(self):
         """Create datasets information tab (IEC 61850)."""

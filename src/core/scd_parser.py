@@ -2,6 +2,7 @@ import xml.etree.ElementTree as ET
 from typing import Optional, List, Dict, Any
 import os
 import logging
+import re
 
 from src.models.device_models import Node, Signal, SignalType, SignalQuality
 
@@ -26,6 +27,81 @@ class SCDParser:
         self.mtime = None
         self._templates = None  # Cache for parsed data type templates
         self._parse()
+
+    def _normalize_ptype(self, ptype: Optional[str]) -> str:
+        if not ptype:
+            return ""
+        return re.sub(r"[^a-z0-9]", "", ptype.strip().lower())
+
+    def _parse_address_params(self, address) -> Dict[str, Any]:
+        params = {
+            "ip": None,
+            "subnet_mask": None,
+            "gateway": None,
+            "port": None,
+            "vlan": None,
+            "vlan_priority": None,
+            "mac_address": None,
+            "appid": None
+        }
+        if not address:
+            return params
+
+        for p in address.findall("scl:P", self.ns) + address.findall("P"):
+            ptype = p.get("type")
+            ptype_norm = self._normalize_ptype(ptype)
+            text = (p.text or "").strip()
+            if text == "":
+                continue
+
+            if ptype_norm in {"ip", "ipaddress", "ipaddr", "ipv4", "ipv4address"}:
+                if params["ip"] is None:
+                    params["ip"] = text
+            elif ptype_norm in {"ipsubnet", "ipsubnetmask", "subnet", "subnetmask", "netmask"}:
+                if params["subnet_mask"] is None:
+                    params["subnet_mask"] = text
+            elif ptype_norm in {"ipgateway", "gateway", "defaultgateway", "defaultgw"}:
+                if params["gateway"] is None:
+                    params["gateway"] = text
+            elif "vlan" in ptype_norm and ("prio" in ptype_norm or "priority" in ptype_norm):
+                if params["vlan_priority"] is None:
+                    params["vlan_priority"] = text
+            elif "vlan" in ptype_norm and ("id" in ptype_norm or ptype_norm == "vlan"):
+                if params["vlan"] is None:
+                    params["vlan"] = text
+            elif ptype_norm in {"mac", "macaddress", "macaddr", "hwaddr", "hwaddress"}:
+                if params["mac_address"] is None:
+                    params["mac_address"] = text
+            elif "port" in ptype_norm:
+                if params["port"] is None:
+                    try:
+                        params["port"] = int(text)
+                    except Exception:
+                        pass
+            elif ptype_norm in {"appid", "app"}:
+                if params["appid"] is None:
+                    params["appid"] = text
+
+        return params
+
+    def _find_vlan_info_in_connectedap(self, conn_ap) -> Dict[str, Any]:
+        info = {"vlan": None, "vlan_priority": None, "mac_address": None, "appid": None}
+        if conn_ap is None:
+            return info
+
+        comm_tags = ["GSE", "SMV", "SampledValue", "SampledValues", "SV"]
+        for tag in comm_tags:
+            for elem in conn_ap.findall(f"scl:{tag}", self.ns) + conn_ap.findall(tag):
+                address = elem.find("scl:Address", self.ns)
+                if not address:
+                    address = elem.find("Address")
+                params = self._parse_address_params(address)
+                for key in ("vlan", "vlan_priority", "mac_address", "appid"):
+                    if info[key] is None and params.get(key) is not None:
+                        info[key] = params.get(key)
+                if all(info[k] is not None for k in ("vlan", "vlan_priority", "mac_address")):
+                    return info
+        return info
 
     def _parse(self):
         if not os.path.exists(self.file_path):
@@ -289,13 +365,24 @@ class SCDParser:
 
         entries_root = Node(name="DataSetEntries", description="FCDA members")
         for entry in entries:
+            ld_inst = entry.get('ld_inst', '')
             ln = entry.get('ln', '')
             do = entry.get('do', '')
             da = entry.get('da', '')
+            bda = entry.get('bda', '')
             fc = entry.get('fc', '')
 
-            name_parts = [ln, do, da]
+            name_parts = [ln, do]
+            if da:
+                name_parts.append(da)
+                if bda:
+                    name_parts.append(bda)
+            elif bda:
+                name_parts.append(bda)
+
             name = ".".join([p for p in name_parts if p])
+            if ld_inst:
+                name = f"{ld_inst}/{name}" if name else ld_inst
             if fc:
                 name = f"{name} [{fc}]"
             entries_root.children.append(Node(name=name, description="FCDA"))
@@ -616,26 +703,23 @@ class SCDParser:
                     mac_address = None
                     
                     if address:
-                        for p in address.findall("scl:P", self.ns) + address.findall("P"):
-                            ptype = p.get("type")
-                            ptype_norm = ptype.lower() if ptype else ""
-                            if ptype == "IP":
-                                ip = p.text
-                            elif ptype == "IP-SUBNET":
-                                subnet_mask = p.text
-                            elif ptype == "IP-GATEWAY":
-                                gateway = p.text
-                            elif ptype == "VLAN-ID":
-                                vlan = p.text
-                            elif ptype == "VLAN-PRIORITY":
-                                vlan_priority = p.text
-                            elif ptype == "MAC-Address":
-                                mac_address = p.text
-                            elif "port" in ptype_norm and p.text:
-                                try:
-                                    port = int(p.text)
-                                except Exception:
-                                    pass
+                        params = self._parse_address_params(address)
+                        ip = params.get("ip")
+                        gateway = params.get("gateway")
+                        subnet_mask = params.get("subnet_mask")
+                        port = params.get("port")
+                        vlan = params.get("vlan")
+                        vlan_priority = params.get("vlan_priority")
+                        mac_address = params.get("mac_address")
+
+                    if vlan is None or vlan_priority is None or mac_address is None:
+                        vlan_info = self._find_vlan_info_in_connectedap(conn_ap)
+                        if vlan is None and vlan_info.get("vlan") is not None:
+                            vlan = vlan_info.get("vlan")
+                        if vlan_priority is None and vlan_info.get("vlan_priority") is not None:
+                            vlan_priority = vlan_info.get("vlan_priority")
+                        if mac_address is None and vlan_info.get("mac_address") is not None:
+                            mac_address = vlan_info.get("mac_address")
 
                     if ip:
                         if ied_name not in ieds_map:
@@ -740,23 +824,39 @@ class SCDParser:
                         dataset_entries = self._get_dataset_entries(ln0, dat_set)
                         
                         for ds_entry in dataset_entries:
+                            source_ld_inst = ds_entry.get('ld_inst') or ld_inst or ""
+                            da = ds_entry.get('da', '')
+                            bda = ds_entry.get('bda', '')
+                            if da and bda:
+                                data_attr = f"{da}.{bda}"
+                            elif da:
+                                data_attr = da
+                            else:
+                                data_attr = bda
+
+                            tag_ld = f"{ied_name}{source_ld_inst}" if source_ld_inst else ied_name
+                            tag_parts = [ds_entry.get('ln', ''), ds_entry.get('do', ''), data_attr]
+                            tag_parts = [p for p in tag_parts if p]
+                            tag_ref = ".".join(tag_parts)
+                            tag = f"{tag_ld}/{tag_ref}" if tag_ref else tag_ld
+
                             entry = {
                                 "Source IED Name": ied_name,
                                 "Source AP": ap_name,
-                                "Source LDevice": ld_inst,
+                                "Source LDevice": source_ld_inst,
                                 "Source IP Address": comm_info.get('ip', ''), # Optional for GOOSE
                                 "Source Subnet": comm_info.get('subnetwork', ''),
                                 "Source MAC Address": comm_info.get('mac', ''),
                                 "Source VLAN-ID": comm_info.get('vlan', ''),
-                                "Source APPID": app_id,
+                                "Source APPID": comm_info.get('appid') or app_id,
                                 "Source MinTime": comm_info.get('minTime', ''),
                                 "Source MaxTime": comm_info.get('maxTime', ''),
                                 "Source DataSet": dat_set,
                                 "Source ConfRev": conf_rev,
                                 "Source ControlBlock": gse_name,
                                 "Source LogicalNode": ds_entry.get('ln', ''),
-                                "Source DataAttribute": ds_entry.get('da', ""),
-                                "Source Tag": f"{ied_name}{ld_inst}/{ds_entry.get('ln','')}.{ds_entry.get('do','')}.{ds_entry.get('da','')}"
+                                "Source DataAttribute": data_attr,
+                                "Source Tag": tag
                             }
                             goose_entries.append(entry)
 
@@ -788,16 +888,15 @@ class SCDParser:
                              if not address: address = gse.find("Address")
                              
                              if address:
-                                 for p in address.findall("scl:P", self.ns) + address.findall("P"):
-                                     ptype = p.get("type")
-                                     if ptype == "MAC-Address":
-                                         info['mac'] = p.text
-                                     elif ptype == "VLAN-ID":
-                                         info['vlan'] = p.text
-                                     elif ptype == "APPID":
-                                         info['appid'] = p.text
-                                     elif ptype == "VLAN-PRIORITY":
-                                         info['priority'] = p.text
+                                 params = self._parse_address_params(address)
+                                 if params.get("mac_address") is not None:
+                                     info['mac'] = params.get("mac_address")
+                                 if params.get("vlan") is not None:
+                                     info['vlan'] = params.get("vlan")
+                                 if params.get("appid") is not None:
+                                     info['appid'] = params.get("appid")
+                                 if params.get("vlan_priority") is not None:
+                                     info['priority'] = params.get("vlan_priority")
                                          
                              min_time = gse.find("scl:MinTime", self.ns)
                              if min_time is not None: info['minTime'] = min_time.text
@@ -817,10 +916,14 @@ class SCDParser:
         
         if ds:
             for fcda in ds.findall("scl:FCDA", self.ns) + ds.findall("FCDA"):
+                ln_ref = fcda.get('lnRef') or ""
+                ln = ln_ref if ln_ref else f"{fcda.get('prefix','')}{fcda.get('lnClass','')}{fcda.get('lnInst','')}"
                 entries.append({
-                    'ln': f"{fcda.get('prefix','')}{fcda.get('lnClass')}{fcda.get('lnInst','')}",
-                    'do': fcda.get('doName'),
-                    'da': fcda.get('daName'),
-                    'fc': fcda.get('fc')
+                    'ld_inst': fcda.get('ldInst', ''),
+                    'ln': ln,
+                    'do': fcda.get('doName') or "",
+                    'da': fcda.get('daName') or "",
+                    'bda': fcda.get('bdaName') or "",
+                    'fc': fcda.get('fc') or ""
                 })
         return entries

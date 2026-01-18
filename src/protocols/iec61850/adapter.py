@@ -517,6 +517,8 @@ class IEC61850Adapter(BaseProtocol):
                     
                 root.name = derived_name
             
+            seen_vendors = set()
+
             # Browse each Logical Device
             for ld_name in ld_names:
                 ld_node = Node(name=ld_name, description="Logical Device")
@@ -533,8 +535,9 @@ class IEC61850Adapter(BaseProtocol):
                         root.description = f"IED: {vendor}"
                         # If we have a vendor, maybe we can get a better name?
                         # But 'root.name' is used for the tree root.
-                        if self.event_logger:
+                        if self.event_logger and vendor and vendor not in seen_vendors:
                             self.event_logger.info("Discovery", f"Found Vendor: {vendor}")
+                            seen_vendors.add(vendor)
                 except: pass
 
                 # Get Logical Nodes for this LD
