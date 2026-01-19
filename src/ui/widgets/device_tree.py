@@ -293,7 +293,7 @@ class DeviceTreeWidget(QWidget):
             if getattr(self, "_suppress_selection_changed", False):
                 return
             indexes = self.tree_view.selectionModel().selectedIndexes()
-            logger.info(f"DeviceTreeWidget: Selection changed. Index count: {len(indexes)}")
+            logger.debug(f"DeviceTreeWidget: Selection changed. Index count: {len(indexes)}")
             
             if not indexes:
                 self.selection_changed.emit(None, "")
@@ -310,7 +310,7 @@ class DeviceTreeWidget(QWidget):
             node_data = item.data(Qt.UserRole)
             device_name = self._find_device_for_item(item) or ""
             
-            logger.info(f"DeviceTreeWidget: Selected Device='{device_name}', Data Type={type(node_data)}")
+            logger.debug(f"DeviceTreeWidget: Selected Device='{device_name}', Data Type={type(node_data)}")
 
             if isinstance(node_data, str):
                 # It's a device name, get the device object
@@ -1037,6 +1037,53 @@ class DeviceTreeWidget(QWidget):
             device_name = data
             device = self.device_manager.get_device(device_name)
             if device:
+                # IEC 61850: Add switchgear status (XCBR/CSWI/XSWI Pos.stVal) to Watch List
+                if device.config.device_type in (DeviceType.IEC61850_IED, DeviceType.IEC61850_SERVER):
+                    switchgear_action = QAction("Add All Switchgear Status to Watch List", self)
+
+                    def request_add_switchgear_status():
+                        if not self.watch_list_manager:
+                            return
+                        if not device.root_node:
+                            return
+
+                        def _collect_switchgear(node_obj):
+                            collected = []
+                            if hasattr(node_obj, 'signals') and node_obj.signals:
+                                for sig in node_obj.signals:
+                                    addr = (sig.address or "").lower()
+                                    name = (sig.name or "").lower()
+                                    has_class = any(cls in addr or cls in name for cls in ("xcbr", "cswi", "xswi"))
+                                    has_pos = "pos" in addr or "pos" in name
+                                    has_stval = "stval" in addr or "stval" in name or "st$" in addr
+                                    if has_class and has_pos and has_stval:
+                                        collected.append(sig)
+                            if hasattr(node_obj, 'children') and node_obj.children:
+                                for child in node_obj.children:
+                                    collected.extend(_collect_switchgear(child))
+                            if hasattr(node_obj, 'root_node') and node_obj.root_node:
+                                collected.extend(_collect_switchgear(node_obj.root_node))
+                            return collected
+
+                        signals = _collect_switchgear(device.root_node)
+                        for sig in signals:
+                            try:
+                                self.watch_list_manager.add_signal(device_name, sig)
+                            except Exception:
+                                continue
+
+                        # Event log
+                        try:
+                            evt = getattr(self.device_manager, 'event_logger', None)
+                            if evt:
+                                evt.info(device_name or "Watch List", f"Added {len(signals)} switchgear status signals to Watch List")
+                        except Exception:
+                            pass
+
+                    switchgear_action.triggered.connect(request_add_switchgear_status)
+                    menu.addAction(switchgear_action)
+                    menu.addSeparator()
+
                 # Discovery mode toggle (existing functionality)
                 online_action = QAction("Use Online Discovery", self)
                 scd_action = QAction("Use SCD Discovery", self)

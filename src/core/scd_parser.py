@@ -168,15 +168,17 @@ class SCDParser:
         ied_element = None
         if ied_name:
             ied_element = self.root.find(f".//scl:IED[@name='{ied_name}']", self.ns)
+            if ied_element is None:
+                ied_element = self.root.find(f".//IED[@name='{ied_name}']")
         else:
-            ied_element = self.root.find(".//scl:IED", self.ns)
-            
-        if ied_element is None:
-            # Try without namespace if failed
-            if ied_name:
-               ied_element = self.root.find(f".//IED[@name='{ied_name}']")
-            else:
-               ied_element = self.root.find(".//IED")
+            # Prefer the first IED that actually contains LDevices
+            ied_candidates = self.root.findall(".//scl:IED", self.ns) + self.root.findall(".//IED")
+            for candidate in ied_candidates:
+                if candidate.findall(".//scl:LDevice", self.ns) or candidate.findall(".//LDevice"):
+                    ied_element = candidate
+                    break
+            if ied_element is None and ied_candidates:
+                ied_element = ied_candidates[0]
 
         if ied_element is None:
             result = Node(name="IED_Not_Found")
@@ -786,16 +788,16 @@ class SCDParser:
                 else:
                     continue
             else:
-                 # Real APs
-                 pass # We iterate below
+                # Real APs
+                pass # We iterate below
 
             for ap in ap_elements:
                 if isinstance(ap, dict):
-                     ap_name = ap['name']
-                     lds = ap['lds']
+                    ap_name = ap['name']
+                    lds = ap['lds']
                 else:
-                     ap_name = ap.get("name")
-                     lds = ap.findall("scl:LDevice", self.ns) + ap.findall("LDevice")
+                    ap_name = ap.get("name")
+                    lds = ap.findall(".//scl:LDevice", self.ns) + ap.findall(".//LDevice")
 
                 for ld in lds:
                     ld_inst = ld.get("inst")

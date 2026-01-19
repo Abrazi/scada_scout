@@ -7,6 +7,7 @@ from src.core.watch_list_manager import WatchListManager, WatchedSignal
 import datetime
 from src.models.device_models import Signal, SignalQuality
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -228,7 +229,7 @@ class WatchListWidget(QWidget):
         self.table.setItem(row, 7, QTableWidgetItem(str(signal.modbus_offset)))
         
         # Column 8: Value
-        value_str = str(signal.value) if signal.value is not None else "--"
+        value_str = self._format_value(signal)
         self.table.setItem(row, 8, QTableWidgetItem(value_str))
 
         # Column 9: RTT (ms)
@@ -307,7 +308,7 @@ class WatchListWidget(QWidget):
                 
                 try:
                     # Column 8: Value
-                    value_str = str(signal.value) if signal.value is not None else "--"
+                    value_str = self._format_value(signal)
                     self._ensure_item(row, 8).setText(value_str)
 
                     # Column 9: RTT (ms)
@@ -531,7 +532,7 @@ class WatchListWidget(QWidget):
                     updated_signal = proto.read_signal(signal)
 
             if updated_signal:
-                val = updated_signal.value
+                val = self._format_value(updated_signal)
                 qual = updated_signal.quality.value if hasattr(updated_signal.quality, 'value') else str(updated_signal.quality)
                 QMessageBox.information(self, "Read Result", f"Signal: {signal.name}\nValue: {val}\nQuality: {qual}\nTimestamp: {updated_signal.timestamp}")
             else:
@@ -551,4 +552,71 @@ class WatchListWidget(QWidget):
         # Pass full context so inspector can read adjacent registers
         dlg = DataInspectorDialog(signal, device_name, self.device_manager, self)
         dlg.exec()
+
+    def _format_value(self, signal: Signal) -> str:
+        if signal.value is None:
+            return "--"
+
+        if self._is_pos_stval(signal):
+            num, enum_label = self._extract_numeric_and_enum(signal)
+            if num is not None:
+                hex_str = f"0x{num:X}"
+                if enum_label:
+                    return f"{hex_str} ({num}) {enum_label}"
+                return f"{hex_str} ({num})"
+
+        return str(signal.value)
+
+    def _is_pos_stval(self, signal: Signal) -> bool:
+        addr = (signal.address or "").lower()
+        name = (signal.name or "").lower()
+        return "pos.stval" in addr or "pos$stval" in addr or ("pos" in addr and name == "stval")
+
+    def _extract_numeric_and_enum(self, signal: Signal) -> tuple[int | None, str | None]:
+        num = None
+        enum_label = None
+
+        mapping = None
+        if getattr(signal, "enum_map", None):
+            mapping = signal.enum_map
+        else:
+            mapping = {0: "intermediate", 1: "open", 2: "closed", 3: "bad"}
+
+        val = signal.value
+        if isinstance(val, bool):
+            num = int(val)
+        elif isinstance(val, int):
+            num = val
+        elif isinstance(val, float) and val.is_integer():
+            num = int(val)
+        elif isinstance(val, str):
+            text = val.strip()
+            try:
+                if text.lower().startswith("0x"):
+                    num = int(text.split()[0], 16)
+                else:
+                    m = re.search(r"\(([-]?\d+)\)", text)
+                    if m:
+                        num = int(m.group(1))
+                    elif re.fullmatch(r"-?\d+", text):
+                        num = int(text)
+            except Exception:
+                num = None
+
+            if num is None:
+                if mapping:
+                    for k, v in mapping.items():
+                        if str(v).lower() == text.lower():
+                            num = int(k)
+                            break
+
+            if num is not None and not enum_label:
+                m = re.match(r"(.+?)\s*\(\s*[-]?\d+\s*\)", text)
+                if m:
+                    enum_label = m.group(1).strip()
+
+        if num is not None and mapping and num in mapping:
+            enum_label = mapping[num]
+
+        return num, enum_label
 

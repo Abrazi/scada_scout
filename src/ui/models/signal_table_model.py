@@ -4,6 +4,7 @@ from typing import List, Dict, Optional, Any
 from src.models.device_models import Signal
 import logging
 import datetime
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -182,7 +183,7 @@ class SignalTableModel(QAbstractTableModel):
             elif col == 5: return signal.modbus_endianness.value if signal.modbus_endianness else "-"
             elif col == 6: return str(signal.modbus_scale)
             elif col == 7: return str(signal.modbus_offset)
-            elif col == 8: return str(signal.value) if signal.value is not None else "-"
+            elif col == 8: return self._format_value(signal)
             elif col == 9: return signal.quality.value if hasattr(signal.quality, 'value') else str(signal.quality)
             elif col == 10: 
                 if signal.timestamp:
@@ -233,6 +234,75 @@ class SignalTableModel(QAbstractTableModel):
                 return QBrush(QColor(255, 0, 0)) # Red text
         
         return None
+
+    def _format_value(self, signal: Signal) -> str:
+        if signal.value is None:
+            return "-"
+
+        if self._is_pos_stval(signal):
+            num, enum_label = self._extract_numeric_and_enum(signal)
+            if num is not None:
+                hex_str = f"0x{num:X}"
+                if enum_label:
+                    return f"{hex_str} ({num}) {enum_label}"
+                return f"{hex_str} ({num})"
+
+        return str(signal.value)
+
+    def _is_pos_stval(self, signal: Signal) -> bool:
+        addr = (signal.address or "").lower()
+        name = (signal.name or "").lower()
+        return "pos.stval" in addr or "pos$stval" in addr or ("pos" in addr and name == "stval")
+
+    def _extract_numeric_and_enum(self, signal: Signal) -> tuple[Optional[int], Optional[str]]:
+        num = None
+        enum_label = None
+
+        mapping = None
+        if getattr(signal, "enum_map", None):
+            mapping = signal.enum_map
+        else:
+            mapping = {0: "intermediate", 1: "open", 2: "closed", 3: "bad"}
+
+        val = signal.value
+        if isinstance(val, bool):
+            num = int(val)
+        elif isinstance(val, int):
+            num = val
+        elif isinstance(val, float) and val.is_integer():
+            num = int(val)
+        elif isinstance(val, str):
+            text = val.strip()
+            try:
+                if text.lower().startswith("0x"):
+                    num = int(text.split()[0], 16)
+                else:
+                    m = re.search(r"\(([-]?\d+)\)", text)
+                    if m:
+                        num = int(m.group(1))
+                    elif re.fullmatch(r"-?\d+", text):
+                        num = int(text)
+            except Exception:
+                num = None
+
+            if num is None:
+                # If value is label only, try reverse lookup
+                if mapping:
+                    for k, v in mapping.items():
+                        if str(v).lower() == text.lower():
+                            num = int(k)
+                            break
+
+            if num is not None and not enum_label:
+                # If string contains label prefix, capture it
+                m = re.match(r"(.+?)\s*\(\s*[-]?\d+\s*\)", text)
+                if m:
+                    enum_label = m.group(1).strip()
+
+        if num is not None and mapping and num in mapping:
+            enum_label = mapping[num]
+
+        return num, enum_label
 
     def headerData(self, section: int, orientation: Qt.Orientation, role: int = Qt.DisplayRole):
         if orientation == Qt.Horizontal and role == Qt.DisplayRole:
