@@ -1,5 +1,5 @@
 from PySide6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QStatusBar, QMenuBar, QToolBar, QDockWidget, QFileDialog, QMessageBox
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QGuiApplication
 from PySide6.QtCore import Qt, QTimer, QSettings
 from typing import List
 import os
@@ -45,10 +45,38 @@ class MainWindow(QMainWindow):
         self.device_manager = device_manager
         self.event_logger = event_logger
         self.setWindowTitle("Scada Scout")
-        self.resize(1280, 800)
         
+        # Scale initial size for Windows DPI and screen size
+        base_width, base_height = 1280, 800
+        min_width, min_height = 1200, 650
+        scale = 1.0
+        try:
+            if platform.system() == "Windows":
+                screen = QGuiApplication.primaryScreen()
+                if screen:
+                    scale = screen.logicalDotsPerInch() / 96.0
+        except Exception:
+            scale = 1.0
+
+        scaled_width = int(base_width * scale)
+        scaled_height = int(base_height * scale)
+        scaled_min_width = int(min_width * scale)
+        scaled_min_height = int(min_height * scale)
+
+        try:
+            screen = QGuiApplication.primaryScreen()
+            if screen:
+                avail = screen.availableGeometry()
+                scaled_width = min(scaled_width, int(avail.width() * 0.95))
+                scaled_height = min(scaled_height, int(avail.height() * 0.90))
+                scaled_min_width = min(scaled_min_width, max(800, int(avail.width() * 0.60)))
+                scaled_min_height = min(scaled_min_height, max(500, int(avail.height() * 0.55)))
+        except Exception:
+            pass
+
+        self.resize(scaled_width, scaled_height)
         # Set minimum size to ensure all controls fit in two-row layout
-        self.setMinimumSize(1200, 650)
+        self.setMinimumSize(scaled_min_width, scaled_min_height)
         
         # Use a frameless window so we can provide a custom title bar (VSCode-style)
         self.setWindowFlags((self.windowFlags() | Qt.Window) & ~Qt.WindowTitleHint)
@@ -478,25 +506,56 @@ class MainWindow(QMainWindow):
         # Get theme
         theme = settings.value("theme", "IED Scout-like")
         
-        # Check if we need to use custom colors
+        # Only apply custom colors when the theme is Custom or the checkbox is enabled,
+        # otherwise keep the original theme color scheme intact.
         custom_colors = settings.value("use_custom_colors", False, type=bool)
-        
-        if custom_colors:
-            # Generate custom stylesheet based on saved colors
+        theme_is_custom = (settings.value("theme", "") == "Custom")
+
+        if custom_colors or theme_is_custom:
+            # Generate custom stylesheet based on saved colors (fall back to sensible defaults)
             primary_color = settings.value("primary_color", "#3498db")
             accent_color = settings.value("accent_color", "#2980b9")
             success_color = settings.value("success_color", "#27ae60")
             warning_color = settings.value("warning_color", "#f39c12")
             error_color = settings.value("error_color", "#e74c3c")
-            bg_color = settings.value("bg_color", "#ecf0f1")
+            # Prefer widget background for overall background, then main background
+            bg_main = settings.value("bg_main", "#f5f6f7")
+            bg_widget = settings.value("bg_widget", "#ffffff")
+            bg_alternate = settings.value("bg_alternate", "#f8f9fa")
+            bg_color = bg_widget
             text_color = settings.value("text_color", "#2c3e50")
-            
+            menu_bar_color = settings.value("menu_bar_color", "#2c3e50")
+            dock_title_color = settings.value("dock_title_color", "#3498db")
+            header_color = settings.value("header_color", "#34495e")
+            status_bar_color = settings.value("status_bar_color", "#34495e")
+            toolbar_color = settings.value("toolbar_color", "#34495e")
+            selection_color = settings.value("selection_color", "#3498db")
+            selection_text_color = settings.value("selection_text_color", "#ffffff")
+
             # Regenerate stylesheet with custom colors
             custom_style = styles.generate_custom_stylesheet(
                 primary_color, accent_color, success_color, warning_color,
                 error_color, bg_color, text_color
             )
-            base_style = custom_style
+            # Apply additional element-specific overrides for backgrounds and labels
+            custom_overrides = f"""
+QMainWindow {{ background-color: {bg_main}; }}
+QWidget {{ color: {text_color}; }}
+QLabel {{ color: {text_color}; }}
+QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox {{ background-color: {bg_widget}; color: {text_color}; }}
+QTreeView, QTableView, QListView {{ background-color: {bg_widget}; alternate-background-color: {bg_alternate}; color: {text_color}; }}
+QGroupBox {{ color: {text_color}; }}
+QTabWidget::pane {{ background-color: {bg_widget}; }}
+QTabBar::tab:selected {{ color: {text_color}; }}
+QMenuBar {{ background-color: {menu_bar_color}; }}
+QDockWidget::title {{ background-color: {dock_title_color}; }}
+QHeaderView::section {{ background-color: {header_color}; color: {text_color}; }}
+QStatusBar {{ background-color: {status_bar_color}; color: {text_color}; }}
+QToolBar {{ background-color: {toolbar_color}; }}
+QTreeView, QTableView, QListView {{ selection-background-color: {selection_color}; selection-color: {selection_text_color}; }}
+QLineEdit, QTextEdit, QPlainTextEdit {{ selection-background-color: {selection_color}; selection-color: {selection_text_color}; }}
+"""
+            base_style = custom_style + "\n" + custom_overrides
         else:
             # Use predefined theme
             if theme == "Dark":
@@ -525,6 +584,21 @@ class MainWindow(QMainWindow):
         input_height = settings.value("input_height", 32, type=int)
         icon_size = settings.value("icon_size", 24, type=int)
 
+        # Windows DPI scaling: scale pixel-based sizes so controls aren't tiny
+        try:
+            if platform.system() == "Windows":
+                screen = QApplication.primaryScreen()
+                if screen:
+                    scale = screen.logicalDotsPerInch() / 96.0
+                    widget_padding = max(2, int(widget_padding * scale))
+                    button_padding = max(2, int(button_padding * scale))
+                    border_radius = max(2, int(border_radius * scale))
+                    button_height = max(20, int(button_height * scale))
+                    input_height = max(20, int(input_height * scale))
+                    icon_size = max(16, int(icon_size * scale))
+        except Exception:
+            pass
+
         # Build overrides for sizes and fonts so QSS doesn't lock to defaults
         overrides = f"""
 QWidget {{ font-size: {font_size}pt; }}
@@ -534,6 +608,30 @@ QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox {{ pad
 QMenuBar::item {{ padding: {widget_padding}px {button_padding + 6}px; font-size: {font_size + 1}pt; }}
 QTabBar::tab {{ padding: {widget_padding + 2}px {button_padding + 8}px; font-size: {font_size + 1}pt; }}
 """
+        # Style variants (Modern / Classic / Flat) only add shape/layout tweaks, not color
+        style_variant = settings.value("style", "Modern")
+        style_extra = ""
+        if style_variant == "Modern":
+            style_extra = f"""
+    QPushButton {{ border-radius: {max(4, border_radius)}px; padding: {button_padding + 2}px; }}
+    QToolButton {{ border-radius: {max(4, border_radius)}px; }}
+    QWidget {{ border-radius: {max(4, border_radius)}px; }}
+    """
+        elif style_variant == "Classic":
+            style_extra = f"""
+    QPushButton {{ border-radius: {max(2, border_radius // 2)}px; padding: {max(4, button_padding - 2)}px; }}
+    QToolButton {{ border-radius: {max(2, border_radius // 2)}px; }}
+    QWidget {{ border-radius: {max(2, border_radius // 2)}px; }}
+    QWidget {{ font-size: {max(8, font_size - 1)}pt; }}
+    """
+        elif style_variant == "Flat":
+            style_extra = f"""
+    QPushButton {{ border-radius: {max(6, border_radius + 2)}px; padding: {button_padding + 4}px; border: none; }}
+    QToolButton {{ border-radius: {max(6, border_radius + 2)}px; }}
+    QWidget {{ border-radius: {max(6, border_radius + 2)}px; }}
+    """
+        # Only append style_extra if not already present in base_style
+        overrides += "\n" + style_extra
 
         QApplication.instance().setStyleSheet(base_style + "\n" + overrides)
 
@@ -568,10 +666,13 @@ QTabBar::tab {{ padding: {widget_padding + 2}px {button_padding + 8}px; font-siz
         except Exception:
             pass
         
-        # Update console font for event log
-        console_font_family = settings.value("console_font_family", "Consolas")
-        console_font_size = settings.value("console_font_size", 9, type=int)
-        self.event_log_widget.update_font(console_font_family, console_font_size)
+        # Update console / monospace font for event log (use keys from SettingsDialog)
+        monospace_font_family = settings.value("monospace_font", "Consolas")
+        monospace_font_size = settings.value("monospace_size", 9, type=int)
+        try:
+            self.event_log_widget.update_font(monospace_font_family, monospace_font_size)
+        except Exception:
+            pass
         
         # Force repaint
         self.repaint()

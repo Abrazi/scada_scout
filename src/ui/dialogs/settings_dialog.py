@@ -26,8 +26,8 @@ class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("⚙️ Application Settings")
-        self.resize(700, 600)
-        self.setMinimumSize(650, 550)
+        self.resize(950, 720)
+        self.setMinimumSize(900, 680)
         
         self.settings = QSettings("ScadaScout", "UI")
         self._setup_ui()
@@ -181,33 +181,86 @@ class SettingsDialog(QDialog):
         
     def _create_colors_tab(self):
         """Create the colors customization tab."""
+        from PySide6.QtWidgets import QGridLayout
         widget = QWidget()
         layout = QVBoxLayout(widget)
+        layout.setSpacing(15)
+        layout.setContentsMargins(10, 10, 10, 10)
         
-        # Primary colors
+        # Primary colors in 3-column grid
         primary_group = QGroupBox("Primary Colors")
-        primary_layout = QFormLayout(primary_group)
+        primary_layout = QGridLayout(primary_group)
+        primary_layout.setVerticalSpacing(12)
+        primary_layout.setHorizontalSpacing(10)
+        primary_layout.setContentsMargins(15, 15, 15, 15)
         
+        # Row 0
         self.primary_color = self._create_color_button("#3498db")
-        primary_layout.addRow("Primary Color:", self.primary_color)
+        primary_layout.addWidget(QLabel("Primary:"), 0, 0, 1, 1, Qt.AlignRight)
+        primary_layout.addWidget(self.primary_color, 0, 1, 1, 1)
         
         self.accent_color = self._create_color_button("#1abc9c")
-        primary_layout.addRow("Accent Color:", self.accent_color)
+        primary_layout.addWidget(QLabel("Accent:"), 0, 2, 1, 1, Qt.AlignRight)
+        primary_layout.addWidget(self.accent_color, 0, 3, 1, 1)
         
         self.success_color = self._create_color_button("#27ae60")
-        primary_layout.addRow("Success Color:", self.success_color)
+        primary_layout.addWidget(QLabel("Success:"), 0, 4, 1, 1, Qt.AlignRight)
+        primary_layout.addWidget(self.success_color, 0, 5, 1, 1)
         
+        # Row 1
         self.warning_color = self._create_color_button("#f39c12")
-        primary_layout.addRow("Warning Color:", self.warning_color)
+        primary_layout.addWidget(QLabel("Warning:"), 1, 0, 1, 1, Qt.AlignRight)
+        primary_layout.addWidget(self.warning_color, 1, 1, 1, 1)
         
         self.error_color = self._create_color_button("#e74c3c")
-        primary_layout.addRow("Error Color:", self.error_color)
+        primary_layout.addWidget(QLabel("Error:"), 1, 2, 1, 1, Qt.AlignRight)
+        primary_layout.addWidget(self.error_color, 1, 3, 1, 1)
+
+        self.text_color = self._create_color_button("#2c3e50")
+        primary_layout.addWidget(QLabel("Text:"), 1, 4, 1, 1, Qt.AlignRight)
+        primary_layout.addWidget(self.text_color, 1, 5, 1, 1)
+
+        # Row 2
+        self.menu_bar_color = self._create_color_button("#2c3e50")
+        primary_layout.addWidget(QLabel("Menu Bar:"), 2, 0, 1, 1, Qt.AlignRight)
+        primary_layout.addWidget(self.menu_bar_color, 2, 1, 1, 1)
+
+        self.dock_title_color = self._create_color_button("#3498db")
+        primary_layout.addWidget(QLabel("Dock Title:"), 2, 2, 1, 1, Qt.AlignRight)
+        primary_layout.addWidget(self.dock_title_color, 2, 3, 1, 1)
+
+        self.header_color = self._create_color_button("#34495e")
+        primary_layout.addWidget(QLabel("Header:"), 2, 4, 1, 1, Qt.AlignRight)
+        primary_layout.addWidget(self.header_color, 2, 5, 1, 1)
+
+        # Row 3
+        self.status_bar_color = self._create_color_button("#34495e")
+        primary_layout.addWidget(QLabel("Status Bar:"), 3, 0, 1, 1, Qt.AlignRight)
+        primary_layout.addWidget(self.status_bar_color, 3, 1, 1, 1)
+
+        self.toolbar_color = self._create_color_button("#34495e")
+        primary_layout.addWidget(QLabel("Toolbar:"), 3, 2, 1, 1, Qt.AlignRight)
+        primary_layout.addWidget(self.toolbar_color, 3, 3, 1, 1)
+
+        self.selection_color = self._create_color_button("#3498db")
+        primary_layout.addWidget(QLabel("Selection:"), 3, 4, 1, 1, Qt.AlignRight)
+        primary_layout.addWidget(self.selection_color, 3, 5, 1, 1)
+
+        # Row 4
+        self.selection_text_color = self._create_color_button("#ffffff")
+        primary_layout.addWidget(QLabel("Selection Text:"), 4, 0, 1, 1, Qt.AlignRight)
+        primary_layout.addWidget(self.selection_text_color, 4, 1, 1, 1)
+        
+        # Add stretch to remaining columns to prevent excessive spacing
+        primary_layout.setColumnStretch(6, 1)
         
         layout.addWidget(primary_group)
         
         # Background colors
         bg_group = QGroupBox("Background Colors")
         bg_layout = QFormLayout(bg_group)
+        bg_layout.setVerticalSpacing(10)
+        bg_layout.setHorizontalSpacing(15)
         
         self.bg_main = self._create_color_button("#f5f6f7")
         bg_layout.addRow("Main Background:", self.bg_main)
@@ -244,6 +297,10 @@ class SettingsDialog(QDialog):
         self.button_padding.setSuffix(" px")
         spacing_layout.addRow("Button Padding:", self.button_padding)
         
+        # Border radius for rounded corners (create the widget here)
+        self.border_radius = QSpinBox()
+        self.border_radius.setRange(0, 24)
+        self.border_radius.setValue(4)
         self.border_radius.setSuffix(" px")
         spacing_layout.addRow("Border Radius:", self.border_radius)
         
@@ -395,7 +452,7 @@ For more details, see README.md and docs/ folder.
     def _create_color_button(self, default_color):
         """Create a button for color selection."""
         button = QPushButton()
-        button.setFixedSize(120, 30)
+        button.setFixedSize(160, 36)
         button.setProperty("color", default_color)
         self._update_color_button(button, default_color)
         button.clicked.connect(lambda: self._choose_color(button))
@@ -404,13 +461,13 @@ For more details, see README.md and docs/ folder.
     def _update_color_button(self, button, color):
         """Update color button appearance using an icon (no stylesheet)."""
         try:
-            pix = QPixmap(18, 18)
+            pix = QPixmap(32, 32)
             pix.fill(QColor(color))
             # Draw a subtle border so the swatch is visible on light backgrounds
             # (QPixmap.fill replaces the content; small border handled by icon padding)
             icon = QIcon(pix)
             button.setIcon(icon)
-            button.setIconSize(QSize(18, 18))
+            button.setIconSize(QSize(32, 32))
         except Exception:
             button.setIcon(QIcon())
         button.setText(color)
@@ -463,6 +520,14 @@ For more details, see README.md and docs/ folder.
         self._update_color_button(self.success_color, self.settings.value("success_color", "#27ae60"))
         self._update_color_button(self.warning_color, self.settings.value("warning_color", "#f39c12"))
         self._update_color_button(self.error_color, self.settings.value("error_color", "#e74c3c"))
+        self._update_color_button(self.text_color, self.settings.value("text_color", "#2c3e50"))
+        self._update_color_button(self.menu_bar_color, self.settings.value("menu_bar_color", "#2c3e50"))
+        self._update_color_button(self.dock_title_color, self.settings.value("dock_title_color", "#3498db"))
+        self._update_color_button(self.header_color, self.settings.value("header_color", "#34495e"))
+        self._update_color_button(self.status_bar_color, self.settings.value("status_bar_color", "#34495e"))
+        self._update_color_button(self.toolbar_color, self.settings.value("toolbar_color", "#34495e"))
+        self._update_color_button(self.selection_color, self.settings.value("selection_color", "#3498db"))
+        self._update_color_button(self.selection_text_color, self.settings.value("selection_text_color", "#ffffff"))
         self._update_color_button(self.bg_main, self.settings.value("bg_main", "#f5f6f7"))
         self._update_color_button(self.bg_widget, self.settings.value("bg_widget", "#ffffff"))
         self._update_color_button(self.bg_alternate, self.settings.value("bg_alternate", "#f8f9fa"))
@@ -551,6 +616,14 @@ For more details, see README.md and docs/ folder.
         self.settings.setValue("success_color", self.success_color.property("color"))
         self.settings.setValue("warning_color", self.warning_color.property("color"))
         self.settings.setValue("error_color", self.error_color.property("color"))
+        self.settings.setValue("text_color", self.text_color.property("color"))
+        self.settings.setValue("menu_bar_color", self.menu_bar_color.property("color"))
+        self.settings.setValue("dock_title_color", self.dock_title_color.property("color"))
+        self.settings.setValue("header_color", self.header_color.property("color"))
+        self.settings.setValue("status_bar_color", self.status_bar_color.property("color"))
+        self.settings.setValue("toolbar_color", self.toolbar_color.property("color"))
+        self.settings.setValue("selection_color", self.selection_color.property("color"))
+        self.settings.setValue("selection_text_color", self.selection_text_color.property("color"))
         self.settings.setValue("bg_main", self.bg_main.property("color"))
         self.settings.setValue("bg_widget", self.bg_widget.property("color"))
         self.settings.setValue("bg_alternate", self.bg_alternate.property("color"))
@@ -792,6 +865,14 @@ For more details, see README.md and docs/ folder.
         self.success_color.clicked.connect(self._schedule_apply)
         self.warning_color.clicked.connect(self._schedule_apply)
         self.error_color.clicked.connect(self._schedule_apply)
+        self.text_color.clicked.connect(self._schedule_apply)
+        self.menu_bar_color.clicked.connect(self._schedule_apply)
+        self.dock_title_color.clicked.connect(self._schedule_apply)
+        self.header_color.clicked.connect(self._schedule_apply)
+        self.status_bar_color.clicked.connect(self._schedule_apply)
+        self.toolbar_color.clicked.connect(self._schedule_apply)
+        self.selection_color.clicked.connect(self._schedule_apply)
+        self.selection_text_color.clicked.connect(self._schedule_apply)
         self.bg_main.clicked.connect(self._schedule_apply)
         self.bg_widget.clicked.connect(self._schedule_apply)
         self.bg_alternate.clicked.connect(self._schedule_apply)

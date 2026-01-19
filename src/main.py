@@ -10,6 +10,7 @@ from src.ui.main_window import MainWindow
 from src.core.device_manager import DeviceManager
 from src.core.app_controller import AppController
 import logging
+import ctypes
 
 logging.basicConfig(level=logging.INFO)
 
@@ -20,11 +21,31 @@ def main():
     try:
         # Prevent running the GUI as root: using sudo breaks DBus/X11 permissions
         # and causes unpredictable GUI behavior. Exit with a clear message.
-        try:
-            is_root = (os.geteuid() == 0)
-        except AttributeError:
-            # Windows / platforms without geteuid()
-            is_root = False
+        def is_running_as_root() -> bool:
+            """Return True when running with elevated privileges.
+
+            Cross-platform: on Unix use `os.geteuid()` when available; on
+            Windows attempt `IsUserAnAdmin` via ctypes. Fail safe returns
+            False on unknown platforms or when checks are unavailable.
+            """
+            # Windows: use IsUserAnAdmin if available
+            if os.name == 'nt':
+                try:
+                    return bool(ctypes.windll.shell32.IsUserAnAdmin())
+                except Exception:
+                    return False
+
+            # POSIX: prefer geteuid when present
+            geteuid = getattr(os, 'geteuid', None)
+            if callable(geteuid):
+                try:
+                    return (geteuid() == 0)
+                except Exception:
+                    return False
+
+            return False
+
+        is_root = is_running_as_root()
 
         if is_root:
             sys.stderr.write("Refusing to run SCADA Scout as root (sudo).\nPlease run without sudo: `source venv/bin/activate && python src/main.py`\n")

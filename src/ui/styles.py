@@ -755,6 +755,23 @@ QDialog {
     background-color: #1e1e1e;
 }
 
+QGroupBox {
+    color: #e0e0e0;
+    border: 1px solid #3e3e42;
+    border-radius: 4px;
+    margin-top: 8px;
+    padding-top: 8px;
+}
+
+QGroupBox::title {
+    color: #e0e0e0;
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    padding: 4px 8px;
+    background-color: #2d2d30;
+    border-radius: 3px;
+}
+
 QLabel[class="status"] {
     font-size: 11pt;
     font-weight: 600;

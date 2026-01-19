@@ -3,6 +3,8 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QFormLayout, QLineEdit, QCo
                                  QFileDialog, QListWidget, QLabel, QMenu, QStackedWidget, 
                                  QCheckBox, QDoubleSpinBox, QSpinBox)
 from PySide6.QtCore import QSettings, Qt
+from PySide6.QtGui import QGuiApplication
+import platform
 import psutil
 import socket
 from src.models.device_models import DeviceConfig, DeviceType
@@ -14,9 +16,36 @@ class ConnectionDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("🔌 Connect to Device")
-        self.resize(600, 500)
-        self.setMinimumWidth(500)
-        self.setMinimumHeight(400)
+        # Scale dialog size for Windows DPI and available screen size
+        base_width, base_height = 850, 650
+        min_width, min_height = 750, 580
+        scale = 1.0
+        try:
+            if platform.system() == "Windows":
+                screen = QGuiApplication.primaryScreen()
+                if screen:
+                    scale = screen.logicalDotsPerInch() / 96.0
+        except Exception:
+            scale = 1.0
+
+        width = int(base_width * scale)
+        height = int(base_height * scale)
+        min_w = int(min_width * scale)
+        min_h = int(min_height * scale)
+
+        try:
+            screen = QGuiApplication.primaryScreen()
+            if screen:
+                avail = screen.availableGeometry()
+                width = min(width, int(avail.width() * 0.85))
+                height = min(height, int(avail.height() * 0.85))
+                min_w = min(min_w, max(700, int(avail.width() * 0.55)))
+                min_h = min(min_h, max(520, int(avail.height() * 0.55)))
+        except Exception:
+            pass
+
+        self.resize(width, height)
+        self.setMinimumSize(min_w, min_h)
         
         self.layout = QVBoxLayout(self)
         self.form = QFormLayout()
