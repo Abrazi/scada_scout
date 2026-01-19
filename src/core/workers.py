@@ -52,6 +52,36 @@ class ConnectionWorker(Worker):
         self.device = device
         self.protocol = protocol
 
+    def _find_readable_signal(self, node):
+        if not node:
+            return None
+        if hasattr(node, 'signals'):
+            for signal in node.signals:
+                if getattr(signal, 'access', 'RO') in ('RO', 'RW'):
+                    return signal
+        if hasattr(node, 'children'):
+            for child in node.children:
+                found = self._find_readable_signal(child)
+                if found:
+                    return found
+        return None
+
+    def _measure_initial_rtt(self, root_node):
+        try:
+            test_signal = self._find_readable_signal(root_node)
+            if not test_signal:
+                return
+
+            start_time = time.perf_counter()
+            result = self.protocol.read_signal(test_signal)
+            end_time = time.perf_counter()
+
+            if result:
+                rtt_ms = (end_time - start_time) * 1000
+                test_signal.last_rtt = rtt_ms
+        except Exception as e:
+            logger.debug(f"Initial RTT measurement failed: {e}")
+
     def run(self):
         try:
             device_name = self.device_name
@@ -75,6 +105,9 @@ class ConnectionWorker(Worker):
                     # Signal both old and new name
                     # If new_name is different, DeviceManager will handle the rename
                     self.emit("device_updated", device_name, new_name)
+
+                    # Measure initial RTT after discovery
+                    self._measure_initial_rtt(root_node)
                     
                 except Exception as e:
                     logger.error(f"Discovery failed: {e}")
