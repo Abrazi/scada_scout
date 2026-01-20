@@ -79,10 +79,14 @@ class DeviceTreeWidget(QWidget):
                     device_name = self._owner._find_device_for_item(item)
 
                     if data and hasattr(data, 'address'):
+                        unique_address = getattr(data, 'unique_address', '')
+                        if not unique_address and device_name and getattr(data, 'address', ''):
+                            unique_address = f"{device_name}::{getattr(data, 'address', '')}"
                         items.append({
                             'device': device_name,
                             'address': getattr(data, 'address', ''),
-                            'signal_name': getattr(data, 'name', '')
+                            'signal_name': getattr(data, 'name', ''),
+                            'unique_address': unique_address
                         })
                     else:
                         # For non-signal items, include node identifier path
@@ -862,7 +866,15 @@ class DeviceTreeWidget(QWidget):
                     import copy
                     new_config = copy.deepcopy(old_config)
                     new_config.name = new_text
-                    self.device_manager.update_device(device_name, new_config)
+                    # Use the wrapper method to update config
+                    try:
+                        self.device_manager.update_device_config(new_config)
+                    except Exception:
+                        # Fallback to core call
+                        try:
+                            self.device_manager._core.update_device_config(new_config)
+                        except Exception:
+                            logger.exception("Failed to update device config during rename")
                 else:
                     # Update description
                     device.config.description = new_text
@@ -871,11 +883,36 @@ class DeviceTreeWidget(QWidget):
                     
         elif data and hasattr(data, 'name'):
             # Signal or Node
+            # Preserve old address/name for propagation
+            try:
+                old_unique = getattr(data, 'unique_address', None)
+            except Exception:
+                old_unique = None
+
             if col == 0:
                 data.name = new_text
             else:
                 data.description = new_text
             logger.debug(f"Updated {type(data).__name__} in-place: {new_text}")
+
+            # If the user edited a signal/node, refresh unique addresses for the containing device
+            try:
+                device_name = self._find_device_for_item(name_item)
+                if device_name:
+                    dev = self.device_manager.get_device(device_name)
+                    if dev and dev.root_node:
+                        # Recalculate unique addresses
+                        try:
+                            self.device_manager._core._assign_unique_addresses(device_name, dev.root_node)
+                        except Exception:
+                            pass
+                        # Emit device_updated so script editors and other listeners can react
+                        try:
+                            self.device_manager._core.emit('device_updated', device_name)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
 
     def _on_context_menu(self, position):
         """Shows context menu for device nodes, signal nodes and background."""
@@ -1215,11 +1252,15 @@ class DeviceTreeWidget(QWidget):
                     # Generic "Add to Live Data" (New Implementation)
                     add_live_action = QAction("Add to Live Data", self)
                     def request_add_live():
+                        unique_address = getattr(signal, 'unique_address', '')
+                        if not unique_address and device_name and getattr(signal, 'address', ''):
+                            unique_address = f"{device_name}::{signal.address}"
                         # Construct payload
                         payload = {
                             "device": device_name,
                             "signal_name": signal.name,
                             "address": signal.address, # This is the key unique identifier
+                            "unique_address": unique_address,
                             "description": signal.description,
                             "fc": getattr(signal, 'fc', getattr(signal, 'access', '')) 
                         }
@@ -1275,9 +1316,16 @@ class DeviceTreeWidget(QWidget):
 
                 # Copy Address (only for single selection)
                 if len(selected_signals) == 1:
-                    copy_action = QAction("Copy Signal Address", self)
-                    copy_action.triggered.connect(lambda: self._copy_to_clipboard(signal.address))
-                    menu.addAction(copy_action)
+                    unique_address = getattr(signal, 'unique_address', '')
+                    if not unique_address and device_name and getattr(signal, 'address', ''):
+                        unique_address = f"{device_name}::{signal.address}"
+                    copy_unique_action = QAction("Copy Tag Address", self)
+                    copy_unique_action.triggered.connect(lambda: self._copy_to_clipboard(unique_address))
+                    menu.addAction(copy_unique_action)
+
+                    copy_raw_action = QAction("Copy Raw Address", self)
+                    copy_raw_action.triggered.connect(lambda: self._copy_to_clipboard(signal.address))
+                    menu.addAction(copy_raw_action)
                 
                 # Control option (only for single selection)
                 if len(selected_signals) == 1:

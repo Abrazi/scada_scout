@@ -148,6 +148,26 @@ class ModbusSlaveWidget(QWidget):
         self.tabs.addTab(self._create_statistics_panel(), "Statistics")
         
         layout.addWidget(self.tabs)
+        
+        # Action buttons (Save / Close)
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+
+        self.btn_save_close = QPushButton("Save && Close")
+        self.btn_save_close.clicked.connect(self._on_save_close)
+        self.btn_save_close.setProperty("class", "success")
+        try:
+            self.btn_save_close.style().unpolish(self.btn_save_close)
+            self.btn_save_close.style().polish(self.btn_save_close)
+        except Exception:
+            pass
+        btn_row.addWidget(self.btn_save_close)
+
+        self.btn_close_only = QPushButton("Close")
+        self.btn_close_only.clicked.connect(self.close)
+        btn_row.addWidget(self.btn_close_only)
+
+        layout.addLayout(btn_row)
     
     def _create_memory_layout_panel(self) -> QWidget:
         """Create memory layout configuration panel"""
@@ -411,6 +431,22 @@ class ModbusSlaveWidget(QWidget):
         # Refresh table
         self._load_mappings()
         self._sync_config()
+
+    def _on_save_close(self):
+        """Persist current configuration and close the widget."""
+        try:
+            # Ensure server/mappings synced into device_config
+            self._sync_config()
+        except Exception:
+            pass
+        try:
+            self.config_updated.emit()
+        except Exception:
+            pass
+        try:
+            self.close()
+        except Exception:
+            pass
         
     def _sync_config(self):
         """Sync server mappings back to device config for persistence"""

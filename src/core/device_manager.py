@@ -107,11 +107,80 @@ class DeviceManager(QObject):
     def read_signal(self, device_name: str, signal: Signal) -> Optional[Signal]:
         return self._core.read_signal(device_name, signal)
 
+    def write_signal(self, device_name: str, signal: Signal, value: Any) -> bool:
+        return self._core.write_signal(device_name, signal, value)
+
     def send_control_command(self, device_name: str, signal: Signal, command: str, value: Any):
         return self._core.send_control_command(device_name, signal, command, value)
 
     def is_controllable(self, device_name: str, signal: Signal) -> bool:
         return self._core.is_controllable(device_name, signal)
+
+    def start_user_script(self, name: str, code: str, interval: float = 0.5):
+        return self._core.start_user_script(name, code, interval)
+
+    def run_user_script_once(self, code: str):
+        return self._core.run_user_script_once(code)
+
+    def stop_user_script(self, name: str):
+        return self._core.stop_user_script(name)
+
+    def stop_all_user_scripts(self):
+        return self._core.stop_all_user_scripts()
+
+    def list_user_scripts(self):
+        return self._core.list_user_scripts()
+
+    def save_user_script(self, name: str, code: str, interval: float = 0.5):
+        return self._core.save_user_script(name, code, interval)
+
+    def delete_user_script(self, name: str):
+        return self._core.delete_user_script(name)
+
+    def get_saved_scripts(self):
+        return self._core.get_saved_scripts()
+
+    def resolve_script_tokens(self, code: str) -> str:
+        """Resolve token placeholders in user script code to current unique addresses."""
+        if not code:
+            return code
+        mgr = getattr(self._core, '_script_tag_manager', None)
+        if mgr:
+            try:
+                return mgr.resolve_code(code)
+            except Exception:
+                return code
+        return code
+
+    def resolve_script_tokens_interactive(self, code: str, chooser) -> str:
+        """Resolve tokens interactively using a `chooser(token, candidates)` callback for ambiguities.
+
+        `chooser` should accept `(token_str, candidates_list)` and return the selected candidate string or None.
+        """
+        if not code:
+            return code
+        mgr = getattr(self._core, '_script_tag_manager', None)
+        if mgr and hasattr(mgr, 'resolve_code_interactive'):
+            try:
+                return mgr.resolve_code_interactive(code, chooser)
+            except Exception:
+                return code
+        return code
+
+    def make_tag_token(self, unique_address: str) -> str:
+        mgr = getattr(self._core, '_script_tag_manager', None)
+        if mgr:
+            try:
+                return mgr.make_token(unique_address)
+            except Exception:
+                pass
+        return f"{{{{TAG:{unique_address}}}}}"
+
+    def get_signal_by_unique_address(self, unique_address: str) -> Optional[Signal]:
+        return self._core.get_signal_by_unique_address(unique_address)
+
+    def list_unique_addresses(self, device_name: Optional[str] = None):
+        return self._core.list_unique_addresses(device_name)
 
     # For existing UI compatibility - in case any code accessed _devices directly
     # (Though they shouldn't have)

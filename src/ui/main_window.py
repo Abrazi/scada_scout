@@ -179,6 +179,19 @@ class MainWindow(QMainWindow):
         import_scd_action.setStatusTip("Import IEDs from SCD file")
         import_scd_action.triggered.connect(self._show_scd_import_dialog)
         file_menu.addAction(import_scd_action)
+
+        file_menu.addSeparator()
+
+        # Python Scripts
+        run_script_once_action = QAction("Run Python Script (Once)...", self)
+        run_script_once_action.setStatusTip("Run a Python script once")
+        run_script_once_action.triggered.connect(self._run_script_once_from_file)
+        file_menu.addAction(run_script_once_action)
+
+        run_script_cont_action = QAction("Run Python Script (Continuously)...", self)
+        run_script_cont_action.setStatusTip("Run a Python script on a timer")
+        run_script_cont_action.triggered.connect(self._run_script_continuous_from_file)
+        file_menu.addAction(run_script_cont_action)
         
         file_menu.addSeparator()
 
@@ -256,6 +269,12 @@ class MainWindow(QMainWindow):
         save_layout_action.triggered.connect(self._on_save_default_layout)
         self.view_menu.addAction(save_layout_action)
         
+        self.view_menu.addSeparator()
+
+        python_scripts_action = QAction("Python &Scripts...", self)
+        python_scripts_action.setStatusTip("Open the Python script editor")
+        python_scripts_action.triggered.connect(self._open_python_script_dialog)
+        self.view_menu.addAction(python_scripts_action)
         self.view_menu.addSeparator()
         
         # Settings action
@@ -496,6 +515,39 @@ class MainWindow(QMainWindow):
         dialog = SettingsDialog(self)
         dialog.settings_changed.connect(self._apply_settings)
         dialog.exec()
+
+    def _open_python_script_dialog(self):
+        from src.ui.dialogs.python_script_dialog import PythonScriptDialog
+        dlg = PythonScriptDialog(self.device_manager, self)
+        dlg.setAttribute(Qt.WA_DeleteOnClose, True)
+        dlg.show()
+
+    def _run_script_once_from_file(self):
+        script_path, _ = QFileDialog.getOpenFileName(self, "Run Python Script (Once)", "", "Python Files (*.py)")
+        if not script_path:
+            return
+        try:
+            with open(script_path, 'r') as f:
+                code = f.read()
+            self.device_manager.run_user_script_once(code)
+        except Exception as e:
+            QMessageBox.critical(self, "Script Error", str(e))
+
+    def _run_script_continuous_from_file(self):
+        from PySide6.QtWidgets import QInputDialog
+        script_path, _ = QFileDialog.getOpenFileName(self, "Run Python Script (Continuously)", "", "Python Files (*.py)")
+        if not script_path:
+            return
+        interval, ok = QInputDialog.getDouble(self, "Script Interval", "Interval (seconds):", 0.5, 0.05, 60.0, 2)
+        if not ok:
+            return
+        try:
+            with open(script_path, 'r') as f:
+                code = f.read()
+            name = os.path.splitext(os.path.basename(script_path))[0]
+            self.device_manager.start_user_script(name, code, interval)
+        except Exception as e:
+            QMessageBox.critical(self, "Script Error", str(e))
     
     def _apply_settings(self):
         """Apply customized settings to the application."""

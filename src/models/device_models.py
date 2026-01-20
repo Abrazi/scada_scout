@@ -73,6 +73,7 @@ class Signal:
     """Represents a single data point (Telemetry)."""
     name: str
     address: str  # IOA for 104, ObjectRef for 61850, "unit:func:addr" for Modbus
+    unique_address: str = ""  # Global unique tag address: "Device::Address[#n]"
     signal_type: Any = None
     value: Any = None
     quality: SignalQuality = SignalQuality.NOT_CONNECTED

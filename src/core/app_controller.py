@@ -108,6 +108,12 @@ class AppController(QObject):
 
         if hasattr(self.device_manager, 'clear_all_devices'):
             self.device_manager.clear_all_devices()
+
+        try:
+            if hasattr(self.device_manager, 'stop_all_user_scripts'):
+                self.device_manager.stop_all_user_scripts()
+        except Exception:
+            pass
             
         # logger.info("Shutting down IEC workers...")
         # Legacy cleanup - can be removed if strictly using DeviceManager

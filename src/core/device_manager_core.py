@@ -8,6 +8,7 @@ from src.core.events import EventEmitter
 from src.models.device_models import Device, DeviceConfig, DeviceType, Node, Signal, SignalQuality
 from src.protocols.base_protocol import BaseProtocol
 from src.core.subscription_manager import IECSubscriptionManager
+from src.core.script_tag_manager import ScriptTagManager
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,14 @@ class DeviceManagerCore(EventEmitter):
         self.config_path = config_path
         self.folder_descriptions: Dict[str, str] = {} # folder_name -> description
         self._active_workers = []
+        self._script_manager = None
+        self._script_tag_manager = ScriptTagManager(self)
+        self._saved_scripts = {}
+        # Load persisted user scripts and update token internals
+        try:
+            self._load_user_scripts()
+        except Exception:
+            logger.exception("Failed to load persisted user scripts")
         
         # Authoritative Subscription Manager
         self.subscription_manager = IECSubscriptionManager()
@@ -196,6 +205,7 @@ class DeviceManagerCore(EventEmitter):
             try:
                 root = protocol.discover()
                 device.root_node = root
+                self._assign_unique_addresses(device_name, device.root_node)
                 self.emit("device_updated", device_name)
                 logger.info(f"Offline SCD loaded for {device_name}")
             except Exception as e:
@@ -351,20 +361,37 @@ class DeviceManagerCore(EventEmitter):
     def _handle_device_update_signal(self, old_name: str, new_name: str):
         if old_name != new_name:
             if new_name not in self._devices:
-                 device = self._devices.get(old_name)
-                 if device:
-                     device.config.name = new_name
-                     self._devices[new_name] = self._devices.pop(old_name)
-                     self._protocols[new_name] = self._protocols.pop(old_name)
-                     
-                     self.emit("device_removed", old_name)
-                     self.emit("device_added", device)
-                     self.emit("connection_progress", new_name, f"Renamed to {new_name}", 95)
-                     self.emit("device_updated", new_name)
+                device = self._devices.get(old_name)
+                if device:
+                    device.config.name = new_name
+                    self._devices[new_name] = self._devices.pop(old_name)
+                    self._protocols[new_name] = self._protocols.pop(old_name)
+                    if device.root_node:
+                        self._assign_unique_addresses(new_name, device.root_node)
+
+                    self.emit("device_removed", old_name)
+                    self.emit("device_added", device)
+                    self.emit("connection_progress", new_name, f"Renamed to {new_name}", 95)
+                    self.emit("device_updated", new_name)
+
+                    # Notify script manager so running scripts can be restarted if tokens changed
+                    try:
+                        if self._script_tag_manager and self._script_manager:
+                            self._script_manager.restart_scripts_with_token_resolution(self._script_tag_manager)
+                    except Exception:
+                        logger.exception("Failed to restart scripts after device rename")
             else:
                 self.emit("device_updated", new_name)
         else:
-             self.emit("device_updated", old_name)
+            device = self._devices.get(old_name)
+            if device and device.root_node:
+                self._assign_unique_addresses(old_name, device.root_node)
+                try:
+                    if self._script_tag_manager and self._script_manager:
+                        self._script_manager.restart_scripts_with_token_resolution(self._script_tag_manager)
+                except Exception:
+                    logger.exception("Failed to restart scripts after device update")
+            self.emit("device_updated", old_name)
 
     def _on_connection_finished(self, worker):
         if worker in self._active_workers:
@@ -391,6 +418,8 @@ class DeviceManagerCore(EventEmitter):
 
     def _on_signal_update(self, device_name: str, signal: Signal):
         """Internal callback when a protocol pushes data."""
+        if not getattr(signal, 'unique_address', ''):
+            signal.unique_address = f"{device_name}::{signal.address}"
         if self.event_logger:
             self.event_logger.debug("DeviceManager", f"Received update for {signal.address} Value={signal.value}")
         self.emit("signal_updated", device_name, signal)
@@ -449,6 +478,182 @@ class DeviceManagerCore(EventEmitter):
         except Exception as e:
             logger.warning(f"Failed to read signal {signal.address} from {device_name}: {e}")
             return None
+
+    def write_signal(self, device_name: str, signal: Signal, value: Any) -> bool:
+        protocol = self._protocols.get(device_name)
+        if not protocol or not hasattr(protocol, 'write_signal'):
+            return False
+        try:
+            return bool(protocol.write_signal(signal, value))
+        except Exception as e:
+            logger.warning(f"Failed to write signal {signal.address} to {device_name}: {e}")
+            return False
+
+    def parse_unique_address(self, unique_address: str):
+        if not unique_address or "::" not in unique_address:
+            return None, None
+        device_name, address = unique_address.split("::", 1)
+        # Strip any uniqueness suffix (e.g., #2)
+        if "#" in address:
+            address = address.split("#", 1)[0]
+        return device_name, address
+
+    def get_signal_by_unique_address(self, unique_address: str) -> Optional[Signal]:
+        device_name, address = self.parse_unique_address(unique_address)
+        if not device_name or not address:
+            return None
+        device = self._devices.get(device_name)
+        if not device or not device.root_node:
+            return None
+        return self._find_signal_in_node(device.root_node, address, unique_address)
+
+    def list_unique_addresses(self, device_name: Optional[str] = None):
+        addresses = []
+        devices = [self._devices.get(device_name)] if device_name else self._devices.values()
+        for device in devices:
+            if not device or not device.root_node:
+                continue
+            addresses.extend(self._collect_unique_addresses(device.config.name, device.root_node))
+        return addresses
+
+    def start_user_script(self, name: str, code: str, interval: float = 0.5):
+        if not self._script_manager:
+            from src.core.script_runtime import UserScriptManager
+            self._script_manager = UserScriptManager(self, self.event_logger)
+        # Persist script so it survives restarts
+        try:
+            self.save_user_script(name, code, interval)
+        except Exception:
+            logger.exception("Failed to persist user script on start")
+        self._script_manager.start_script(name, code, interval)
+
+    # --- User script persistence ---
+    def _scripts_file_path(self):
+        try:
+            cfg = os.path.abspath(self.config_path)
+            folder = os.path.dirname(cfg)
+            return os.path.join(folder, 'user_scripts.json')
+        except Exception:
+            return 'user_scripts.json'
+
+    def _load_user_scripts(self):
+        path = self._scripts_file_path()
+        if not os.path.exists(path):
+            return
+        try:
+            with open(path, 'r') as f:
+                data = json.load(f)
+            scripts = {}
+            for entry in data or []:
+                name = entry.get('name')
+                code = entry.get('code', '')
+                interval = entry.get('interval', 0.5)
+                # Update token internals to current canonical values while preserving token wrappers
+                try:
+                    if self._script_tag_manager:
+                        code = self._script_tag_manager.update_tokens(code)
+                except Exception:
+                    pass
+                scripts[name] = {'code': code, 'interval': interval}
+            self._saved_scripts = scripts
+            # Persist back any updated token internals
+            try:
+                self._save_user_scripts_file()
+            except Exception:
+                pass
+        except Exception as e:
+            logger.error(f"Failed to load user scripts file: {e}")
+
+    def _save_user_scripts_file(self):
+        path = self._scripts_file_path()
+        data = []
+        for name, meta in (self._saved_scripts or {}).items():
+            data.append({'name': name, 'code': meta.get('code', ''), 'interval': meta.get('interval', 0.5)})
+        try:
+            with open(path, 'w') as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to save user scripts file: {e}")
+
+    def save_user_script(self, name: str, code: str, interval: float = 0.5):
+        if not name:
+            raise ValueError('Script name required')
+        self._saved_scripts[name] = {'code': code, 'interval': interval}
+        try:
+            self._save_user_scripts_file()
+        except Exception:
+            logger.exception('Failed to persist user script')
+
+    def delete_user_script(self, name: str):
+        if name in self._saved_scripts:
+            del self._saved_scripts[name]
+            try:
+                self._save_user_scripts_file()
+            except Exception:
+                logger.exception('Failed to delete user script from disk')
+
+    def get_saved_scripts(self):
+        return dict(self._saved_scripts)
+
+    def run_user_script_once(self, code: str):
+        from src.core.script_runtime import run_script_once
+        run_script_once(code, self, self.event_logger)
+
+    def stop_user_script(self, name: str):
+        if self._script_manager:
+            self._script_manager.stop_script(name)
+
+    def stop_all_user_scripts(self):
+        if self._script_manager:
+            self._script_manager.stop_all()
+
+    def list_user_scripts(self):
+        if not self._script_manager:
+            return []
+        return self._script_manager.list_scripts()
+
+    def _assign_unique_addresses(self, device_name: str, node: Optional[Node]):
+        if not node:
+            return
+        seen = {}
+
+        def _walk(n: Node):
+            for sig in getattr(n, 'signals', []) or []:
+                base = f"{device_name}::{sig.address}"
+                count = seen.get(base, 0) + 1
+                seen[base] = count
+                sig.unique_address = f"{base}#{count}" if count > 1 else base
+            for child in getattr(n, 'children', []) or []:
+                _walk(child)
+
+        _walk(node)
+
+    def _collect_unique_addresses(self, device_name: str, node: Node):
+        collected = []
+        if hasattr(node, 'signals') and node.signals:
+            for sig in node.signals:
+                if getattr(sig, 'unique_address', ''):
+                    collected.append(sig.unique_address)
+                else:
+                    collected.append(f"{device_name}::{sig.address}")
+        if hasattr(node, 'children') and node.children:
+            for child in node.children:
+                collected.extend(self._collect_unique_addresses(device_name, child))
+        return collected
+
+    def _find_signal_in_node(self, node: Node, address: str, unique_address: Optional[str] = None) -> Optional[Signal]:
+        if hasattr(node, 'signals') and node.signals:
+            for sig in node.signals:
+                if unique_address and getattr(sig, 'unique_address', None) == unique_address:
+                    return sig
+                if sig.address == address:
+                    return sig
+        if hasattr(node, 'children') and node.children:
+            for child in node.children:
+                found = self._find_signal_in_node(child, address, unique_address)
+                if found:
+                    return found
+        return None
 
     def send_control_command(self, device_name: str, signal: Signal, command: str, value: Any):
         if device_name not in self._protocols:

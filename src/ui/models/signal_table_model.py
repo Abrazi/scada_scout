@@ -311,7 +311,7 @@ class SignalTableModel(QAbstractTableModel):
 
     def _get_key(self, signal: Signal) -> str:
         """Generates a unique key for the signal (Address is usually unique per device)."""
-        return signal.address
+        return getattr(signal, 'unique_address', '') or signal.address
 
     def clear_signals(self):
         """Clear all signals from the model."""
