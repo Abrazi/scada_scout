@@ -142,25 +142,100 @@ class DeviceManagerCore(EventEmitter):
 
     def update_device_config(self, config: DeviceConfig):
         """Updates the configuration of an existing device."""
+        # Try exact name lookup first
         device = self._devices.get(config.name)
+        old_name = None
+
+        # If no device found by new name, try to locate the existing device by matching
+        # IP/port as a best-effort fallback (caller often passes a deepcopy of old config
+        # with only the name changed).
+        if not device:
+            for name, dev in list(self._devices.items()):
+                if dev and dev.config and dev.config.ip_address == config.ip_address and dev.config.port == config.port:
+                    device = dev
+                    old_name = name
+                    break
+
+        # If still not found, nothing to update
         if not device:
             return
 
-        if device.connected:
-            self.disconnect_device(config.name)
-        
-        if config.name in self._protocols:
-             try:
-                 self._protocols[config.name].disconnect()
-             except Exception as e:
-                 logger.debug(f"Error disconnecting {config.name} during reconfigure: {e}")
-             del self._protocols[config.name]
-            
+        # Determine the authoritative old name key
+        if old_name is None:
+            # Find the key for this device object
+            for name, dev in list(self._devices.items()):
+                if dev is device:
+                    old_name = name
+                    break
+
+        # If device was connected, disconnect before changing config
+        try:
+            if device.connected:
+                self.disconnect_device(old_name or config.name)
+        except Exception:
+            pass
+
+        # If there's a protocol instance under the old name, clean it up
+        try:
+            if old_name and old_name in self._protocols:
+                try:
+                    self._protocols[old_name].disconnect()
+                except Exception as e:
+                    logger.debug(f"Error disconnecting {old_name} during reconfigure: {e}")
+                del self._protocols[old_name]
+        except Exception:
+            pass
+
+        # Apply new config
         device.config = config
-        
-        self.emit("device_removed", config.name)
-        self.emit("device_added", device)
-        self.save_configuration()
+
+        # If the name changed, update internal maps and notify UI as a rename (remove/add)
+        new_name = config.name
+        if old_name and old_name != new_name:
+            # Move device entry
+            self._devices[new_name] = self._devices.pop(old_name)
+            # Move protocol mapping if present
+            if old_name in self._protocols:
+                self._protocols[new_name] = self._protocols.pop(old_name)
+
+            # Recalculate unique addresses if present
+            if device.root_node:
+                self._assign_unique_addresses(new_name, device.root_node)
+
+            # Update script tag manager choices and saved scripts to reflect rename
+            try:
+                if self._script_tag_manager:
+                    try:
+                        self._script_tag_manager.rename_device(old_name, new_name)
+                    except Exception:
+                        pass
+
+                # Update saved user scripts by rewriting token inners if they reference the old device name
+                for sname, meta in list(self._saved_scripts.items()):
+                    code = meta.get('code', '')
+                    if f"{{{{TAG:{old_name}::" in code:
+                        new_code = code.replace(f"{{{{TAG:{old_name}::", f"{{{{TAG:{new_name}::")
+                        self._saved_scripts[sname]['code'] = new_code
+                try:
+                    self._save_user_scripts_file()
+                except Exception:
+                    pass
+
+            except Exception:
+                pass
+
+            # Emit remove + add so UI can fully refresh the node key
+            self.emit("device_removed", old_name)
+            self.emit("device_added", device)
+            self.save_configuration()
+            return
+
+        # Otherwise it's an in-place update: emit device_updated
+        try:
+            self.emit("device_updated", new_name)
+            self.save_configuration()
+        except Exception:
+            pass
 
     def disconnect_device(self, device_name: str):
         """Disconnects a device."""

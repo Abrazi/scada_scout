@@ -4,7 +4,8 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtWidgets import QDialogButtonBox, QListWidgetItem, QCheckBox
 from PySide6.QtCore import Qt, QEvent, QTimer, QPoint
-from PySide6.QtGui import QSyntaxHighlighter, QTextCharFormat, QColor, QFont, QStandardItemModel, QStandardItem, QGuiApplication
+from PySide6.QtGui import QSyntaxHighlighter, QTextCharFormat, QColor, QFont, QStandardItemModel, QStandardItem, QGuiApplication, QShortcut, QKeySequence
+import textwrap
 import traceback
 
 
@@ -45,6 +46,14 @@ class PythonScriptDialog(QDialog):
         body = QHBoxLayout()
         self.editor = QTextEdit()
         self.editor.installEventFilter(self)
+        # Also bind Ctrl+Space via QShortcut to ensure completions open reliably
+        try:
+            # Attach the shortcut to the dialog (parent) so it fires reliably
+            sc = QShortcut(QKeySequence('Ctrl+Space'), self)
+            sc.setContext(Qt.WidgetWithChildrenShortcut)
+            sc.activated.connect(self._show_completions)
+        except Exception:
+            pass
         self.editor.setPlaceholderText(
             "# Define tick(ctx)\n"
             "# Example:\n"
@@ -69,48 +78,51 @@ class PythonScriptDialog(QDialog):
         self._refresh_completer()
         self._highlighter = _PythonHighlighter(self.editor.document())
         # Provide a helpful example script in the editor for users
-        EXAMPLE = '''# Example script for SCADA Scout
-        # Define a callable named `tick(ctx)` for continuous scripts,
-        # or `main(ctx)` / `loop(ctx)` / `tick(ctx)` for one-shot runs.
-        # `ctx` exposes helper methods:
-        #   - ctx.get(tag_address, default=None)
-        #   - ctx.read(tag_address)  # force read (best-effort)
-        #   - ctx.set(tag_address, value)  # write value to a tag
-        #   - ctx.list_tags(device_name=None)
-        #   - ctx.log(level, message)
-        #
-        # Unique tag addresses are in the form: DeviceName::SignalAddress
-        # Examples: IED1::LLN0$XCBR$Pos.stVal  or  ModbusDevice::1:3:40001
+        EXAMPLE = textwrap.dedent(
+            """\
+            # Example script for SCADA Scout
+            # Define a callable named `tick(ctx)` for continuous scripts,
+            # or `main(ctx)` / `loop(ctx)` / `tick(ctx)` for one-shot runs.
+            # `ctx` exposes helper methods:
+            #   - ctx.get(tag_address, default=None)
+            #   - ctx.read(tag_address)  # force read (best-effort)
+            #   - ctx.set(tag_address, value)  # write value to a tag
+            #   - ctx.list_tags(device_name=None)
+            #   - ctx.log(level, message)
+            #
+            # Unique tag addresses are in the form: DeviceName::SignalAddress
+            # Examples: IED1::LLN0$XCBR$Pos.stVal  or  ModbusDevice::1:3:40001
 
-        # Completion tips:
-        #  - Press Ctrl+Space to open the tag completion popup.
-        #  - You can use wildcards '*' and '?' to filter tags, e.g.:
-        #      IED*::LLN0*    -> matches devices starting with 'IED' and signals with 'LLN0'
-        #      *:4001?        -> matches Modbus registers like 40010, 40011, etc.
-        #  - The popup shows a header explaining wildcard usage when present.
+            # Completion tips:
+            #  - Press Ctrl+Space to open the tag completion popup.
+            #  - You can use wildcards '*' and '?' to filter tags, e.g.:
+            #      IED*::LLN0*    -> matches devices starting with 'IED' and signals with 'LLN0'
+            #      *:4001?        -> matches Modbus registers like 40010, 40011, etc.
+            #  - The popup shows a header explaining wildcard usage when present.
 
-        import math
+            import math
 
-        def tick(ctx):
-            # Read a value from another device (non-blocking best-effort)
-            src = 'IED1::LLN0$MMXU$Amp.instMag'    # replace with an actual tag
-            val = ctx.get(src, 0)
+            def tick(ctx):
+                # Read a value from another device (non-blocking best-effort)
+                src = 'IED1::LLN0$MMXU$Amp.instMag'    # replace with an actual tag
+                val = ctx.get(src, 0)
 
-            # Compute something simple
-            new_val = math.floor((val or 0) * 1.1)
+                # Compute something simple
+                new_val = math.floor((val or 0) * 1.1)
 
-            # Write result to a target tag
-            dst = 'Simulator::holding:40010'  # replace with your target tag
-            ok = ctx.set(dst, new_val)
+                # Write result to a target tag
+                dst = 'Simulator::holding:40010'  # replace with your target tag
+                ok = ctx.set(dst, new_val)
 
-            # Optionally force a read and log result
-            forced = ctx.read(src)
-            ctx.log('info', f'Computed {new_val} from {src} (forced={forced})')
+                # Optionally force a read and log result
+                forced = ctx.read(src)
+                ctx.log('info', f'Computed {new_val} from {src} (forced={forced})')
 
-        # For one-off scripts you can also define `main(ctx)` and run once.
-        # def main(ctx):
-        #     print('This runs a single time')
-        '''
+            # For one-off scripts you can also define `main(ctx)` and run once.
+            # def main(ctx):
+            #     print('This runs a single time')
+            """
+        ).strip()
         # Only set example text if editor is empty
         if not self.editor.toPlainText().strip():
             self.editor.setPlainText(EXAMPLE)
@@ -178,6 +190,12 @@ class PythonScriptDialog(QDialog):
             self.device_manager.device_updated.connect(self._on_device_updated)
         except Exception:
             pass
+        # Also refresh when devices are added or removed (rename flows emit removed+added)
+        try:
+            self.device_manager.device_added.connect(lambda dev: self._on_device_updated(getattr(dev, 'config', None).name if getattr(dev, 'config', None) else getattr(dev, 'name', None)))
+            self.device_manager.device_removed.connect(self._on_device_updated)
+        except Exception:
+            pass
         # Highlight ambiguous tokens on edit
         try:
             self.editor.textChanged.connect(self._highlight_ambiguous_tokens)
@@ -217,6 +235,11 @@ class PythonScriptDialog(QDialog):
                 new_cursor = self.editor.textCursor()
                 new_cursor.setPosition(min(pos, len(updated)))
                 self.editor.setTextCursor(new_cursor)
+            # Also refresh completer list to reflect device/name changes
+            try:
+                self._refresh_completer()
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -320,6 +343,10 @@ class PythonScriptDialog(QDialog):
         model.appendRow(header_item)
         for t in self._tag_list:
             it = QStandardItem(t)
+            try:
+                it.setToolTip(t)
+            except Exception:
+                pass
             model.appendRow(it)
         if not self._tag_list:
             empty = QStandardItem("(no tags available)")
@@ -396,12 +423,57 @@ class PythonScriptDialog(QDialog):
                 header_item.setFlags(Qt.NoItemFlags)
                 model.appendRow(header_item)
                 for t in matches:
-                    model.appendRow(QStandardItem(t))
+                    it = QStandardItem(t)
+                    try:
+                        it.setToolTip(t)
+                    except Exception:
+                        pass
+                    model.appendRow(it)
                 if not matches:
                     none = QStandardItem("(no matches)")
                     none.setFlags(Qt.NoItemFlags)
                     model.appendRow(none)
                 self._completer.setModel(model)
+            else:
+                # No wildcard: if token non-empty, show substring matches; otherwise show full tag list
+                if token:
+                    try:
+                        matches = [t for t in self._tag_list if token.lower() in t.lower()]
+                    except Exception:
+                        matches = []
+                    base_model = QStandardItemModel()
+                    header_item = QStandardItem(f"Matches for: {token}")
+                    header_item.setFlags(Qt.NoItemFlags)
+                    base_model.appendRow(header_item)
+                    for t in matches:
+                        it = QStandardItem(t)
+                        try:
+                            it.setToolTip(t)
+                        except Exception:
+                            pass
+                        base_model.appendRow(it)
+                    if not matches:
+                        none = QStandardItem("(no matches)")
+                        none.setFlags(Qt.NoItemFlags)
+                        base_model.appendRow(none)
+                    self._completer.setModel(base_model)
+                else:
+                    base_model = QStandardItemModel()
+                    header_item = QStandardItem("Type to filter; use * and ? for wildcard matching")
+                    header_item.setFlags(Qt.NoItemFlags)
+                    base_model.appendRow(header_item)
+                    for t in getattr(self, '_tag_list', []):
+                        it = QStandardItem(t)
+                        try:
+                            it.setToolTip(t)
+                        except Exception:
+                            pass
+                        base_model.appendRow(it)
+                    if not getattr(self, '_tag_list', []):
+                        none = QStandardItem("(no tags available)")
+                        none.setFlags(Qt.NoItemFlags)
+                        base_model.appendRow(none)
+                    self._completer.setModel(base_model)
         except Exception:
             pass
 
@@ -412,8 +484,13 @@ class PythonScriptDialog(QDialog):
 
             popup = self._completer.popup()
             if popup:
-                popup.setMinimumSize(400, 200)
-                popup.resize(400, 300)
+                # Use computed rect width/height so long addresses are visible
+                try:
+                    popup.setMinimumSize(rect.width(), rect.height())
+                    popup.resize(rect.width(), rect.height())
+                except Exception:
+                    popup.setMinimumSize(400, 200)
+                    popup.resize(400, 300)
 
                 global_pos = self.editor.mapToGlobal(rect.bottomLeft())
                 screen = QGuiApplication.screenAt(global_pos) or QGuiApplication.primaryScreen()
@@ -465,7 +542,7 @@ class PythonScriptDialog(QDialog):
 
     def eventFilter(self, obj, event):
         if obj is self.editor and event.type() == QEvent.KeyPress:
-            if event.key() == Qt.Key_Space and event.modifiers() == Qt.ControlModifier:
+            if event.key() == Qt.Key_Space and (event.modifiers() & Qt.ControlModifier):
                 # Show tip in status label briefly and open completions
                 try:
                     prev = self.lbl_status.text()

@@ -1070,9 +1070,9 @@ class DeviceTreeWidget(QWidget):
             menu.addAction(add_recursive_watch)
 
         if is_device_node:
-             # Device specific actions
+            # Device specific actions
             device_name = data
-            device = self.device_manager.get_device(device_name)
+            device = self._resolve_device(device_name, root_item)
             if device:
                 # IEC 61850: Add switchgear status (XCBR/CSWI/XSWI Pos.stVal) to Watch List
                 if device.config.device_type in (DeviceType.IEC61850_IED, DeviceType.IEC61850_SERVER):
@@ -1383,7 +1383,7 @@ class DeviceTreeWidget(QWidget):
                     menu.addAction(read_action)
                     
                     # Data Inspector (for Modbus signals only)
-                    device = self.device_manager.get_device(device_name)
+                    device = self._resolve_device(device_name, root_item)
                     if device and device.config.device_type in (DeviceType.MODBUS_TCP, DeviceType.MODBUS_SERVER):
                         inspector_action = QAction("Data Inspector...", self)
                         inspector_action.triggered.connect(lambda: self._show_data_inspector(signal, device_name))
@@ -1402,13 +1402,14 @@ class DeviceTreeWidget(QWidget):
                 # Find the device name by traversing up the tree
                 device_name = self._find_device_for_item(root_item)
                 
+
                 # Build address by traversing parents
                 full_address = self._build_node_address(root_item)
 
                 # Logical Device specific: Control Switchgear (CSWI Pos.Oper.ctlVal)
                 is_logical_device = bool(device_name and full_address and "/" not in full_address)
                 if is_logical_device:
-                    device = self.device_manager.get_device(device_name) if device_name else None
+                    device = self._resolve_device(device_name, root_item) if device_name else None
                     if device and device.config.device_type in (DeviceType.IEC61850_IED, DeviceType.IEC61850_SERVER):
                         control_switchgear_action = QAction("Control Switchgear", self)
 
@@ -1504,6 +1505,46 @@ class DeviceTreeWidget(QWidget):
                 # Found device name
                 return data
             current = current.parent()
+        return None
+
+    def _resolve_device(self, device_name: str, item: Optional[QStandardItem] = None):
+        """Robust device lookup: try exact name, fallback to text on the item, then case-insensitive search.
+
+        This helps when the stored user-role data is out-of-sync with the DeviceManager keys
+        (e.g., after an in-place rename or round-trip serialization).
+        """
+        if not device_name:
+            device_name = ""
+
+        # Try exact match first
+        try:
+            dev = self.device_manager.get_device(device_name)
+            if dev:
+                return dev
+        except Exception:
+            pass
+
+        # Try using the item's visible text
+        try:
+            if item is not None:
+                visible = item.text()
+                if visible and visible != device_name:
+                    dev = self.device_manager.get_device(visible)
+                    if dev:
+                        return dev
+        except Exception:
+            pass
+
+        # Last resort: case-insensitive search through all devices
+        try:
+            for d in self.device_manager.get_all_devices():
+                if d and d.config and d.config.name and d.config.name.lower() == str(device_name).lower():
+                    return d
+                if item is not None and d and d.config and d.config.name and d.config.name.lower() == item.text().lower():
+                    return d
+        except Exception:
+            pass
+
         return None
 
     def get_selected_device_names(self) -> List[str]:

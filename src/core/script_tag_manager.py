@@ -85,6 +85,9 @@ class ScriptTagManager:
         if not code:
             return code
 
+        def _is_quoted(s, e):
+            return s > 0 and e < len(code) and code[s-1] == code[e] and code[s-1] in ("'", '"')
+
         def _replace(match):
             inner = match.group(1)
             try:
@@ -97,6 +100,9 @@ class ScriptTagManager:
 
                 if sig and getattr(sig, 'unique_address', None):
                     resolved = sig.unique_address
+                    s, e = match.span()
+                    if _is_quoted(s, e):
+                        return resolved
                     return repr(resolved)
 
                 # Parse and search by address portion
@@ -106,6 +112,9 @@ class ScriptTagManager:
                     device_old, addr = (None, None)
 
                 if not addr:
+                    s, e = match.span()
+                    if _is_quoted(s, e):
+                        return inner
                     return repr(inner)
 
                 candidates = []
@@ -120,19 +129,31 @@ class ScriptTagManager:
                     candidates = []
 
                 if not candidates:
+                    s, e = match.span()
+                    if _is_quoted(s, e):
+                        return inner
                     return repr(inner)
 
                 # Prefer candidate with same device_old if possible
                 if device_old:
                     for c in candidates:
                         if c.startswith(f"{device_old}::"):
+                            s, e = match.span()
+                            if _is_quoted(s, e):
+                                return c
                             return repr(c)
 
                 # Otherwise if single candidate, pick it
                 if len(candidates) == 1:
+                    s, e = match.span()
+                    if _is_quoted(s, e):
+                        return candidates[0]
                     return repr(candidates[0])
 
-                # Ambiguous: return the first candidate
+                # Ambiguous: return the first candidate (respect quoting)
+                s, e = match.span()
+                if _is_quoted(s, e):
+                    return candidates[0]
                 return repr(candidates[0])
             except Exception as e:
                 logger.debug(f"ScriptTagManager: Failed to resolve token {inner}: {e}")
@@ -148,6 +169,9 @@ class ScriptTagManager:
         if not code:
             return code
 
+        def _is_quoted(s, e):
+            return s > 0 and e < len(code) and code[s-1] == code[e] and code[s-1] in ("'", '"')
+
         def _replace(match):
             inner = match.group(1)
             try:
@@ -159,15 +183,21 @@ class ScriptTagManager:
 
                 if sig and getattr(sig, 'unique_address', None):
                     resolved = sig.unique_address
+                    s, e = match.span()
+                    if _is_quoted(s, e):
+                        return resolved
                     return repr(resolved)
 
                 device_old, addr = (None, None)
                 try:
                     device_old, addr = self._dm.parse_unique_address(inner)
                 except Exception:
-                    pass
+                    device_old, addr = (None, None)
 
                 if not addr:
+                    s, e = match.span()
+                    if _is_quoted(s, e):
+                        return inner
                     return repr(inner)
 
                 candidates = []
@@ -181,14 +211,23 @@ class ScriptTagManager:
                     candidates = []
 
                 if not candidates:
+                    s, e = match.span()
+                    if _is_quoted(s, e):
+                        return inner
                     return repr(inner)
 
                 if len(candidates) == 1:
+                    s, e = match.span()
+                    if _is_quoted(s, e):
+                        return candidates[0]
                     return repr(candidates[0])
 
                 # Ambiguous: check persisted choice first
                 persisted = self._choices.get(inner)
                 if persisted and persisted in candidates:
+                    s, e = match.span()
+                    if _is_quoted(s, e):
+                        return persisted
                     return repr(persisted)
 
                 # Ask chooser for selection
@@ -196,11 +235,17 @@ class ScriptTagManager:
                     try:
                         chosen = chooser(inner, candidates)
                         if chosen:
+                            s, e = match.span()
+                            if _is_quoted(s, e):
+                                return chosen
                             return repr(chosen)
                     except Exception:
                         pass
 
                 # Fallback: pick first
+                s, e = match.span()
+                if _is_quoted(s, e):
+                    return candidates[0]
                 return repr(candidates[0])
             except Exception as e:
                 logger.debug(f"ScriptTagManager: Failed to resolve token {inner}: {e}")
@@ -260,3 +305,38 @@ class ScriptTagManager:
                 return match.group(0)
 
         return self.TOKEN_RE.sub(_replace, code)
+
+    def rename_device(self, old_name: str, new_name: str):
+        """Update internal persisted choices replacing occurrences of old device name with new one.
+
+        This performs a literal replacement in any stored token inner keys/values that
+        reference the old device name prefix (e.g., 'Old::addr' -> 'New::addr') and
+        persists the updated choices file.
+        """
+        if not old_name or not new_name or old_name == new_name:
+            return
+        updated = False
+        try:
+            new_choices = {}
+            for k, v in (self._choices or {}).items():
+                new_k = k
+                new_v = v
+                if isinstance(k, str) and k.startswith(f"{old_name}::"):
+                    new_k = k.replace(f"{old_name}::", f"{new_name}::", 1)
+                    updated = True
+                if isinstance(v, str) and v.startswith(f"{old_name}::"):
+                    new_v = v.replace(f"{old_name}::", f"{new_name}::", 1)
+                    updated = True
+                new_choices[new_k] = new_v
+
+            if updated:
+                self._choices = new_choices
+                # Persist
+                try:
+                    import json
+                    with open(self._choices_path, 'w') as f:
+                        json.dump(self._choices, f, indent=2)
+                except Exception:
+                    logger.exception('Failed to persist updated token choices')
+        except Exception:
+            logger.exception('Failed to rename device in token choices')
