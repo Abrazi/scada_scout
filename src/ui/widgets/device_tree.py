@@ -1877,10 +1877,31 @@ class DeviceTreeWidget(QWidget):
                 )
                     
             except Exception as e:
+                error_msg = str(e)
+                # Provide more helpful guidance for common IEC61850 library loading errors
+                if "Could not load iec61850" in error_msg or "iec61850" in error_msg.lower():
+                    detailed_msg = (
+                        f"❌ Failed to start IEC 61850 simulator:\n\n"
+                        f"Error: {error_msg}\n\n"
+                        f"📌 Solution: The native libiec61850 library is not installed.\n\n"
+                        f"Quick Fix Options:\n"
+                        f"1️⃣ Download pre-built DLL from libiec61850 releases:\n"
+                        f"   • Place iec61850.dll in: {os.path.abspath('lib')}\n"
+                        f"   • Or add to System32 or PATH\n\n"
+                        f"2️⃣ Build from source (see IEC61850_SETUP.md):\n"
+                        f"   • Use MSYS2/MinGW or Visual Studio\n"
+                        f"   • Follow step-by-step guide in project root\n\n"
+                        f"3️⃣ Verify installation:\n"
+                        f"   python -c \"from src.protocols.iec61850 import iec61850_wrapper; print('Loaded:', iec61850_wrapper.is_library_loaded())\"\n\n"
+                        f"See IEC61850_SETUP.md in the project root for detailed instructions."
+                    )
+                else:
+                    detailed_msg = f"Failed to start simulator:\n{error_msg}"
+                    
                 QMessageBox.critical(
                     self,
                     "Simulation Failed",
-                    f"Failed to start simulator:\n{str(e)}"
+                    detailed_msg
                 )
 
     def _show_modbus_range_dialog(self, device_name):

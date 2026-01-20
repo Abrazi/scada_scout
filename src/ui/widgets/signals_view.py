@@ -37,6 +37,16 @@ class SignalsViewWidget(QWidget):
             self.setAcceptDrops(True)
         except Exception:
             pass
+        
+        # Hide the visible tab bar label (e.g. "Live Data") so the
+        # Data Visualization area appears as a single pane with its
+        # own toolbar. Tabs are still used internally for switching
+        # between table/chart, but the tab bar is hidden to remove
+        # the small "Live Data" label at the top of the view.
+        try:
+            self.tabs.tabBar().hide()
+        except Exception:
+            pass
 
     def dragEnterEvent(self, event):
         mimetype = 'application/x-scadascout-signals'
