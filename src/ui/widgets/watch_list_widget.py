@@ -466,10 +466,45 @@ class WatchListWidget(QWidget):
                 
                 menu.addSeparator()
             
-            # Copy Address
+            # Copy Address (raw) and Tokenized for scripts
             copy_action = QAction("Copy Signal Address", self)
             copy_action.triggered.connect(lambda: self._copy_to_clipboard(signal.address))
             menu.addAction(copy_action)
+
+            # Provide tokenized copy suitable for Python scripts
+            try:
+                unique_address = getattr(signal, 'unique_address', '') or f"{device_name}::{signal.address}"
+                copy_token_action = QAction("Copy Tag Address (Token)", self)
+                def _copy_token(addr=unique_address):
+                    try:
+                        from PySide6.QtCore import QSettings
+                        qs = QSettings("ScadaScout", "UI")
+                        raw = qs.value("copy_tag_tokenized", None)
+                        if raw is None:
+                            tokenized = True
+                        elif isinstance(raw, bool):
+                            tokenized = raw
+                        elif isinstance(raw, str):
+                            tokenized = raw.lower() in ("1", "true", "yes", "on")
+                        else:
+                            try:
+                                tokenized = bool(int(raw))
+                            except Exception:
+                                tokenized = bool(raw)
+                    except Exception:
+                        tokenized = True
+                    if tokenized:
+                        try:
+                            token = self.device_manager.make_tag_token(addr)
+                        except Exception:
+                            token = f"{{{{TAG:{addr}}}}}"
+                        self._copy_to_clipboard(token)
+                    else:
+                        self._copy_to_clipboard(addr)
+                copy_token_action.triggered.connect(_copy_token)
+                menu.addAction(copy_token_action)
+            except Exception:
+                pass
             
             menu.addSeparator()
             

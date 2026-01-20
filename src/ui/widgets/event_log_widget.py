@@ -488,24 +488,33 @@ class EventLogWidget(QWidget):
             color = "#d4d4d4"  # Gray
         
         # Format the log entry
-        # Escape message and preserve formatting using <pre>
-        msg = message if isinstance(message, str) else str(message)
-        escaped = html.escape(msg)
-        
+        # Normalize message: trim, collapse whitespace/newlines, and truncate for tidy display
+        import re
+        full_msg = message if isinstance(message, str) else str(message)
+        full_msg = full_msg.strip()
+        # Collapse any sequence of whitespace/newlines into single space for compact display
+        compact = re.sub(r"\s+", " ", full_msg)
+        # Truncate long messages for the log view, keep full in tooltip
+        max_len = 300
+        display_msg = compact if len(compact) <= max_len else compact[:max_len] + "..."
+        escaped_display = html.escape(display_msg)
+        escaped_full = html.escape(full_msg)
+
         # Make success messages stand out with bold text for ✅ indicators
-        if '✅' in msg:
+        title_attr = f' title="{escaped_full}"' if escaped_full else ''
+        if '✅' in full_msg:
             entry_html = (
                 f'<span style="color: #808080;">[{event["timestamp"]}]</span> '
                 f'<span style="color: {color}; font-weight: bold;">[{level}]</span> '
                 f'<span style="color: #569cd6; font-weight: bold;">{event["source"]}:</span> '
-                f'<pre style="white-space:pre-wrap;margin:0; color: {color}; font-weight: bold;">{escaped}</pre>'
+                f'<pre style="white-space:pre-wrap;margin:0; color: {color}; font-weight: bold;"{title_attr}>{escaped_display}</pre>'
             )
         else:
             entry_html = (
                 f'<span style="color: #808080;">[{event["timestamp"]}]</span> '
                 f'<span style="color: {color};">[{level}]</span> '
                 f'<span style="color: #569cd6;">{event["source"]}:</span> '
-                f'<pre style="white-space:pre-wrap;margin:0">{escaped}</pre>'
+                f'<pre style="white-space:pre-wrap;margin:0"{title_attr}>{escaped_display}</pre>'
             )
 
         self.text_edit.append(entry_html)

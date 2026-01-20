@@ -518,9 +518,19 @@ class MainWindow(QMainWindow):
 
     def _open_python_script_dialog(self):
         from src.ui.dialogs.python_script_dialog import PythonScriptDialog
-        dlg = PythonScriptDialog(self.device_manager, self)
-        dlg.setAttribute(Qt.WA_DeleteOnClose, True)
-        dlg.show()
+        # Keep a reference on the main window so the dialog is not garbage-collected
+        try:
+            if getattr(self, '_python_script_dialog', None) is None:
+                self._python_script_dialog = PythonScriptDialog(self.device_manager, self)
+                self._python_script_dialog.setAttribute(Qt.WA_DeleteOnClose, True)
+            self._python_script_dialog.show()
+            self._python_script_dialog.raise_()
+            self._python_script_dialog.activateWindow()
+        except Exception:
+            # Fallback to creating a temporary dialog
+            dlg = PythonScriptDialog(self.device_manager, self)
+            dlg.setAttribute(Qt.WA_DeleteOnClose, True)
+            dlg.show()
 
     def _run_script_once_from_file(self):
         script_path, _ = QFileDialog.getOpenFileName(self, "Run Python Script (Once)", "", "Python Files (*.py)")

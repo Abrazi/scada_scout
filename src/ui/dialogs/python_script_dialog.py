@@ -3,9 +3,9 @@ from PySide6.QtWidgets import (
     QPushButton, QListWidget, QDoubleSpinBox, QMessageBox, QCompleter
 )
 from PySide6.QtWidgets import QDialogButtonBox, QListWidgetItem, QCheckBox
-from PySide6.QtWidgets import QDialogButtonBox, QListWidgetItem
-from PySide6.QtCore import Qt, QEvent
-from PySide6.QtGui import QSyntaxHighlighter, QTextCharFormat, QColor, QFont
+from PySide6.QtCore import Qt, QEvent, QTimer
+from PySide6.QtGui import QSyntaxHighlighter, QTextCharFormat, QColor, QFont, QStandardItemModel, QStandardItem
+import traceback
 
 
 class PythonScriptDialog(QDialog):
@@ -24,6 +24,15 @@ class PythonScriptDialog(QDialog):
         self.txt_name = QLineEdit()
         self.txt_name.setPlaceholderText("e.g., VoltageBalancer")
         header.addWidget(self.txt_name)
+        # Help button for longer cheatsheet
+        try:
+            self.btn_help = QPushButton("❓")
+            self.btn_help.setFlat(True)
+            self.btn_help.setToolTip("Show a cheatsheet for tag completions and wildcard usage")
+            self.btn_help.clicked.connect(self._show_cheatsheet)
+            header.addWidget(self.btn_help)
+        except Exception:
+            pass
 
         header.addWidget(QLabel("Interval (s):"))
         self.spin_interval = QDoubleSpinBox()
@@ -43,6 +52,16 @@ class PythonScriptDialog(QDialog):
             "#     v = ctx.get('Device::SomeAddress')\n"
             "#     ctx.set('Device::OtherAddress', v)\n"
         )
+        # Tooltip explaining completions and wildcard usage
+        try:
+            tip = (
+                "Press Ctrl+Space to open tag completions. "
+                "You can use '*' and '?' wildcards to filter (e.g. IED*::LLN0*, *:4001?)."
+            )
+            self._completion_tip = tip
+            self.editor.setToolTip(tip)
+        except Exception:
+            self._completion_tip = ''
         self._completer = QCompleter(self)
         self._completer.setCaseSensitivity(Qt.CaseInsensitive)
         self._completer.setFilterMode(Qt.MatchContains)
@@ -62,6 +81,13 @@ class PythonScriptDialog(QDialog):
         #
         # Unique tag addresses are in the form: DeviceName::SignalAddress
         # Examples: IED1::LLN0$XCBR$Pos.stVal  or  ModbusDevice::1:3:40001
+
+        # Completion tips:
+        #  - Press Ctrl+Space to open the tag completion popup.
+        #  - You can use wildcards '*' and '?' to filter tags, e.g.:
+        #      IED*::LLN0*    -> matches devices starting with 'IED' and signals with 'LLN0'
+        #      *:4001?        -> matches Modbus registers like 40010, 40011, etc.
+        #  - The popup shows a header explaining wildcard usage when present.
 
         import math
 
@@ -110,14 +136,27 @@ class PythonScriptDialog(QDialog):
 
         self.btn_insert_tag = QPushButton("Insert Tag (Ctrl+Space)")
         self.btn_insert_tag.clicked.connect(self._show_completions)
+        try:
+            self.btn_insert_tag.setToolTip("Insert selected tag token at cursor. Ctrl+Space opens completions.")
+        except Exception:
+            pass
         right.addWidget(self.btn_insert_tag)
         body.addLayout(right, 1)
         layout.addLayout(body)
 
         actions = QHBoxLayout()
+        # Status label (line/column)
+        self.lbl_status = QLabel("Line: 1 Col: 1")
+        actions.addWidget(self.lbl_status)
+
         self.btn_run_once = QPushButton("Run Once")
         self.btn_run_once.clicked.connect(self._run_once)
         actions.addWidget(self.btn_run_once)
+
+        # Compile button to pre-check syntax (resolves tokens interactively)
+        self.btn_compile = QPushButton("Compile")
+        self.btn_compile.clicked.connect(self._compile_current)
+        actions.addWidget(self.btn_compile)
 
         self.btn_start = QPushButton("Start Continuous")
         self.btn_start.clicked.connect(self._start_continuous)
@@ -142,6 +181,12 @@ class PythonScriptDialog(QDialog):
         # Highlight ambiguous tokens on edit
         try:
             self.editor.textChanged.connect(self._highlight_ambiguous_tokens)
+        except Exception:
+            pass
+
+        # Update status label on cursor move
+        try:
+            self.editor.cursorPositionChanged.connect(self._update_cursor_status)
         except Exception:
             pass
 
@@ -266,8 +311,19 @@ class PythonScriptDialog(QDialog):
             tags = self.device_manager.list_unique_addresses()
         except Exception:
             tags = []
+        # Keep a local copy for sizing decisions
+        self._tag_list = list(tags or [])
+        # Build a standard item model so we can add a non-selectable header
+        model = QStandardItemModel()
+        header_item = QStandardItem("Type to filter; use * and ? for wildcard matching")
+        header_item.setFlags(Qt.NoItemFlags)
+        model.appendRow(header_item)
+        for t in self._tag_list:
+            it = QStandardItem(t)
+            model.appendRow(it)
+
         self._completer.setModel(None)
-        self._completer = QCompleter(tags, self)
+        self._completer = QCompleter(model, self)
         self._completer.setCaseSensitivity(Qt.CaseInsensitive)
         self._completer.setFilterMode(Qt.MatchContains)
         self._completer.activated.connect(self._insert_completion)
@@ -286,12 +342,101 @@ class PythonScriptDialog(QDialog):
     def _show_completions(self):
         self._refresh_completer()
         rect = self.editor.cursorRect()
-        rect.setWidth(300)
+        # Adaptive width based on longest tag and font metrics
+        try:
+            from PySide6.QtGui import QFontMetrics
+            fm = self.editor.fontMetrics()
+            max_len = max((len(t) for t in getattr(self, '_tag_list', []) ), default=30)
+            char_w = fm.averageCharWidth() or 7
+            width = min(1200, int(max_len * char_w) + 60)
+            # Height: show up to 12 items
+            row_h = fm.height() or 18
+            visible = min(len(getattr(self, '_tag_list', [])), 12)
+            height = max(row_h * visible + 8, row_h + 8)
+            rect.setWidth(width)
+            rect.setHeight(height)
+        except Exception:
+            rect.setWidth(300)
+        # If the user typed a wildcard pattern before invoking completions, filter accordingly
+        try:
+            # Get the word under cursor (or token left of cursor)
+            cur = self.editor.textCursor()
+            cur.select(cur.WordUnderCursor)
+            token = cur.selectedText().strip()
+            # If token empty, try to get non-whitespace chars left of cursor up to 64 chars
+            if not token:
+                pos = cur.position()
+                doc = self.editor.document().toPlainText()
+                left = doc[max(0, pos-64):pos]
+                import re
+                m = re.search(r"([\w\-:\.\$#\*\?]+)$", left)
+                token = m.group(1) if m else ''
+
+            if '*' in token or '?' in token:
+                # Use fnmatch to select candidates
+                import fnmatch
+                # Case-insensitive wildcard matching: fnmatch is case-sensitive on some platforms
+                pat = token.lower()
+                matches = [t for t in self._tag_list if fnmatch.fnmatch(t.lower(), pat)]
+                model = QStandardItemModel()
+                header_item = QStandardItem("Wildcard filter — showing matches for: %s" % token)
+                header_item.setFlags(Qt.NoItemFlags)
+                model.appendRow(header_item)
+                for t in matches:
+                    model.appendRow(QStandardItem(t))
+                self._completer.setModel(model)
+        except Exception:
+            pass
+
         self._completer.complete(rect)
+
+    def _show_cheatsheet(self):
+        try:
+            dlg = QDialog(self)
+            dlg.setWindowTitle("Tag Completion Cheatsheet")
+            dlg.resize(640, 420)
+            v = QVBoxLayout(dlg)
+            te = QTextEdit()
+            te.setReadOnly(True)
+            cheats = (
+                "Tag Completion Cheatsheet\n\n"
+                "- Press Ctrl+Space to open the tag completion popup near the cursor.\n"
+                "- You can type parts of a device name or signal address to filter.\n"
+                "- Wildcards: '*' matches any sequence, '?' matches a single character. Examples:\n"
+                "    IED*::LLN0*      -> matches devices starting with 'IED' and signals with 'LLN0'\n"
+                "    *:4001?          -> matches Modbus registers like 40010, 40011, etc.\n"
+                "- The popup shows a non-selectable header when wildcard filtering is active.\n"
+                "- To insert a tag token into your script, select it and press Enter, or click 'Insert Tag'.\n"
+                "- Copied tag addresses can be tokenized ({{TAG:Device::Addr}}) if the preference is enabled in Settings.\n"
+                "- Tokens stay linked to device signals so renames propagate when possible.\n"
+            )
+            te.setPlainText(cheats)
+            v.addWidget(te)
+            btn = QPushButton("Close")
+            btn.clicked.connect(dlg.accept)
+            row = QHBoxLayout()
+            row.addStretch()
+            row.addWidget(btn)
+            v.addLayout(row)
+            dlg.exec()
+        except Exception:
+            try:
+                QMessageBox.information(self, "Cheatsheet", "Press Ctrl+Space to open completions. Use '*' and '?' wildcards to filter.")
+            except Exception:
+                pass
 
     def eventFilter(self, obj, event):
         if obj is self.editor and event.type() == QEvent.KeyPress:
             if event.key() == Qt.Key_Space and event.modifiers() == Qt.ControlModifier:
+                # Show tip in status label briefly and open completions
+                try:
+                    prev = self.lbl_status.text()
+                    tip = getattr(self, '_completion_tip', '')
+                    if tip:
+                        self.lbl_status.setText(tip)
+                        QTimer.singleShot(5000, lambda: self._update_cursor_status())
+                except Exception:
+                    pass
                 self._show_completions()
                 return True
         return super().eventFilter(obj, event)
@@ -308,7 +453,13 @@ class PythonScriptDialog(QDialog):
             QMessageBox.warning(self, "Missing Code", "Paste a script first.")
             return
         try:
-            resolved = self._resolve_tokens_with_prompt(code)
+            # Prefer cached compiled resolution if available
+            resolved = getattr(self, '_last_compiled_code', None)
+            if not resolved:
+                ok = self._compile_current()
+                if not ok:
+                    return
+                resolved = getattr(self, '_last_compiled_code', None)
             self.device_manager.run_user_script_once(resolved)
         except Exception as exc:
             QMessageBox.critical(self, "Script Error", str(exc))
@@ -326,11 +477,60 @@ class PythonScriptDialog(QDialog):
         try:
             # Persist before starting so scripts survive restarts
             self.device_manager.save_user_script(name, code, interval)
-            resolved = self._resolve_tokens_with_prompt(code)
+            # Prefer compiled/resolved cache, otherwise compile (which resolves tokens)
+            resolved = getattr(self, '_last_compiled_code', None)
+            if not resolved:
+                ok = self._compile_current()
+                if not ok:
+                    return
+                resolved = getattr(self, '_last_compiled_code', None)
             self.device_manager.start_user_script(name, resolved, interval)
             self._refresh_running()
         except Exception as exc:
             QMessageBox.critical(self, "Script Error", str(exc))
+
+    def _stop_selected(self):
+        item = self.lst_running.currentItem()
+        if not item:
+            return
+        name = item.text()
+        try:
+            self.device_manager.stop_user_script(name)
+            self._refresh_running()
+        except Exception as exc:
+            QMessageBox.critical(self, "Stop Error", str(exc))
+
+    def _update_cursor_status(self):
+        try:
+            cur = self.editor.textCursor()
+            # QTextCursor.blockNumber() is 0-based
+            line = cur.blockNumber() + 1
+            col = cur.columnNumber() + 1
+            self.lbl_status.setText(f"Line: {line} Col: {col}")
+        except Exception:
+            pass
+
+    def _compile_current(self):
+        code = self._get_code()
+        if not code:
+            QMessageBox.warning(self, "Missing Code", "Paste a script first.")
+            return False
+        try:
+            # Resolve tokens interactively if needed so we compile runnable code
+            resolved = self._resolve_tokens_with_prompt(code)
+            try:
+                compile(resolved, '<user_script>', 'exec')
+                QMessageBox.information(self, 'Compile OK', 'No syntax errors found.')
+                # cache resolved code to avoid double resolution when running
+                self._last_compiled_code = resolved
+                return True
+            except SyntaxError as se:
+                tb = traceback.format_exc()
+                QMessageBox.critical(self, 'Syntax Error', f"{se}\n\n{tb}")
+                return False
+        except Exception as exc:
+            QMessageBox.critical(self, 'Compile Error', str(exc))
+            return False
 
     def _save_current(self):
         name = self._get_name()
@@ -432,16 +632,6 @@ class CandidateChooserDialog(QDialog):
     def remember_choice(self) -> bool:
         return bool(getattr(self, 'chk_remember', None) and self.chk_remember.isChecked())
 
-    def _stop_selected(self):
-        item = self.lst_running.currentItem()
-        if not item:
-            return
-        name = item.text()
-        try:
-            self.device_manager.stop_user_script(name)
-            self._refresh_running()
-        except Exception as exc:
-            QMessageBox.critical(self, "Stop Error", str(exc))
 
 
 class _PythonHighlighter(QSyntaxHighlighter):
@@ -494,46 +684,4 @@ class _PythonHighlighter(QSyntaxHighlighter):
             for match in re.finditer(pattern, text):
                 start, end = match.span()
                 self.setFormat(start, end - start, fmt)
-
-    def _get_code(self) -> str:
-        return self.editor.toPlainText().strip()
-
-    def _get_name(self) -> str:
-        return self.txt_name.text().strip()
-
-    def _run_once(self):
-        code = self._get_code()
-        if not code:
-            QMessageBox.warning(self, "Missing Code", "Paste a script first.")
-            return
-        try:
-            self.device_manager.run_user_script_once(code)
-        except Exception as exc:
-            QMessageBox.critical(self, "Script Error", str(exc))
-
-    def _start_continuous(self):
-        code = self._get_code()
-        name = self._get_name()
-        if not code:
-            QMessageBox.warning(self, "Missing Code", "Paste a script first.")
-            return
-        if not name:
-            QMessageBox.warning(self, "Missing Name", "Provide a script name.")
-            return
-        interval = float(self.spin_interval.value())
-        try:
-            self.device_manager.start_user_script(name, code, interval)
-            self._refresh_running()
-        except Exception as exc:
-            QMessageBox.critical(self, "Script Error", str(exc))
-
-    def _stop_selected(self):
-        item = self.lst_running.currentItem()
-        if not item:
-            return
-        name = item.text()
-        try:
-            self.device_manager.stop_user_script(name)
-            self._refresh_running()
-        except Exception as exc:
-            QMessageBox.critical(self, "Stop Error", str(exc))
+    

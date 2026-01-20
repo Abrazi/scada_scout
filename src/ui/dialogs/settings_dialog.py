@@ -307,6 +307,15 @@ class SettingsDialog(QDialog):
         self.auto_save_layout = QCheckBox("Auto-save window layout on exit")
         self.auto_save_layout.setChecked(True)
         spacing_layout.addRow("", self.auto_save_layout)
+
+        # Copy behavior
+        self.copy_tag_tokenized = QCheckBox("Copy tag addresses as script tokens ({{TAG:...}})")
+        self.copy_tag_tokenized.setToolTip(
+            "When enabled, 'Copy Tag Address' will place a tokenized value like {{TAG:Device::Addr}}\n"
+            "which is ready to paste into the Python script editor. Disable to copy raw unique addresses."
+        )
+        self.copy_tag_tokenized.setChecked(True)
+        spacing_layout.addRow("", self.copy_tag_tokenized)
         
         layout.addWidget(spacing_group)
         
@@ -541,6 +550,15 @@ For more details, see README.md and docs/ folder.
         self.input_height.setValue(int(self.settings.value("input_height", 32)))
         self.icon_size.setValue(int(self.settings.value("icon_size", 24)))
 
+        # Copy behavior preference
+        try:
+            self.copy_tag_tokenized.setChecked(self.settings.value("copy_tag_tokenized", True, type=bool))
+        except Exception:
+            try:
+                self.copy_tag_tokenized.setChecked(True)
+            except Exception:
+                pass
+
         # Network / Capture defaults
         try:
             # Default filter stored as BPF string (or label)
@@ -636,6 +654,11 @@ For more details, see README.md and docs/ folder.
         self.settings.setValue("button_height", self.button_height.value())
         self.settings.setValue("input_height", self.input_height.value())
         self.settings.setValue("icon_size", self.icon_size.value())
+        # Copy behavior preference
+        try:
+            self.settings.setValue("copy_tag_tokenized", self.copy_tag_tokenized.isChecked())
+        except Exception:
+            pass
         
         self.settings.sync()
         # Save network defaults
