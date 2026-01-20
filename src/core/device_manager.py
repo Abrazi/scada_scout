@@ -17,6 +17,7 @@ class DeviceManager(QObject):
     device_removed = QtSignal(str) 
     device_status_changed = QtSignal(str, bool) 
     device_updated = QtSignal(str) 
+    device_renamed = QtSignal(str, str)
     connection_progress = QtSignal(str, str, int) 
     signal_updated = QtSignal(str, Signal) 
     project_cleared = QtSignal()
@@ -33,6 +34,11 @@ class DeviceManager(QObject):
         self._core.on("device_removed", self.device_removed.emit)
         self._core.on("device_status_changed", self.device_status_changed.emit)
         self._core.on("device_updated", self.device_updated.emit)
+        # Optional rename event emitted by core with (old_name, new_name)
+        try:
+            self._core.on("device_renamed", self.device_renamed.emit)
+        except Exception:
+            pass
         self._core.on("connection_progress", self.connection_progress.emit)
         self._core.on("signal_updated", self.signal_updated.emit)
         self._core.on("project_cleared", self.project_cleared.emit)

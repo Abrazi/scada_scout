@@ -1,7 +1,7 @@
 [
   {
     "name": "script1",
-    "code": "print({{TAG:dev_new::40001}})",
+    "code": "print(\"{{TAG:dnew::40001}}\")",
     "interval": 0.5
   }
 ]

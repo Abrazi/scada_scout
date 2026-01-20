@@ -224,6 +224,22 @@ class DeviceManagerCore(EventEmitter):
             except Exception:
                 pass
 
+            # Notify other core components about rename (subscriptions, watch lists etc.)
+            try:
+                if hasattr(self, 'subscription_manager') and self.subscription_manager:
+                    try:
+                        self.subscription_manager.rename_device(old_name, new_name)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            # Emit device_renamed event for adapters/UI to update in-memory caches
+            try:
+                self.emit("device_renamed", old_name, new_name)
+            except Exception:
+                pass
+
             # Emit remove + add so UI can fully refresh the node key
             self.emit("device_removed", old_name)
             self.emit("device_added", device)

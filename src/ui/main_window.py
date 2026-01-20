@@ -78,9 +78,8 @@ class MainWindow(QMainWindow):
         # Set minimum size to ensure all controls fit in two-row layout
         self.setMinimumSize(scaled_min_width, scaled_min_height)
         
-        # Use a frameless window so we can provide a custom title bar (VSCode-style)
-        self.setWindowFlags((self.windowFlags() | Qt.Window) & ~Qt.WindowTitleHint)
-        self.setWindowFlags(self.windowFlags() | Qt.FramelessWindowHint)
+        # Use standard window with native controls (minimize, maximize, close)
+        # This provides the best user experience with native OS window management
         
         # Force window to be visible and get focus
         self.setAttribute(Qt.WA_ShowWithoutActivating, False)
@@ -96,24 +95,23 @@ class MainWindow(QMainWindow):
         
         # Persistent Dialogs
         self.scd_dialog = None
-        # Drag support for frameless title area
+        # Drag support for title area
         self._drag_pos_main = None
-        # Floating title bar (fallback) - sits above menu widget to ensure
-        # controls are always visible and receive mouse events.
-        try:
-            self._floating_title = TitleBarWidget(self)
-            self._floating_title.setObjectName("FloatingTitleBar")
-            self._floating_title.move(0, 0)
-            self._floating_title.show()
-            self._floating_title.raise_()
-        except Exception:
-            self._floating_title = None
+        # No floating title bar needed since we use standard menu bar
+        self._floating_title = None
         
     def _setup_ui(self):
         # Initialize Managers first
         self.watch_list_manager = WatchListManager(self.device_manager)
         self.project_manager = ProjectManager(self.device_manager, self.watch_list_manager, self.event_logger, self)
         self._connect_project_signals()
+
+        # Keep in-memory caches (watch list, subscriptions) in sync when devices are renamed
+        try:
+            if hasattr(self.device_manager, 'device_renamed'):
+                self.device_manager.device_renamed.connect(self._on_device_renamed)
+        except Exception:
+            pass
 
         self._create_menus()
         self._create_toolbar()
@@ -122,31 +120,13 @@ class MainWindow(QMainWindow):
         self._create_dock_panels()
         
     def _create_menus(self):
-        # Replace the standard menu bar area with a container that includes
-        # our custom TitleBarWidget above the QMenuBar so the app appears
-        # frameless with a VSCode-like title area.
-        from PySide6.QtWidgets import QMenuBar, QVBoxLayout
-
-        menu_container = QWidget(self)
-        # Mark menu container so stylesheet can match title/menu area
-        menu_container.setProperty("class", "titlebar")
-        vlayout = QVBoxLayout(menu_container)
-        vlayout.setContentsMargins(0, 0, 0, 0)
-        vlayout.setSpacing(0)
-
-        title_controls = TitleBarWidget(self)
-        vlayout.addWidget(title_controls)
-
-        menu_bar = QMenuBar(menu_container)
-        vlayout.addWidget(menu_bar)
-
-        # Set our composed widget as the menu area
-        try:
-            self.setMenuWidget(menu_container)
-        except Exception:
-            # Some platforms might not support setMenuWidget; fall back
-            # to the default menu bar in that case.
-            menu_bar = self.menuBar()
+        # Use standard QMainWindow menu bar for maximum compatibility
+        # Force native menu bar on Windows for proper display
+        menu_bar = self.menuBar()
+        menu_bar.setNativeMenuBar(False)  # Ensure menu displays in window on all platforms
+        self.menu_bar = menu_bar
+        menu_bar.setVisible(True)
+        menu_bar.show()
 
         # File Menu
         file_menu = menu_bar.addMenu("&File")
@@ -293,6 +273,41 @@ class MainWindow(QMainWindow):
         # Help Menu
         help_menu = menu_bar.addMenu("&Help")
         
+    def _on_device_renamed(self, old_name: str, new_name: str):
+        """Handler for device rename events to update in-memory caches."""
+        try:
+            # Update watch list entries
+            try:
+                if hasattr(self, 'watch_list_manager') and self.watch_list_manager:
+                    self.watch_list_manager.rename_device(old_name, new_name)
+            except Exception:
+                pass
+
+            # Update subscription manager (core)
+            try:
+                sub_mgr = getattr(self.device_manager, 'subscription_manager', None)
+                if sub_mgr:
+                    sub_mgr.rename_device(old_name, new_name)
+            except Exception:
+                pass
+
+            # Let project manager update any persisted references if needed
+            try:
+                if hasattr(self, 'project_manager') and self.project_manager:
+                    # ProjectManager currently doesn't expose a rename API; no-op for now
+                    pass
+            except Exception:
+                pass
+
+            # Inform user via event log
+            try:
+                if self.event_logger:
+                    self.event_logger.info('DeviceManager', f"Device renamed: {old_name} -> {new_name}")
+            except Exception:
+                pass
+        except Exception:
+            pass
+        
     def _create_toolbar(self):
         self.toolbar = QToolBar("Main Toolbar")
         self.toolbar.setObjectName("MainToolbar")
@@ -332,7 +347,7 @@ class MainWindow(QMainWindow):
         self.device_manager.device_removed.connect(lambda n: self._update_event_log_devices())
         self.device_manager.device_updated.connect(self._on_device_updated)
 
-        # Right Panel: Signals & Charts (Data Visualization)
+        # Data Visualization panel - moved to bottom area
         self.dock_right = QDockWidget("Data Visualization", self)
         self.dock_right.setObjectName("DockDataVisualization")
         self.dock_right.setAllowedAreas(Qt.AllDockWidgetAreas)
@@ -341,7 +356,7 @@ class MainWindow(QMainWindow):
         self.signals_view = SignalsViewWidget(self.device_manager, self.watch_list_manager)
         self.signals_view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.dock_right.setWidget(self.signals_view)
-        self.addDockWidget(Qt.RightDockWidgetArea, self.dock_right)
+        self.addDockWidget(Qt.BottomDockWidgetArea, self.dock_right)
         
         # Connect signals_view to device_tree for "Add to Live Data" functionality
         self.device_tree.signals_view = self.signals_view
@@ -369,7 +384,7 @@ class MainWindow(QMainWindow):
             self.event_log_widget.set_event_logger(self.event_logger)
         self.event_log_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.dock_events.setWidget(self.event_log_widget)
-        self.addDockWidget(Qt.RightDockWidgetArea, self.dock_events)
+        self.addDockWidget(Qt.BottomDockWidgetArea, self.dock_events)
         self.device_tree.show_event_log_requested.connect(self.dock_events.raise_)
         
         # Modbus Slave Server panel (hidden by default)
@@ -385,10 +400,20 @@ class MainWindow(QMainWindow):
         self.dock_modbus_slave.setWidget(self.modbus_slave_widget)
         self.addDockWidget(Qt.BottomDockWidgetArea, self.dock_modbus_slave)
         
-        # Layout arrangement - tab event log and data viz together, watch list separate
+        # Layout arrangement - Put all panels at bottom, tabbed together
+        # Use a different ordering to ensure proper tabbing
+        self.removeDockWidget(self.dock_bottom)
+        self.removeDockWidget(self.dock_events)
+        self.removeDockWidget(self.dock_modbus_slave)
+        
+        # Add first one to bottom
+        self.addDockWidget(Qt.BottomDockWidgetArea, self.dock_right)
+        # Tab the rest to it
+        self.tabifyDockWidget(self.dock_right, self.dock_bottom)
         self.tabifyDockWidget(self.dock_right, self.dock_events)
-        self.tabifyDockWidget(self.dock_bottom, self.dock_modbus_slave)
-        self.dock_right.raise_()  # Show Data Visualization by default
+        self.tabifyDockWidget(self.dock_right, self.dock_modbus_slave)
+        
+        self.dock_right.raise_()  # Show Data Visualization tab by default
         self.dock_modbus_slave.setVisible(False)
         
         # Apply initial layout with proper sizing
@@ -400,12 +425,29 @@ class MainWindow(QMainWindow):
              # Ensure floating title is correctly positioned even after restore
              QTimer.singleShot(50, lambda: self.resizeEvent(None))
         
-        # Add toggle actions to View menu
-        self.view_menu.addAction(self.dock_left.toggleViewAction())
-        self.view_menu.addAction(self.dock_right.toggleViewAction())
-        self.view_menu.addAction(self.dock_bottom.toggleViewAction())
-        self.view_menu.addAction(self.dock_events.toggleViewAction())
-        self.view_menu.addAction(self.dock_modbus_slave.toggleViewAction())
+        # Ensure View menu exists (some menu construction paths may skip creation)
+        try:
+            if not hasattr(self, 'view_menu') or self.view_menu is None:
+                try:
+                    self.view_menu = self.menuBar().addMenu("&View")
+                except Exception:
+                    from PySide6.QtWidgets import QMenu
+                    self.view_menu = QMenu("&View", self)
+                    try:
+                        self.menuBar().addMenu(self.view_menu)
+                    except Exception:
+                        pass
+        except Exception:
+            # Last-resort: create an attribute so calls below won't fail
+            self.view_menu = None
+
+        # Add toggle actions to View menu (if available)
+        if getattr(self, 'view_menu', None):
+            self.view_menu.addAction(self.dock_left.toggleViewAction())
+            self.view_menu.addAction(self.dock_right.toggleViewAction())
+            self.view_menu.addAction(self.dock_bottom.toggleViewAction())
+            self.view_menu.addAction(self.dock_events.toggleViewAction())
+            self.view_menu.addAction(self.dock_modbus_slave.toggleViewAction())
 
     def _apply_initial_layout(self):
         """Apply flexible initial layout with proportional sizing."""
@@ -414,20 +456,16 @@ class MainWindow(QMainWindow):
         window_height = self.height()
         
         # Calculate proportional sizes (percentages of window size)
-        left_panel_width = int(window_width * 0.22)    # 22% for device explorer
-        right_panel_width = int(window_width * 0.78)   # 78% for data viz/event log
-        bottom_panel_height = int(window_height * 0.35) # 35% for watch list
+        left_panel_width = int(window_width * 0.25)    # 25% for device explorer
+        bottom_panel_height = int(window_height * 0.40) # 40% for bottom panels (Data Viz, Watch List, Event Log)
         
         # Apply minimum constraints only
-        left_panel_width = max(200, left_panel_width)   # Minimum 200px
-        right_panel_width = max(400, right_panel_width) # Minimum 400px
-        bottom_panel_height = max(150, bottom_panel_height) # Minimum 150px
+        left_panel_width = max(250, left_panel_width)   # Minimum 250px
+        bottom_panel_height = max(200, bottom_panel_height) # Minimum 200px
         
-        # Set horizontal dock sizes proportionally (Qt uses these as relative weights)
-        self.resizeDocks([self.dock_left, self.dock_right], [left_panel_width, right_panel_width], Qt.Horizontal)
-        
-        # Set vertical dock sizes  
-        self.resizeDocks([self.dock_bottom], [bottom_panel_height], Qt.Vertical)
+        # Set dock sizes
+        self.resizeDocks([self.dock_left], [left_panel_width], Qt.Horizontal)
+        self.resizeDocks([self.dock_right], [bottom_panel_height], Qt.Vertical)
 
     def resizeEvent(self, event):
         # Keep floating title bar stretched across the top
@@ -438,40 +476,6 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         return super().resizeEvent(event)
-
-    # Window-level dragging: allow dragging when user clicks the title area
-    def mousePressEvent(self, event):
-        # Only begin drag on left button within title area region (top 40px)
-        if event.button() == Qt.LeftButton and event.pos().y() <= 40:
-            # Try native system move first (Wayland friendly)
-            try:
-                if self.windowHandle() and hasattr(self.windowHandle(), 'startSystemMove'):
-                    if self.windowHandle().startSystemMove():
-                        event.accept()
-                        return
-            except Exception:
-                pass
-                
-            self._drag_pos_main = event.globalPosition().toPoint()
-            event.accept()
-            return
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event):
-        if self._drag_pos_main is None:
-            return super().mouseMoveEvent(event)
-        if event.buttons() & Qt.LeftButton:
-            new_pos = event.globalPosition().toPoint()
-            delta = new_pos - self._drag_pos_main
-            self._drag_pos_main = new_pos
-            self.move(self.pos() + delta)
-            event.accept()
-            return
-        super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event):
-        self._drag_pos_main = None
-        return super().mouseReleaseEvent(event)
 
     def _on_save_default_layout(self):
         """Saves current geometry and state as the user default."""
@@ -500,11 +504,12 @@ class MainWindow(QMainWindow):
         self.dock_events.setVisible(True)
         
         self.addDockWidget(Qt.LeftDockWidgetArea, self.dock_left)
-        self.addDockWidget(Qt.RightDockWidgetArea, self.dock_right)
+        self.addDockWidget(Qt.BottomDockWidgetArea, self.dock_right)
         self.addDockWidget(Qt.BottomDockWidgetArea, self.dock_bottom)
-        self.addDockWidget(Qt.RightDockWidgetArea, self.dock_events)
+        self.addDockWidget(Qt.BottomDockWidgetArea, self.dock_events)
         
-        self.tabifyDockWidget(self.dock_right, self.dock_events)
+        self.tabifyDockWidget(self.dock_right, self.dock_bottom)
+        self.tabifyDockWidget(self.dock_bottom, self.dock_events)
         self.dock_right.raise_()
         
         # Reapply flexible initial sizing

@@ -247,6 +247,43 @@ class WatchListManager(QObject):
             
         except Exception as e:
             logger.error(f"Failed to load watch list: {e}")
+
+    def rename_device(self, old_name: str, new_name: str):
+        """Update in-memory watched signals when a device is renamed.
+
+        This updates `device_name` and `watch_id` on each `WatchedSignal` and
+        moves them under the new keys in `_watched_signals`.
+        """
+        if not old_name or not new_name or old_name == new_name:
+            return
+
+        to_move = {k: v for k, v in self._watched_signals.items() if k.startswith(f"{old_name}::")}
+        if not to_move:
+            return
+
+        for old_key, watched in to_move.items():
+            try:
+                # Compute new key
+                suffix = old_key.split("::", 1)[1]
+                new_key = f"{new_name}::{suffix}"
+                # Update object
+                watched.device_name = new_name
+                watched.watch_id = new_key
+                # Also update underlying Signal.unique_address if present
+                try:
+                    if hasattr(watched.signal, 'unique_address') and watched.signal.unique_address:
+                        watched.signal.unique_address = watched.signal.unique_address.replace(f"{old_name}::", f"{new_name}::", 1)
+                except Exception:
+                    pass
+
+                # Insert under new key and remove old
+                self._watched_signals[new_key] = watched
+                del self._watched_signals[old_key]
+            except Exception:
+                logger.exception(f"Failed to migrate watched signal {old_key} to {new_name}")
+
+        logger.info(f"Updated watch list entries for renamed device {old_name} -> {new_name}")
+        self.watch_list_changed.emit()
     
     def _find_signal_in_node(self, node, address: str) -> Optional[Signal]:
         """Recursively find a signal by address in the node tree."""

@@ -73,6 +73,30 @@ class IECSubscriptionManager(QObject):
             subs = [s for s in subs if s.mode == mode]
             
         return subs
+
+    def rename_device(self, old_name: str, new_name: str):
+        """Rename subscriptions stored under `old_name` to `new_name`."""
+        if not old_name or not new_name or old_name == new_name:
+            return
+
+        if old_name not in self._subs_by_device:
+            return
+
+        try:
+            old_set = self._subs_by_device.pop(old_name)
+            new_set = self._subs_by_device.get(new_name, set())
+            for sub in old_set:
+                # Recreate subscription with new device name
+                new_sub = IECSubscription(device=new_name, mms_path=sub.mms_path, fc=sub.fc, mode=sub.mode, source=sub.source)
+                new_set.add(new_sub)
+
+            self._subs_by_device[new_name] = new_set
+            # Notify listeners that subscriptions changed for both devices
+            self.subscriptions_changed.emit(old_name)
+            self.subscriptions_changed.emit(new_name)
+            logger.info(f"Renamed subscriptions: {old_name} -> {new_name}")
+        except Exception:
+            logger.exception(f"Failed to rename subscriptions from {old_name} to {new_name}")
     
     def is_subscribed(self, device: str, mms_path: str) -> bool:
         """Check if an active subscription exists for this path."""
