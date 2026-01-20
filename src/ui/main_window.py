@@ -807,16 +807,12 @@ QTabBar::tab {{ padding: {widget_padding + 2}px {button_padding + 8}px; font-siz
         else:
             self.status_bar.showMessage(f"Successfully imported {count} devices.", 5000)
         
-        # Refresh and collapse the device tree when importing multiple devices
-        self.event_log_widget.update_device_list(self.device_manager.get_all_devices())
-        
-        # Trigger full tree reload
-        # We need to signal that the device list has changed massively
-        self.device_tree.clear() # Optional clear if supported, or just let update handle it
-        # Re-fetch all devices
-        all_devices = self.device_manager.get_all_devices()
-        for device in all_devices:
-             self.device_tree.add_device(device)
+        # Refresh event log device list
+        self._update_event_log_devices()
+
+        # Collapse tree after multi-device import
+        if count > 1:
+            self.device_tree.tree_view.collapseAll()
              
         if count > 1:
             self.device_tree.tree_view.collapseAll()

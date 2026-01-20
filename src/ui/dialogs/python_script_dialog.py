@@ -321,6 +321,10 @@ class PythonScriptDialog(QDialog):
         for t in self._tag_list:
             it = QStandardItem(t)
             model.appendRow(it)
+        if not self._tag_list:
+            empty = QStandardItem("(no tags available)")
+            empty.setFlags(Qt.NoItemFlags)
+            model.appendRow(empty)
 
         self._completer.setModel(None)
         self._completer = QCompleter(model, self)
@@ -378,12 +382,23 @@ class PythonScriptDialog(QDialog):
                 # Case-insensitive wildcard matching: fnmatch is case-sensitive on some platforms
                 pat = token.lower()
                 matches = [t for t in self._tag_list if fnmatch.fnmatch(t.lower(), pat)]
+
+                # Fallback: if no wildcard matches, try simple substring matching of the wildcard-stripped term
+                if not matches:
+                    simple = token.replace('*', '').replace('?', '').strip().lower()
+                    if simple:
+                        matches = [t for t in self._tag_list if simple in t.lower()]
+
                 model = QStandardItemModel()
                 header_item = QStandardItem("Wildcard filter — showing matches for: %s" % token)
                 header_item.setFlags(Qt.NoItemFlags)
                 model.appendRow(header_item)
                 for t in matches:
                     model.appendRow(QStandardItem(t))
+                if not matches:
+                    none = QStandardItem("(no matches)")
+                    none.setFlags(Qt.NoItemFlags)
+                    model.appendRow(none)
                 self._completer.setModel(model)
         except Exception:
             pass

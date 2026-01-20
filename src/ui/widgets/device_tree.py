@@ -1321,7 +1321,7 @@ class DeviceTreeWidget(QWidget):
                         unique_address = f"{device_name}::{signal.address}"
                     copy_unique_action = QAction("Copy Tag Address", self)
                     # Copy as tokenized form so it's ready for insertion into Python scripts
-                    def _copy_tokenized(addr=unique_address):
+                    def _copy_tokenized(addr=unique_address, dev=device_name, sig=signal):
                         try:
                             from PySide6.QtCore import QSettings
                             qs = QSettings("ScadaScout", "UI")
@@ -1339,14 +1339,22 @@ class DeviceTreeWidget(QWidget):
                                     tokenized = bool(raw)
                         except Exception:
                             tokenized = True
+                        # Ensure we have a sensible string unique address; fallback to device::signal.address
+                        final_addr = addr
+                        try:
+                            if not final_addr:
+                                final_addr = f"{dev}::{getattr(sig, 'address', '')}"
+                        except Exception:
+                            final_addr = str(addr)
+
                         if tokenized:
                             try:
-                                token = self.device_manager.make_tag_token(addr)
+                                token = self.device_manager.make_tag_token(final_addr)
                             except Exception:
-                                token = f"{{{{TAG:{addr}}}}}"
+                                token = f"{{{{TAG:{final_addr}}}}}"
                             self._copy_to_clipboard(token)
                         else:
-                            self._copy_to_clipboard(addr)
+                            self._copy_to_clipboard(final_addr)
                     copy_unique_action.triggered.connect(_copy_tokenized)
                     menu.addAction(copy_unique_action)
 
