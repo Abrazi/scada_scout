@@ -3,8 +3,8 @@ from PySide6.QtWidgets import (
     QPushButton, QListWidget, QDoubleSpinBox, QMessageBox, QCompleter
 )
 from PySide6.QtWidgets import QDialogButtonBox, QListWidgetItem, QCheckBox
-from PySide6.QtCore import Qt, QEvent, QTimer
-from PySide6.QtGui import QSyntaxHighlighter, QTextCharFormat, QColor, QFont, QStandardItemModel, QStandardItem
+from PySide6.QtCore import Qt, QEvent, QTimer, QPoint
+from PySide6.QtGui import QSyntaxHighlighter, QTextCharFormat, QColor, QFont, QStandardItemModel, QStandardItem, QGuiApplication
 import traceback
 
 
@@ -345,11 +345,8 @@ class PythonScriptDialog(QDialog):
         self.editor.setTextCursor(cursor)
 
     def _show_completions(self):
-        print("[DEBUG] _show_completions called")
         self._refresh_completer()
-        print(f"[DEBUG] Tag list has {len(self._tag_list)} tags")
         rect = self.editor.cursorRect()
-        print(f"[DEBUG] Cursor rect: {rect}")
         # Adaptive width based on longest tag and font metrics
         try:
             from PySide6.QtGui import QFontMetrics
@@ -367,9 +364,10 @@ class PythonScriptDialog(QDialog):
             rect.setWidth(300)
         # If the user typed a wildcard pattern before invoking completions, filter accordingly
         try:
+            from PySide6.QtGui import QTextCursor
             # Get the word under cursor (or token left of cursor)
             cur = self.editor.textCursor()
-            cur.select(cur.WordUnderCursor)
+            cur.select(QTextCursor.SelectionType.WordUnderCursor)
             token = cur.selectedText().strip()
             # If token empty, try to get non-whitespace chars left of cursor up to 64 chars
             if not token:
@@ -380,24 +378,18 @@ class PythonScriptDialog(QDialog):
                 m = re.search(r"([\w\-:\.\$#\*\?]+)$", left)
                 token = m.group(1) if m else ''
 
-            print(f"[DEBUG] Extracted token: '{token}'")
-
             if '*' in token or '?' in token:
-                print(f"[DEBUG] Wildcard detected in token: '{token}'")
                 # Use fnmatch to select candidates
                 import fnmatch
                 # Case-insensitive wildcard matching: fnmatch is case-sensitive on some platforms
                 pat = token.lower()
                 matches = [t for t in self._tag_list if fnmatch.fnmatch(t.lower(), pat)]
 
-                print(f"[DEBUG] fnmatch found {len(matches)} matches")
-
                 # Fallback: if no wildcard matches, try simple substring matching of the wildcard-stripped term
                 if not matches:
                     simple = token.replace('*', '').replace('?', '').strip().lower()
                     if simple:
                         matches = [t for t in self._tag_list if simple in t.lower()]
-                    print(f"[DEBUG] Substring fallback found {len(matches)} matches")
 
                 model = QStandardItemModel()
                 header_item = QStandardItem("Wildcard filter — showing matches for: %s" % token)
@@ -410,52 +402,30 @@ class PythonScriptDialog(QDialog):
                     none.setFlags(Qt.NoItemFlags)
                     model.appendRow(none)
                 self._completer.setModel(model)
-                print(f"[DEBUG] Set wildcard model with {model.rowCount()} rows")
-            else:
-                print(f"[DEBUG] No wildcard in token, keeping full model")
-        except Exception as e:
-            print(f"[DEBUG] Exception in wildcard filtering: {e}")
-            import traceback
-            traceback.print_exc()
+        except Exception:
             pass
 
         # Force the completer to show all items by setting an empty prefix
         try:
-            print("[DEBUG] About to show completer popup")
             self._completer.setCompletionPrefix("")
-            
-            # Get popup and configure it
-            popup = self._completer.popup()
-            model = self._completer.model()
-            print(f"[DEBUG] Popup widget: {popup}, visible: {popup.isVisible() if popup else 'N/A'}")
-            print(f"[DEBUG] Model has {model.rowCount() if model else 0} rows")
-            print(f"[DEBUG] Popup geometry: {popup.geometry() if popup else 'N/A'}")
-            print(f"[DEBUG] Popup size: {popup.size() if popup else 'N/A'}")
-            
-            if popup:
-                # Set explicit size for popup
-                popup.setMinimumHeight(200)
-                popup.setMinimumWidth(400)
-                
-                # Position popup at cursor in global coordinates
-                global_pos = self.editor.mapToGlobal(rect.bottomLeft())
-                popup.move(global_pos)
-                popup.resize(400, 300)
-                print(f"[DEBUG] Moving popup to global pos: {global_pos}, size: {popup.size()}")
-                
-                # Show and raise the popup
-                popup.setWindowFlags(Qt.Popup | Qt.FramelessWindowHint)
-                popup.show()
-                popup.raise_()
-                popup.activateWindow()
-                print(f"[DEBUG] Popup shown, raised, activated. Now visible: {popup.isVisible()}")
-            
-            # Still call complete to trigger the mechanism
             self._completer.complete(rect)
-        except Exception as e:
-            print(f"[DEBUG] Exception showing completer: {e}")
-            import traceback
-            traceback.print_exc()
+
+            popup = self._completer.popup()
+            if popup:
+                popup.setMinimumSize(400, 200)
+                popup.resize(400, 300)
+
+                global_pos = self.editor.mapToGlobal(rect.bottomLeft())
+                screen = QGuiApplication.screenAt(global_pos) or QGuiApplication.primaryScreen()
+                if screen:
+                    avail = screen.availableGeometry()
+                    x = min(max(avail.left(), global_pos.x()), avail.right() - popup.width())
+                    y = min(max(avail.top(), global_pos.y()), avail.bottom() - popup.height())
+                    global_pos = QPoint(x, y)
+
+                popup.move(global_pos)
+                popup.raise_()
+        except Exception:
             self._completer.complete(rect)
 
     def _show_cheatsheet(self):
