@@ -430,7 +430,7 @@ class SCDParser:
                      if type_id in templates:
                          possible_enum = templates[type_id]
                          if isinstance(possible_enum, dict):
-                             logger.info(f"✓ Enum mapping for {full_address} ({elem_name}): {possible_enum}")
+                             logger.debug(f"✓ Enum mapping for {full_address} ({elem_name}): {possible_enum}")
                              signal.enum_map = possible_enum
                              if sig_type == SignalType.ANALOG:
                                  # Optionally convert to State type for enum values
