@@ -817,7 +817,12 @@ QTabBar::tab {{ padding: {widget_padding + 2}px {button_padding + 8}px; font-siz
                 break
         
         if not scd_path:
-            scd_path, _ = QFileDialog.getOpenFileName(self, "Select Source SCD for GOOSE Export", "", "SCD Files (*.scd *.cid *.xml)")
+            scd_path, _ = QFileDialog.getOpenFileName(
+                self,
+                "Select Source SCD for GOOSE Export",
+                "",
+                "SCL/Archive Files (*.scd *.cid *.icd *.xml *.zip *.tar *.tar.gz *.tgz *.7z *.rar *.sz)"
+            )
             if not scd_path:
                 return
         

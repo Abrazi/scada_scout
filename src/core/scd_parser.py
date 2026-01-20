@@ -771,8 +771,60 @@ class SCDParser:
         if self.root is None:
             return []
 
+        def _ln_name(ln_element) -> str:
+            if ln_element is None:
+                return ""
+            prefix = ln_element.get("prefix", "")
+            ln_class = ln_element.get("lnClass", "")
+            inst = ln_element.get("inst", "")
+            return f"{prefix}{ln_class}{inst}"
+
+        def _build_tag(ied: str, ld_inst: str, ln: str, do: str, data_attr: str) -> str:
+            tag_ld = f"{ied}{ld_inst}" if ld_inst else ied
+            tag_parts = [ln, do, data_attr]
+            tag_parts = [p for p in tag_parts if p]
+            tag_ref = ".".join(tag_parts)
+            return f"{tag_ld}/{tag_ref}" if tag_ref else tag_ld
+
+        def _data_attr(da: str, bda: str) -> str:
+            if da and bda:
+                return f"{da}.{bda}"
+            if da:
+                return da
+            return bda
+
+        def _find_ied_comm_info(ied_name: str, ap_name: str) -> Dict[str, Any]:
+            info = {'ip': '', 'subnetwork': '', 'mac': ''}
+            if self.root is None:
+                return info
+            comm = self.root.find("scl:Communication", self.ns)
+            if not comm:
+                comm = self.root.find("Communication")
+            if not comm:
+                return info
+            for subnet in comm.findall("scl:SubNetwork", self.ns) + comm.findall("SubNetwork"):
+                subnet_name = subnet.get("name")
+                for conn_ap in subnet.findall("scl:ConnectedAP", self.ns) + subnet.findall("ConnectedAP"):
+                    if conn_ap.get("iedName") == ied_name and conn_ap.get("apName") == ap_name:
+                        info['subnetwork'] = subnet_name
+                        address = conn_ap.find("scl:Address", self.ns)
+                        if not address:
+                            address = conn_ap.find("Address")
+                        if address:
+                            params = self._parse_address_params(address)
+                            if params.get("ip") is not None:
+                                info['ip'] = params.get("ip")
+                            if params.get("mac_address") is not None:
+                                info['mac'] = params.get("mac_address")
+                        return info
+            return info
+
         # Find all IEDs
         ied_elements = self.root.findall("scl:IED", self.ns) + self.root.findall("IED")
+
+        # Build publisher map from GSEControl
+        publisher_map: Dict[tuple, Dict[str, Any]] = {}
+        publisher_dataset_entries: Dict[tuple, List[Dict[str, Any]]] = {}
         
         for ied in ied_elements:
             ied_name = ied.get("name")
@@ -816,6 +868,8 @@ class SCDParser:
                         app_id = gse.get("appID")
                         dat_set = gse.get("datSet")
                         conf_rev = gse.get("confRev")
+                        go_id = gse.get("goID")
+                        fixed_offs = gse.get("fixedOffs")
                         
                         # Find GSE element in Communication section to get MAC, VLAN etc
                         # This requires cross-referencing Communication section which is tricky
@@ -824,49 +878,157 @@ class SCDParser:
                         
                         # Find DataSet content
                         dataset_entries = self._get_dataset_entries(ln0, dat_set)
+                        pub_key = (ied_name, ld_inst, gse_name)
+                        publisher_map[pub_key] = {
+                            "Source IED Name": ied_name,
+                            "Source AP": ap_name,
+                            "Source LDevice": ld_inst,
+                            "Source IP Address": comm_info.get('ip', ''),
+                            "Source Subnet": comm_info.get('subnetwork', ''),
+                            "Source MAC Address": comm_info.get('mac', ''),
+                            "Source VLAN-ID": comm_info.get('vlan', ''),
+                            "Source VLAN Priority": comm_info.get('priority', ''),
+                            "Source APPID": comm_info.get('appid') or app_id,
+                            "Source MinTime": comm_info.get('minTime', ''),
+                            "Source MaxTime": comm_info.get('maxTime', ''),
+                            "Source DataSet": dat_set,
+                            "DataSet Size": len(dataset_entries) if dataset_entries else 0,
+                            "Source ConfRev": conf_rev,
+                            "Source ControlBlock": gse_name,
+                            "Source GoID": go_id,
+                            "Source FixedOffs": fixed_offs
+                        }
+                        publisher_dataset_entries[pub_key] = dataset_entries or []
                         
                         for ds_entry in dataset_entries:
                             source_ld_inst = ds_entry.get('ld_inst') or ld_inst or ""
-                            da = ds_entry.get('da', '')
-                            bda = ds_entry.get('bda', '')
-                            if da and bda:
-                                data_attr = f"{da}.{bda}"
-                            elif da:
-                                data_attr = da
-                            else:
-                                data_attr = bda
-
-                            tag_ld = f"{ied_name}{source_ld_inst}" if source_ld_inst else ied_name
-                            tag_parts = [ds_entry.get('ln', ''), ds_entry.get('do', ''), data_attr]
-                            tag_parts = [p for p in tag_parts if p]
-                            tag_ref = ".".join(tag_parts)
-                            tag = f"{tag_ld}/{tag_ref}" if tag_ref else tag_ld
-
+                            data_attr = _data_attr(ds_entry.get('da', ''), ds_entry.get('bda', ''))
+                            tag = _build_tag(ied_name, source_ld_inst, ds_entry.get('ln', ''), ds_entry.get('do', ''), data_attr)
                             entry = {
+                                "Mapping Type": "Publisher",
                                 "Source IED Name": ied_name,
                                 "Source AP": ap_name,
                                 "Source LDevice": source_ld_inst,
-                                "Source IP Address": comm_info.get('ip', ''), # Optional for GOOSE
+                                "Source IP Address": comm_info.get('ip', ''),
                                 "Source Subnet": comm_info.get('subnetwork', ''),
                                 "Source MAC Address": comm_info.get('mac', ''),
                                 "Source VLAN-ID": comm_info.get('vlan', ''),
+                                "Source VLAN Priority": comm_info.get('priority', ''),
                                 "Source APPID": comm_info.get('appid') or app_id,
                                 "Source MinTime": comm_info.get('minTime', ''),
                                 "Source MaxTime": comm_info.get('maxTime', ''),
                                 "Source DataSet": dat_set,
+                                "DataSet Size": len(dataset_entries) if dataset_entries else 0,
                                 "Source ConfRev": conf_rev,
                                 "Source ControlBlock": gse_name,
+                                "Source GoID": go_id,
+                                "Source FixedOffs": fixed_offs,
                                 "Source LogicalNode": ds_entry.get('ln', ''),
                                 "Source DataAttribute": data_attr,
                                 "Source Tag": tag
                             }
                             goose_entries.append(entry)
 
+        # Build subscriber rows from ExtRef (GOOSE subscriptions)
+        subscription_entries = []
+        for ied in ied_elements:
+            ied_name = ied.get("name")
+            ap_elements = ied.findall(".//scl:AccessPoint", self.ns) + ied.findall(".//AccessPoint")
+            if not ap_elements:
+                ld_elements = ied.findall("scl:LDevice", self.ns) + ied.findall("LDevice")
+                if ld_elements:
+                    ap_elements = [{'name': 'Default', 'lds': ld_elements}]
+                else:
+                    continue
+
+            for ap in ap_elements:
+                if isinstance(ap, dict):
+                    ap_name = ap['name']
+                    lds = ap['lds']
+                else:
+                    ap_name = ap.get("name")
+                    lds = ap.findall(".//scl:LDevice", self.ns) + ap.findall(".//LDevice")
+
+                dest_comm = _find_ied_comm_info(ied_name, ap_name)
+
+                for ld in lds:
+                    ld_inst = ld.get("inst")
+                    ln_elements = ld.findall("scl:LN", self.ns) + ld.findall("scl:LN0", self.ns)
+                    if not ln_elements:
+                        ln_elements = ld.findall("LN") + ld.findall("LN0")
+
+                    for ln in ln_elements:
+                        dest_ln = _ln_name(ln)
+                        inputs = ln.find("scl:Inputs", self.ns)
+                        if not inputs:
+                            inputs = ln.find("Inputs")
+                        if inputs is None:
+                            continue
+
+                        extrefs = inputs.findall("scl:ExtRef", self.ns) + inputs.findall("ExtRef")
+                        for extref in extrefs:
+                            service_type = extref.get("serviceType") or ""
+                            if service_type.upper() != "GOOSE":
+                                continue
+
+                            source_ied = extref.get("iedName") or ""
+                            source_ld = extref.get("srcLDInst") or extref.get("ldInst") or ""
+                            source_cb = extref.get("srcCBName") or ""
+                            source_ln = f"{extref.get('prefix','')}{extref.get('lnClass','')}{extref.get('lnInst','')}"
+                            source_do = extref.get("doName") or ""
+                            source_da = extref.get("daName") or ""
+                            source_bda = extref.get("bdaName") or ""
+                            data_attr = _data_attr(source_da, source_bda)
+                            source_tag = _build_tag(source_ied, source_ld, source_ln, source_do, data_attr)
+
+                            pub_key = (source_ied, source_ld, source_cb)
+                            pub_info = publisher_map.get(pub_key, {})
+
+                            dest_tag = _build_tag(ied_name, ld_inst or "", dest_ln, "", "")
+
+                            entry = {
+                                "Mapping Type": "Subscription",
+                                "Source IED Name": source_ied or pub_info.get("Source IED Name", ""),
+                                "Source AP": pub_info.get("Source AP", ""),
+                                "Source LDevice": source_ld or pub_info.get("Source LDevice", ""),
+                                "Source IP Address": pub_info.get("Source IP Address", ""),
+                                "Source Subnet": pub_info.get("Source Subnet", ""),
+                                "Source MAC Address": pub_info.get("Source MAC Address", ""),
+                                "Source VLAN-ID": pub_info.get("Source VLAN-ID", ""),
+                                "Source VLAN Priority": pub_info.get("Source VLAN Priority", ""),
+                                "Source APPID": pub_info.get("Source APPID", ""),
+                                "Source MinTime": pub_info.get("Source MinTime", ""),
+                                "Source MaxTime": pub_info.get("Source MaxTime", ""),
+                                "Source DataSet": pub_info.get("Source DataSet", ""),
+                                "DataSet Size": pub_info.get("DataSet Size", ""),
+                                "Source ConfRev": pub_info.get("Source ConfRev", ""),
+                                "Source ControlBlock": source_cb or pub_info.get("Source ControlBlock", ""),
+                                "Source GoID": pub_info.get("Source GoID", ""),
+                                "Source FixedOffs": pub_info.get("Source FixedOffs", ""),
+                                "Source LogicalNode": source_ln,
+                                "Source DataAttribute": data_attr,
+                                "Source Tag": source_tag,
+                                "Destination IED Name": ied_name,
+                                "Destination AP": ap_name,
+                                "Destination LDevice": ld_inst,
+                                "Destination IP Address": dest_comm.get('ip', ''),
+                                "Destination Subnet": dest_comm.get('subnetwork', ''),
+                                "Destination MAC Address": dest_comm.get('mac', ''),
+                                "Destination LogicalNode": dest_ln,
+                                "Destination ServiceType": service_type,
+                                "Destination IntAddr": extref.get("intAddr") or "",
+                                "Destination Tag": dest_tag
+                            }
+                            subscription_entries.append(entry)
+
+        if subscription_entries:
+            return subscription_entries
+
         return goose_entries
 
     def _find_gse_comm_info(self, ied_name, ap_name, ld_inst, cb_name) -> Dict:
         """Helper to find GSE address info in Communication section."""
-        info = {'mac': '', 'vlan': '', 'priority': '', 'appid': '', 'subnetwork': '', 'minTime': '', 'maxTime': ''}
+        info = {'ip': '', 'mac': '', 'vlan': '', 'priority': '', 'appid': '', 'subnetwork': '', 'minTime': '', 'maxTime': ''}
         
         if self.root is None: return info
         comm = self.root.find("scl:Communication", self.ns)
@@ -880,33 +1042,69 @@ class SCDParser:
             
             for conn_ap in subnet.findall("scl:ConnectedAP", self.ns) + subnet.findall("ConnectedAP"):
                 if conn_ap.get("iedName") == ied_name and conn_ap.get("apName") == ap_name:
-                    
-                    # Find GSE
+
+                    info['subnetwork'] = subnet_name
+
+                    # Fallback: ConnectedAP address (often used by Siemens)
+                    ap_address = conn_ap.find("scl:Address", self.ns)
+                    if not ap_address:
+                        ap_address = conn_ap.find("Address")
+                    if ap_address:
+                        ap_params = self._parse_address_params(ap_address)
+                        if ap_params.get("ip") is not None:
+                            info['ip'] = ap_params.get("ip")
+                        if ap_params.get("mac_address") is not None:
+                            info['mac'] = ap_params.get("mac_address")
+                        if ap_params.get("vlan") is not None:
+                            info['vlan'] = ap_params.get("vlan")
+                        if ap_params.get("vlan_priority") is not None:
+                            info['priority'] = ap_params.get("vlan_priority")
+
+                    # Find GSE (strict match first, then relaxed by ldInst)
+                    matched = False
                     for gse in conn_ap.findall("scl:GSE", self.ns) + conn_ap.findall("GSE"):
-                         if gse.get("ldInst") == ld_inst and gse.get("cbName") == cb_name:
-                             info['subnetwork'] = subnet_name
-                             
-                             address = gse.find("scl:Address", self.ns)
-                             if not address: address = gse.find("Address")
-                             
-                             if address:
-                                 params = self._parse_address_params(address)
-                                 if params.get("mac_address") is not None:
-                                     info['mac'] = params.get("mac_address")
-                                 if params.get("vlan") is not None:
-                                     info['vlan'] = params.get("vlan")
-                                 if params.get("appid") is not None:
-                                     info['appid'] = params.get("appid")
-                                 if params.get("vlan_priority") is not None:
-                                     info['priority'] = params.get("vlan_priority")
-                                         
-                             min_time = gse.find("scl:MinTime", self.ns)
-                             if min_time is not None: info['minTime'] = min_time.text
-                             
-                             max_time = gse.find("scl:MaxTime", self.ns)
-                             if max_time is not None: info['maxTime'] = max_time.text
-                             
-                             return info
+                        gse_ld = gse.get("ldInst")
+                        gse_cb = gse.get("cbName")
+                        if gse_ld == ld_inst and gse_cb == cb_name:
+                            matched = True
+                        elif gse_ld == ld_inst and not matched and not gse_cb:
+                            matched = True
+                        elif gse_ld == ld_inst and not matched and gse_cb == cb_name:
+                            matched = True
+
+                        if not matched:
+                            continue
+
+                        address = gse.find("scl:Address", self.ns)
+                        if not address:
+                            address = gse.find("Address")
+
+                        if address:
+                            params = self._parse_address_params(address)
+                            if params.get("ip") is not None:
+                                info['ip'] = params.get("ip")
+                            if params.get("mac_address") is not None:
+                                info['mac'] = params.get("mac_address")
+                            if params.get("vlan") is not None:
+                                info['vlan'] = params.get("vlan")
+                            if params.get("appid") is not None:
+                                info['appid'] = params.get("appid")
+                            if params.get("vlan_priority") is not None:
+                                info['priority'] = params.get("vlan_priority")
+
+                        min_time = gse.find("scl:MinTime", self.ns)
+                        if min_time is not None:
+                            info['minTime'] = min_time.text
+
+                        max_time = gse.find("scl:MaxTime", self.ns)
+                        if max_time is not None:
+                            info['maxTime'] = max_time.text
+
+                        return info
+
+                    # If no GSE matched, return ConnectedAP info when available
+                    if info.get('ip') or info.get('mac') or info.get('vlan') or info.get('priority'):
+                        return info
         return info
 
     def _get_dataset_entries(self, ln_node, dataset_name) -> List[Dict]:

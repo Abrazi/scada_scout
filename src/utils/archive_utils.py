@@ -197,3 +197,62 @@ class ArchiveExtractor:
         except Exception as e:
             logger.error(f"Failed to extract {file_to_extract}: {e}")
             raise
+
+    @staticmethod
+    def extract_all(archive_path: str, dest_dir: str) -> None:
+        """Extract entire archive to dest_dir."""
+        _, ext = os.path.splitext(archive_path.lower())
+
+        try:
+            if ext == '.zip':
+                with zipfile.ZipFile(archive_path, 'r') as zf:
+                    zf.extractall(dest_dir)
+            elif ext in ('.tar', '.gz', '.tgz'):
+                with tarfile.open(archive_path, 'r') as tf:
+                    tf.extractall(dest_dir)
+            elif ext == '.7z':
+                import py7zr
+                with py7zr.SevenZipFile(archive_path, mode='r') as z:
+                    z.extractall(path=dest_dir)
+            elif ext == '.rar':
+                import rarfile
+                with rarfile.RarFile(archive_path) as rf:
+                    rf.extractall(dest_dir)
+            elif ext == '.sz':
+                # Try to extract as snappy single-file first
+                try:
+                    import cramjam
+                    with open(archive_path, 'rb') as f_in:
+                        compressed_data = f_in.read()
+                    data = None
+                    try:
+                        data = cramjam.snappy.decompress(compressed_data)
+                    except Exception:
+                        try:
+                            data = cramjam.snappy.decompress_raw(compressed_data)
+                        except Exception:
+                            data = None
+                    if data is not None:
+                        base_name = os.path.basename(archive_path)
+                        out_name = base_name[:-3] if base_name.lower().endswith('.sz') else base_name + ".decoded"
+                        out_path = os.path.join(dest_dir, out_name)
+                        with open(out_path, 'wb') as f_out:
+                            f_out.write(data)
+                        return
+                except Exception:
+                    pass
+
+                # Fallback to patool or 7z handling
+                try:
+                    import py7zr
+                    with py7zr.SevenZipFile(archive_path, mode='r') as z:
+                        z.extractall(path=dest_dir)
+                except Exception:
+                    import patoolib
+                    patoolib.extract_archive(archive_path, outdir=dest_dir)
+            else:
+                import patoolib
+                patoolib.extract_archive(archive_path, outdir=dest_dir)
+        except Exception as e:
+            logger.error(f"Failed to extract archive {archive_path}: {e}")
+            raise

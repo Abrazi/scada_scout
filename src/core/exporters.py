@@ -4,12 +4,14 @@ Cross-platform exporters for network configuration and device data
 import csv
 import os
 import platform
+import tempfile
 import xml.etree.ElementTree as ET
 from typing import List, Dict, Tuple
 from datetime import datetime
 from src.models.device_models import Device, Node, Signal
 from src.core.scd_parser import SCDParser
 from src.utils.network_utils import NetworkScriptGenerator, NetworkUtils
+from src.utils.archive_utils import ArchiveExtractor
 
 
 def export_selected_ied_scl(scd_path: str, ied_name: str, filepath: str) -> Tuple[bool, str]:
@@ -536,18 +538,73 @@ def export_goose_details_csv(scd_path: str, filepath: str) -> Tuple[bool, str]:
         return False, "SCD file not found or not specified"
         
     try:
-        parser = SCDParser(scd_path)
+        source_path = scd_path
+        temp_dir = None
+
+        if ArchiveExtractor.is_archive(scd_path):
+            temp_dir = tempfile.TemporaryDirectory()
+            archive_files = ArchiveExtractor.list_files(scd_path)
+
+            # Prefer SCL files in order: .scd, .cid, .icd, .xml
+            def scl_rank(name: str) -> int:
+                lname = name.lower()
+                if lname.endswith('.scd'):
+                    return 0
+                if lname.endswith('.cid'):
+                    return 1
+                if lname.endswith('.icd'):
+                    return 2
+                if lname.endswith('.xml'):
+                    return 3
+                return 99
+
+            candidates = [f for f in archive_files if f.lower().endswith(('.scd', '.cid', '.icd', '.xml'))]
+            if candidates:
+                candidates.sort(key=scl_rank)
+                chosen = candidates[0]
+                source_path = ArchiveExtractor.extract_file(scd_path, chosen, temp_dir.name)
+            else:
+                # Fallback: extract all and search for SCL by extension or XML root tag
+                ArchiveExtractor.extract_all(scd_path, temp_dir.name)
+
+                def find_scl_file(root_dir: str) -> str:
+                    # First pass: extension-based
+                    for base, _, files in os.walk(root_dir):
+                        for fname in files:
+                            if fname.lower().endswith(('.scd', '.cid', '.icd', '.xml')):
+                                return os.path.join(base, fname)
+
+                    # Second pass: XML root tag match (SCL)
+                    for base, _, files in os.walk(root_dir):
+                        for fname in files:
+                            file_path = os.path.join(base, fname)
+                            try:
+                                tree = ET.parse(file_path)
+                                root = tree.getroot()
+                                if root.tag.endswith('SCL'):
+                                    return file_path
+                            except Exception:
+                                continue
+                    return ""
+
+                detected = find_scl_file(temp_dir.name)
+                if not detected:
+                    return False, "No SCL files found in archive"
+                source_path = detected
+
+        parser = SCDParser(source_path)
         goose_map = parser.extract_goose_map()
         
         headers = [
-            "Item", "Subnetwork Name", "Source IED Name", "Source AP", "Source LDevice",
+            "Item", "Subnetwork Name", "Mapping Type",
+            "Source IED Name", "Source AP", "Source LDevice",
             "Source IP Address", "Source Subnet", "Source MAC Address", "Source VLAN-ID",
-            "Source APPID", "Source MinTime", "Source MaxTime", "Source DataSet",
-            "DataSet Size", "Source ConfRev", "Source ControlBlock",
-            "Source LogicalNode", "Source DataAttribute", "Source Tag",
+            "Source VLAN Priority", "Source APPID", "Source MinTime", "Source MaxTime",
+            "Source DataSet", "DataSet Size", "Source ConfRev", "Source ControlBlock",
+            "Source GoID", "Source FixedOffs", "Source LogicalNode", "Source DataAttribute", "Source Tag",
             "Destination IED Name", "Destination AP", "Destination LDevice",
             "Destination IP Address", "Destination Subnet", "Destination MAC Address",
-            "Destination LogicalNode", "Destination ServiceType", "Destination Tag"
+            "Destination LogicalNode", "Destination ServiceType", "Destination IntAddr", "Destination Tag"
         ]
         
         with open(filepath, 'w', newline='') as f:
@@ -570,6 +627,12 @@ def export_goose_details_csv(scd_path: str, filepath: str) -> Tuple[bool, str]:
         
     except Exception as e:
         return False, str(e)
+    finally:
+        try:
+            if 'temp_dir' in locals() and temp_dir is not None:
+                temp_dir.cleanup()
+        except Exception:
+            pass
 
 
 def export_diagnostics_report(devices: List[Device], filepath: str) -> Tuple[bool, str]:
