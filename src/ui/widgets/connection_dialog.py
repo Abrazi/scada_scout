@@ -90,13 +90,25 @@ class ConnectionDialog(QDialog):
         self.type_input.currentTextChanged.connect(self._on_type_changed)
         self.type_input.currentTextChanged.connect(self._update_form_labels)
         
+        
         # SCD File Selection
         self.scd_layout = QHBoxLayout()
         self.scd_input = QLineEdit()
         self.browse_btn = QPushButton("Browse...")
         self.browse_btn.clicked.connect(self._browse_scd)
+        
         self.scd_layout.addWidget(self.scd_input)
         self.scd_layout.addWidget(self.browse_btn)
+        
+        # Modbus Configuration File Selection (matching SCD layout style)
+        self.modbus_config_layout = QHBoxLayout()
+        self.modbus_config_input = QLineEdit()
+        self.modbus_config_input.setPlaceholderText("Select Modbus config file...")
+        self.modbus_config_input.setReadOnly(True)
+        self.modbus_browse_btn = QPushButton("Browse...")
+        self.modbus_browse_btn.clicked.connect(self._load_modbus_config)
+        self.modbus_config_layout.addWidget(self.modbus_config_input)
+        self.modbus_config_layout.addWidget(self.modbus_browse_btn)
 
         # Modbus Unit ID (Slave ID)
         self.unit_id_input = QSpinBox()
@@ -126,9 +138,15 @@ class ConnectionDialog(QDialog):
         self.ip_label = QLabel("IP Address:")
         self.form.addRow(self.ip_label, self.ip_container)
         
+        
         self.form.addRow("Port:", self.port_input)
         self.form.addRow("Protocol:", self.type_input)
         self.form.addRow(self.unit_id_label, self.unit_id_input)
+        
+        # Store label reference for Modbus Config
+        self.modbus_config_row_label = QLabel("Modbus Config (Optional):")
+        self.form.addRow(self.modbus_config_row_label, self.modbus_config_layout)
+        
         self.form.addRow("SCD File (Optional):", self.scd_layout)
         self.form.addRow("Polling:", self.poll_layout)
         
@@ -155,6 +173,9 @@ class ConnectionDialog(QDialog):
         self.buttons.accepted.connect(self._on_accept)
         self.buttons.rejected.connect(self.reject)
         self.layout.addWidget(self.buttons)
+        
+        # Internal state
+        self.modbus_register_maps = []
         
         # Initialize labels/visibility
         self._update_form_labels(self.type_input.currentText())
@@ -442,4 +463,172 @@ class ConnectionDialog(QDialog):
         self.unit_id_input.setVisible(is_modbus)
         self.unit_id_label.setVisible(is_modbus)
         
+        # Show/Hide Modbus Config based on protocol
+        self.modbus_config_row_label.setVisible(is_modbus)
+        self.modbus_config_input.setVisible(is_modbus)
+        self.modbus_browse_btn.setVisible(is_modbus)
+        
+        # Show/Hide SCD File based on protocol
+        is_iec61850 = device_type == DeviceType.IEC61850_IED
+        self.scd_input.setVisible(is_iec61850)
+        self.browse_btn.setVisible(is_iec61850)
+        
         self.ip_label.setText(label_ip)
+
+    def _load_modbus_config(self):
+        """Load Modbus configuration from JSON or CSV."""
+        fname, _ = QFileDialog.getOpenFileName(
+            self, 
+            "Load Configuration", 
+            "", 
+            "Config Files (*.json *.csv);;JSON Files (*.json);;CSV Files (*.csv)"
+        )
+        if not fname:
+            return
+            
+        try:
+            if fname.lower().endswith('.csv'):
+                self._load_csv_config(fname)
+            else:
+                import json
+                with open(fname, 'r') as f:
+                    data = json.load(f)
+                self._apply_loaded_config(data)
+            
+            # Set the file path in the text field
+            self.modbus_config_input.setText(fname)
+            QMessageBox.information(self, "Config Loaded", f"Configuration loaded from {os.path.basename(fname)}")
+            
+        except Exception as e:
+            logger.error(f"Failed to load configuration: {e}")
+            QMessageBox.critical(self, "Load Error", f"Failed to load configuration:\n{e}")
+
+    def _load_csv_config(self, fname):
+        """Load register map from CSV."""
+        from src.models.device_models import ModbusRegisterMap, ModbusDataType, ModbusEndianness
+        import csv
+        maps = []
+        try:
+            with open(fname, 'r', encoding='utf-8-sig') as f: # Handle BOM
+                reader = csv.DictReader(f)
+                fieldnames = [fn.strip() for fn in (reader.fieldnames or [])]
+                
+                # Helper to safely get value from row
+                def get_val(row, keys, default=None):
+                    for k in keys:
+                         if k in row and row[k]: return row[k]
+                    return default
+    
+                for row in reader:
+                     # Check for Standard Schema (start_address, count)
+                     if 'start_address' in fieldnames:
+                         try:
+                             dtype_str = get_val(row, ['data_type', 'type'], 'UINT16')
+                             try: dtype = ModbusDataType[dtype_str]
+                             except: dtype = ModbusDataType.UINT16
+                             
+                             end_str = get_val(row, ['endianness'], 'BIG_BIG')
+                             try: end = ModbusEndianness[end_str]
+                             except: end = ModbusEndianness.BIG_BIG
+                             
+                             maps.append(ModbusRegisterMap(
+                                start_address=int(row['start_address']),
+                                count=int(row.get('count', 1)),
+                                function_code=int(row.get('function_code', 3)),
+                                data_type=dtype,
+                                name_prefix=row.get('name_prefix', ''),
+                                description=row.get('description', ''),
+                                scale=float(row.get('scale', 1.0)),
+                                offset=float(row.get('offset', 0.0)),
+                                endianness=end
+                            ))
+                         except Exception as e:
+                             logger.warning(f"Skipping invalid CSV row: {row} ({e})")
+                     
+                     # Fallback: Simple Register List (Address, Name)
+                     elif 'Address' in fieldnames or 'address' in fieldnames:
+                         try:
+                             addr = int(get_val(row, ['Address', 'address']))
+                             name = get_val(row, ['Name', 'name', 'name_prefix'], f"Reg_{addr}")
+                             desc = get_val(row, ['Description', 'description'], '')
+                             dtype_str = get_val(row, ['Type', 'type', 'data_type'], 'UINT16')
+                             
+                             # Try to match ModbusDataType
+                             try: dtype = ModbusDataType[dtype_str]
+                             except: dtype = ModbusDataType.UINT16
+                             
+                             maps.append(ModbusRegisterMap(
+                                 start_address=addr,
+                                 count=1,
+                                 function_code=int(get_val(row, ['FunctionCode', 'fc', 'function_code'], 3)),
+                                 data_type=dtype,
+                                 name_prefix=name,
+                                 description=desc,
+                                 scale=float(get_val(row, ['Scale', 'scale'], 1.0)),
+                                 offset=float(get_val(row, ['Offset', 'offset'], 0.0))
+                             ))
+                         except Exception:
+                             continue
+            
+            self.modbus_register_maps = maps
+            if not maps:
+                QMessageBox.warning(self, "Import Warning", "No valid registers found in CSV file.")
+                
+        except Exception as e:
+            logger.error(f"Failed to load CSV: {e}")
+            QMessageBox.critical(self, "Import Error", f"Failed to load CSV file:\n{e}")
+
+    def _apply_loaded_config(self, data):
+        """Apply loaded dict config."""
+        from src.models.device_models import ModbusRegisterMap
+        # IP/Port
+        if 'ip_address' in data:
+            if self.ip_container.currentWidget() == self.ip_select:
+                self.ip_select.setEditText(data['ip_address'])
+            else:
+                self.ip_input.setText(data['ip_address'])
+        if 'port' in data:
+            self.port_input.setText(str(data['port']))
+        if 'name' in data:
+            self.name_input.setText(data['name'])
+        if 'modbus_unit_id' in data:
+            self.unit_id_input.setValue(int(data['modbus_unit_id']))
+            
+        if 'modbus_register_maps' in data:
+            self.modbus_register_maps = [ModbusRegisterMap.from_dict(m) for m in data['modbus_register_maps']]
+
+    def get_config(self) -> DeviceConfig:
+        try:
+            port = int(self.port_input.text())
+        except ValueError:
+            port = 102
+            
+        # Get IP from active widget
+        if self.ip_container.currentWidget() == self.ip_select:
+            ip = self.ip_select.currentText()
+        else:
+            ip = self.ip_input.text()
+            
+        # Get name from input or generate if empty
+        name = self.name_input.text().strip()
+        if not name:
+            name = f"IED_{ip.replace('.', '_')}"
+            
+        config = DeviceConfig(
+            name=name,
+            description=self.desc_input.text(),
+            folder=self.folder_input.text(),
+            ip_address=ip,
+            port=port,
+            device_type=self.type_input.currentData(),
+            scd_file_path=self.scd_input.text() if self.scd_input.text() else None,
+            polling_enabled=self.chk_polling.isChecked(),
+            poll_interval=self.spin_interval.value(),
+            modbus_unit_id=self.unit_id_input.value()
+        )
+        
+        # Attach register maps if available and Modbus
+        if config.device_type in [DeviceType.MODBUS_TCP, DeviceType.MODBUS_SERVER] and self.modbus_register_maps:
+            config.modbus_register_maps = self.modbus_register_maps
+            
+        return config

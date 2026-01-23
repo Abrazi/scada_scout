@@ -103,6 +103,14 @@ class ConnectionDialog(QDialog):
         
         layout.addWidget(group)
         
+        # Configuration Import/Export
+        config_btn_layout = QHBoxLayout()
+        self.btn_load_config = QPushButton("Load Config (JSON/CSV)...")
+        self.btn_load_config.clicked.connect(self._load_config_file)
+        config_btn_layout.addWidget(self.btn_load_config)
+        config_btn_layout.addStretch()
+        layout.addLayout(config_btn_layout)
+
         # Register map configuration
         map_group = QGroupBox("Register Mapping (Optional)")
         map_layout = QVBoxLayout(map_group)
@@ -128,6 +136,112 @@ class ConnectionDialog(QDialog):
         self.modbus_register_maps = []
         
         return widget
+
+    def _load_config_file(self):
+        """Load configuration from JSON or CSV file."""
+        fname, _ = QFileDialog.getOpenFileName(
+            self, 
+            "Load Configuration", 
+            "", 
+            "Config Files (*.json *.csv);;JSON Files (*.json);;CSV Files (*.csv)"
+        )
+        if not fname:
+            return
+            
+        try:
+            if fname.lower().endswith('.csv'):
+                self._load_csv_config(fname)
+            else:
+                import json
+                with open(fname, 'r') as f:
+                    data = json.load(f)
+                self._apply_loaded_config(data)
+                
+            QMessageBox.information(self, "Config Loaded", f"Configuration loaded from {os.path.basename(fname)}")
+            
+        except Exception as e:
+            logger.error(f"Failed to load configuration: {e}")
+            QMessageBox.critical(self, "Load Error", f"Failed to load configuration:\n{e}")
+
+    def _load_csv_config(self, fname):
+        """Load register map from CSV and apply to dialog."""
+        import csv
+        maps = []
+        with open(fname, 'r') as f:
+            reader = csv.DictReader(f)
+            # Check headers to decide if it's a register list or map definition
+            fieldnames = reader.fieldnames or []
+            
+            # Case 1: Register Map Definition (Start, Count, FC...)
+            if 'start_address' in fieldnames and 'count' in fieldnames:
+                for row in reader:
+                     maps.append(ModbusRegisterMap(
+                        start_address=int(row['start_address']),
+                        count=int(row['count']),
+                        function_code=int(row['function_code']),
+                        data_type=ModbusDataType[row['data_type']],
+                        name_prefix=row.get('name_prefix', ''),
+                        description=row.get('description', ''),
+                        scale=float(row.get('scale', 1.0)),
+                        offset=float(row.get('offset', 0.0)),
+                        endianness=ModbusEndianness[row.get('endianness', 'BIG_BIG')]
+                    ))
+            
+            # Case 2: Simple Register List (Address, Name, Type...)
+            # We must aggregate these into maps, or create one-to-one maps
+            elif 'Address' in fieldnames or 'address' in fieldnames:
+                 # Simplified logic: Create single-register maps for each row
+                 # Real implementation should try to group contiguous registers
+                 addr_col = 'Address' if 'Address' in fieldnames else 'address'
+                 name_col = 'Name' if 'Name' in fieldnames else 'name'
+                 type_col = 'Type' if 'Type' in fieldnames else 'type'
+                 
+                 for row in reader:
+                     addr = int(row[addr_col])
+                     dtype = ModbusDataType.UINT16
+                     try:
+                         if row.get(type_col):
+                             dtype = ModbusDataType[row.get(type_col)]
+                     except: pass
+                     
+                     # Simple heuristic for FC based on address (if 40001 -> FC3, etc is not provided)
+                     # Defaulting to Holding Registers (FC3)
+                     fc = 3
+                     
+                     maps.append(ModbusRegisterMap(
+                         start_address=addr,
+                         count=1, # Todo: handle types size
+                         function_code=fc,
+                         data_type=dtype,
+                         name_prefix=row.get(name_col, f"Reg_{addr}"),
+                         description=row.get('Description', '') or row.get('description', '')
+                     ))
+        
+        self.modbus_register_maps = maps
+        self.lbl_map_status.setText(f"✓ Loaded {len(maps)} register maps from CSV")
+
+    def _apply_loaded_config(self, data):
+        """Apply loaded configuration data to the dialog."""
+        # Top-level fields
+        if 'ip_address' in data:
+            self.ip_input.setText(data['ip_address'])
+        if 'port' in data:
+            self.port_input.setText(str(data['port']))
+        
+        # Modbus specific
+        if 'modbus_unit_id' in data:
+            self.modbus_unit_id.setValue(int(data['modbus_unit_id']))
+        if 'modbus_timeout' in data:
+            self.modbus_timeout.setValue(float(data['modbus_timeout']))
+            
+        # Register Maps
+        if 'modbus_register_maps' in data:
+            maps = []
+            for map_data in data['modbus_register_maps']:
+                maps.append(ModbusRegisterMap.from_dict(map_data))
+            
+            self.modbus_register_maps = maps
+            self.lbl_map_status.setText(f"✓ Loaded {len(maps)} register map(s) from config")
     
     def _create_iec61850_settings(self) -> QWidget:
         """Create IEC 61850-specific configuration panel"""

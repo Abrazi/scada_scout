@@ -600,13 +600,13 @@ class WatchListWidget(QWidget):
         if signal.value is None:
             return "--"
 
-        if self._is_pos_stval(signal):
-            num, enum_label = self._extract_numeric_and_enum(signal)
-            if num is not None:
-                hex_str = f"0x{num:X}"
-                if enum_label:
-                    return f"{hex_str} ({num}) {enum_label}"
-                return f"{hex_str} ({num})"
+        # Try to format as Hex/Decimal/Enum
+        num, enum_label = self._extract_numeric_and_enum(signal)
+        if num is not None:
+            hex_str = f"0x{num:X}"
+            if enum_label:
+                return f"{hex_str} ({num}) {enum_label}"
+            return f"{hex_str} ({num})"
 
         return str(signal.value)
 
@@ -619,10 +619,8 @@ class WatchListWidget(QWidget):
         num = None
         enum_label = None
 
-        mapping = None
-        if getattr(signal, "enum_map", None):
-            mapping = signal.enum_map
-        else:
+        mapping = getattr(signal, "enum_map", None)
+        if not mapping and self._is_pos_stval(signal):
             mapping = {0: "intermediate", 1: "open", 2: "closed", 3: "bad"}
 
         val = signal.value

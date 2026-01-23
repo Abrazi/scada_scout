@@ -103,6 +103,21 @@ class DevicePropertiesDialog(QDialog):
                 self._add_property_row(grid, row, "SCD File:", self.device.config.scd_file_path)
                 row += 1
         
+        # Connectivity Summary
+        self._add_property_row(grid, row, "IP Address:", self.device.config.ip_address)
+        row += 1
+        self._add_property_row(grid, row, "Port:", str(self.device.config.port))
+        row += 1
+
+        mac = self.device.config.protocol_params.get("mac_address")
+        if mac:
+            self._add_property_row(grid, row, "MAC Address:", mac)
+            row += 1
+
+        if self.device.config.device_type in (DeviceType.MODBUS_TCP, DeviceType.MODBUS_SERVER):
+             self._add_property_row(grid, row, "Slave ID / Unit ID:", str(self.device.config.modbus_unit_id))
+             row += 1
+        
         group.setLayout(grid)
         layout.addWidget(group)
         layout.addStretch()

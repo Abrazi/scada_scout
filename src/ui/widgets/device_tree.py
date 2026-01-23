@@ -1202,6 +1202,13 @@ class DeviceTreeWidget(QWidget):
                 remove_action.triggered.connect(lambda: self._confirm_remove_device(device_name))
                 menu.addAction(remove_action)
                 
+                # Modbus Export
+                if device.config.device_type in (DeviceType.MODBUS_TCP, DeviceType.MODBUS_SERVER):
+                    menu.addSeparator()
+                    export_action = QAction("Export Configuration...", self)
+                    export_action.triggered.connect(lambda: self._export_device_config(device))
+                    menu.addAction(export_action)
+                
                 # Copy Address for device
                 menu.addSeparator()
                 copy_action = QAction("Copy Device Name", self)
@@ -2126,4 +2133,101 @@ class DeviceTreeWidget(QWidget):
         btn_close.clicked.connect(dlg.accept)
         layout.addWidget(btn_close)
         
+        
         dlg.exec()
+
+    def _export_device_config(self, device):
+        """Export device configuration to JSON or CSV file."""
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        import json
+        import csv
+        
+        fname, selected_filter = QFileDialog.getSaveFileName(
+            self, 
+            "Export Configuration", 
+            f"{device.config.name}_config", 
+            "JSON Files (*.json);;CSV Files (*.csv)"
+        )
+        
+        if not fname:
+            return
+            
+        try:
+            if fname.lower().endswith('.csv') or "csv" in selected_filter.lower():
+                if not fname.lower().endswith('.csv'):
+                    fname += ".csv"
+                    
+                # Export Register List to CSV
+                # Export Register List to CSV
+                with open(fname, 'w', newline='') as f:
+                    writer = csv.writer(f)
+                    # Standard Headers
+                    headers = ["start_address", "count", "function_code", "data_type", "name_prefix", "description", "scale", "offset"]
+                    writer.writerow(headers)
+                    
+                    if device.config.modbus_register_maps:
+                         # Export Maps
+                         for rmap in device.config.modbus_register_maps:
+                             writer.writerow([
+                                rmap.start_address, 
+                                rmap.count,
+                                rmap.function_code, 
+                                rmap.data_type.name if hasattr(rmap.data_type, 'name') else str(rmap.data_type),
+                                rmap.name_prefix,
+                                rmap.description,
+                                rmap.scale, 
+                                rmap.offset
+                            ])
+                    else:
+                         # Fallback: Export Discovered Signals as single-register maps
+                         # Collect all signals recursively
+                         signals = []
+                         def collect_signals(node):
+                             if hasattr(node, 'signals'):
+                                 signals.extend(node.signals)
+                             for child in node.children:
+                                 collect_signals(child)
+                                 
+                         if device.root_node:
+                             collect_signals(device.root_node)
+                             
+                         for sig in signals:
+                             # Try to infer type
+                             dtype = "UINT16" # Default
+                             if hasattr(sig, 'modbus_data_type'): dtype = str(sig.modbus_data_type)
+                             elif hasattr(sig, 'type'): dtype = str(sig.type)
+                             
+                             # Extract Function Code
+                             fc = 3
+                             if hasattr(sig, 'fc') and str(sig.fc).isdigit():
+                                 fc = int(sig.fc)
+                             
+                             writer.writerow([
+                                 sig.address,
+                                 1, # Count
+                                 fc,
+                                 dtype,
+                                 sig.name,
+                                 sig.description or "",
+                                 1.0, # Scale
+                                 0.0  # Offset
+                             ])
+                        
+                QMessageBox.information(self, "Export Successful", f"Exported to {fname}")
+                
+            else:
+                if not fname.lower().endswith('.json'):
+                    fname += ".json"
+                    
+                config_dict = device.config.to_dict()
+                # Ensure name is up-to-date from the device object, not just staled config
+                config_dict['name'] = device.config.name
+                
+                with open(fname, 'w') as f:
+                    json.dump(config_dict, f, indent=2)
+                
+                QMessageBox.information(self, "Export Successful", f"Configuration exported to {fname}")
+                
+        except Exception as e:
+            logger.error(f"Failed to export configuration: {e}")
+            QMessageBox.critical(self, "Export Failed", f"Failed to export configuration:\n{e}")
