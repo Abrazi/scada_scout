@@ -45,20 +45,47 @@ def _find_library():
     """
     system = platform.system()
     
+    # Check for custom library path via environment variable
+    custom_lib = os.environ.get("LIBIEC61850_PATH")
+    if custom_lib and os.path.exists(custom_lib):
+        try:
+            # On Windows, add the directory to DLL search path for dependencies
+            if system == "Windows" and hasattr(os, "add_dll_directory"):
+                dll_dir = os.path.dirname(os.path.abspath(custom_lib))
+                try:
+                    os.add_dll_directory(dll_dir)
+                except:
+                    pass
+            return ctypes.CDLL(custom_lib)
+        except Exception as e:
+            pass  # Fall through to default search
+    
     # Library names by platform
     if system == "Windows":
-        lib_names = ["iec61850.dll", "libiec61850.dll"]
+        lib_names = ["iec61850.dll", "libiec61850.dll", "iec61850-1.6.dll", "libiec61850-1.6.dll"]
     elif system == "Darwin":  # macOS
         lib_names = ["libiec61850.dylib", "iec61850.dylib"]
     else:  # Linux and others
-        lib_names = ["libiec61850.so", "libiec61850.so.1"]
+        lib_names = ["libiec61850.so", "libiec61850.so.1", "libiec61850.so.1.6"]
     
     # Paths to search
     search_paths = [
         os.path.dirname(__file__),  # Same directory as this file
         os.path.join(os.path.dirname(__file__), "..", "..", "..", "lib"),  # Project lib dir
+        os.path.join(os.path.dirname(__file__), "..", "..", "..", "libiec61850-1.6.1", "LIB"),  # LIB dir
+        os.path.join(os.path.dirname(__file__), "..", "..", "..", "libiec61850-1.6.1", "build"),  # Build dir
         os.getcwd(),  # Current working directory
     ]
+    
+    # On Windows, add lib directories to DLL search path for dependencies
+    if system == "Windows" and hasattr(os, "add_dll_directory"):
+        for path in search_paths:
+            abs_path = os.path.abspath(path)
+            if os.path.exists(abs_path):
+                try:
+                    os.add_dll_directory(abs_path)
+                except:
+                    pass
     
     # Try each combination of path and library name
     for path in search_paths:

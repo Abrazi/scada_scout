@@ -30,6 +30,8 @@ class IEC61850ServerAdapter(BaseProtocol):
         self._value_cache = {}
         self._control_handlers = []
         self._control_handler_params = []
+        self._control_handler_ptrs = []  # Store pointers to prevent GC
+
         self._sbo_state = {}
         self._sbo_select_timeout_ms = 30000
 
@@ -53,15 +55,20 @@ class IEC61850ServerAdapter(BaseProtocol):
             # Keep parsing info out of the Event Log to reduce noise; keep it in the normal logger for debugging
             logger.debug(f"Parsing SCD/ICD for {self.ied_name} from {scd_path}")
 
-            # Try to create model from SCD/ICD
-            # Note: libiec61850 might not fully support SCD files for server creation
-            # It works better with ICD/CID files or programmatically created models
+            # Try to create model from SCD/ICD/CID
+            # Note: libiec61850 works best with ICD/CID files
             self.model = lib.ConfigFileParser_createModelFromConfigFileEx(scd_path.encode("utf-8"))
             
             if not self.model:
                 file_ext = os.path.splitext(scd_path)[1].lower()
-                if file_ext not in (".icd", ".cid"):
-                    # Alternative: Try to extract ICD section and create a temporary ICD file
+                
+                # If it's already an ICD/CID and failed, don't try extraction
+                if file_ext in (".icd", ".cid"):
+                    logger.warning(f"ConfigFileParser failed on {file_ext} file, trying dynamic model")
+                    if self.event_logger:
+                        self.event_logger.warning("IEC61850Server", f"{file_ext.upper()} parsing failed")
+                else:
+                    # It's an SCD - try extracting ICD section
                     logger.warning("ConfigFileParser_createModelFromConfigFileEx failed, trying ICD extraction")
                     if self.event_logger:
                         self.event_logger.warning("IEC61850Server", "SCD parsing failed, attempting ICD extraction")
@@ -73,27 +80,48 @@ class IEC61850ServerAdapter(BaseProtocol):
                         if self.model:
                             self._filtered_scd_path = icd_path
                             logger.info(f"Successfully loaded model from extracted ICD: {icd_path}")
-                else:
-                    logger.info("Model creation failed for ICD/CID file; will try dynamic model from SCD parser")
             
-            # If we still don't have a model, try creating it dynamically from parsed SCD/ICD
+            # Native parser failed - try Python dynamic builder
+            # Check environment variable to control dynamic builder behavior
+            use_dynamic_builder = os.environ.get("IEC61850_USE_DYNAMIC_BUILDER", "true").lower() == "true"
+            
             if not self.model:
-                logger.debug("Attempting to create dynamic model from parsed SCD/ICD...")
-
-                # Try building a dynamic model from parsed SCD/ICD
-                self.model = self._create_model_from_scd_parser()
-                if not self.model:
-                    logger.warning("Dynamic model creation failed, trying minimal fallback model")
+                if use_dynamic_builder:
+                    logger.warning("Native parser failed - trying Python dynamic model builder")
                     if self.event_logger:
                         self.event_logger.warning(
                             "IEC61850Server",
-                            "⚠️ Dynamic model creation failed, falling back to minimal model"
+                            "⚠️ ConfigFileParser failed - attempting Python dynamic builder\n"
+                            "   • May work with some libiec61850 builds\n"
+                            "   • Set IEC61850_USE_DYNAMIC_BUILDER=false to disable"
                         )
+                    
+                    # Try dynamic model builder from SCD parser (increased limit)
+                    self.model = self._create_model_from_scd_parser(max_attributes=10000)
+                    
+                    if self.model:
+                        logger.info("Successfully created dynamic model from SCD parser")
+                        if self.event_logger:
+                            self.event_logger.info(
+                                "IEC61850Server",
+                                "✅ Dynamic model built from SCD (may be unstable with some DLL builds)"
+                            )
+                
+                if not self.model:
+                    logger.error("Using minimal model only (LLN0 with Mod data object)")
+                    if self.event_logger:
+                        self.event_logger.error(
+                            "IEC61850Server",
+                            "⚠️ Minimal model only (LLN0)\n"
+                            "   • Full model requires working libiec61850 with ConfigFileParser\n"
+                            "   • Or set IEC61850_USE_DYNAMIC_BUILDER=true (may crash some builds)"
+                        )
+                    
                     self.model = self._create_minimal_model()
+                
                 if not self.model:
                     raise RuntimeError(
-                        f"Failed to create any IED model for '{self.ied_name}'. "
-                        f"Both SCD parsing and minimal model creation failed."
+                        f"Failed to create IED model for '{self.ied_name}'"
                     )
 
             # Create the IED server
@@ -103,19 +131,21 @@ class IEC61850ServerAdapter(BaseProtocol):
 
             # Configure server settings
             try:
-                # Bind to specific interface IP
-                # Note: Use "0.0.0.0" to listen on all interfaces (network accessible)
-                # Use "127.0.0.1" for localhost only
-                bind_ip = self.config.ip_address
-                if bind_ip == "127.0.0.1":
-                    # Don't restrict to localhost - make accessible on network
-                    bind_ip = "0.0.0.0"
-                    logger.info("Converting 127.0.0.1 to 0.0.0.0 to allow network access")
+                # For IEC 61850 servers, ALWAYS bind to 0.0.0.0 (all interfaces)
+                # The config.ip_address represents the advertised IP, not the bind address
+                # This prevents WinError 10049 on Windows when the specific IP isn't available
+                bind_ip = "0.0.0.0"
+                logger.info(f"Server will listen on all interfaces (0.0.0.0)")
                 
-                lib.IedServer_setLocalIpAddress(self.server, bind_ip.encode("utf-8"))
-                logger.info(f"Server will listen on: {bind_ip} (all interfaces)" if bind_ip == "0.0.0.0" else f"Server bound to: {bind_ip}")
+                # Note: IedServer_setLocalIpAddress may be used for specific scenarios
+                # but for standard operation, omitting it or using 0.0.0.0 works best
+                try:
+                    lib.IedServer_setLocalIpAddress(self.server, bind_ip.encode("utf-8"))
+                    logger.debug(f"Set local IP address to: {bind_ip}")
+                except Exception as e:
+                    logger.debug(f"Could not set local IP address (not critical): {e}")
             except Exception as e:
-                logger.warning(f"Could not set server IP address: {e}")
+                logger.warning(f"Could not configure server IP settings: {e}")
 
             try:
                 # Set server identity
@@ -129,6 +159,34 @@ class IEC61850ServerAdapter(BaseProtocol):
             except Exception as e:
                 logger.warning(f"Could not set server identity: {e}")
 
+            # Set default write access policy to ALLOW (critical for some clients)
+            # This prevents undefined behavior if a client tries to write to an unmapped variable
+            try:
+                if hasattr(lib, "IedServer_setWriteAccessPolicy"):
+                    # Define constants manually if missing in lib
+                    fc_all = getattr(lib, "IEC61850_FC_ALL", -1) 
+                    policy_allow = getattr(lib, "ACCESS_POLICY_ALLOW", 0) # 0 is typical ALLOW enum value in C
+                    
+                    lib.IedServer_setWriteAccessPolicy(
+                        self.server,
+                        fc_all,
+                        policy_allow
+                    )
+                    logger.info(f"Set default write access policy to ALLOW (FC={fc_all}, Policy={policy_allow})")
+            except Exception as e:
+                logger.warning(f"Could not set write access policy: {e}")
+
+            # Register write access handler for debugging
+            # REMOVED: WriteAccessHandler not defined in lib61850.py, unsafe to use
+            # try:
+            #     self._write_access_handler = self._make_write_access_handler()
+            #     if hasattr(lib, "IedServer_handleWriteAccess"):
+            #         lib.IedServer_handleWriteAccess(self.server, None, self._write_access_handler, None)
+            #         logger.info("Registered write access handler")
+            # except Exception as e:
+            #     logger.warning(f"Failed to register write access handler: {e}")
+
+
             # Register SBO control handlers (if any)
             try:
                 self._register_sbo_handlers()
@@ -137,15 +195,33 @@ class IEC61850ServerAdapter(BaseProtocol):
 
             # Start the server
             if int(self.config.port) < 1024:
-                try:
-                    if hasattr(os, "geteuid") and os.geteuid() != 0:
-                        raise RuntimeError(
-                            f"Port {self.config.port} requires root/administrator privileges. "
-                            f"Use a port >= 1024 (e.g., 10002)."
-                        )
-                except Exception as e:
-                    # If privilege check itself fails, continue to start attempt
-                    logger.debug(f"Privilege check skipped or failed: {e}")
+                # Check for administrator/root privileges on Windows/Linux
+                import sys
+                import platform
+                
+                needs_elevation = False
+                if platform.system() == "Windows":
+                    try:
+                        import ctypes
+                        needs_elevation = not ctypes.windll.shell32.IsUserAnAdmin()
+                    except Exception:
+                        needs_elevation = True  # Assume needs elevation if check fails
+                elif hasattr(os, "geteuid"):
+                    needs_elevation = os.geteuid() != 0
+                else:
+                    needs_elevation = True  # Unknown system, assume needs elevation
+                
+                if needs_elevation:
+                    error_msg = (
+                        f"⚠️ Port {self.config.port} requires administrator/root privileges.\n"
+                        f"   • On Windows: Run as Administrator\n"
+                        f"   • On Linux: Use sudo or run as root\n"
+                        f"   • Alternative: Use a port >= 1024 (e.g., 10002)"
+                    )
+                    logger.error(error_msg)
+                    if self.event_logger:
+                        self.event_logger.error("IEC61850Server", error_msg)
+                    raise RuntimeError(f"Port {self.config.port} requires elevated privileges")
 
             # Verify model is valid before attempting start
             if not self.model:
@@ -156,7 +232,7 @@ class IEC61850ServerAdapter(BaseProtocol):
             try:
                 test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 test_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                test_sock.bind((bind_ip, int(self.config.port)))
+                test_sock.bind(("0.0.0.0", int(self.config.port)))
                 test_sock.close()
                 logger.debug(f"Port {self.config.port} is available for binding")
             except OSError as e:
@@ -164,7 +240,7 @@ class IEC61850ServerAdapter(BaseProtocol):
                 if self.event_logger:
                     self.event_logger.warning("IEC61850Server", f"⚠️ Port {self.config.port} may already be in use")
 
-            logger.info(f"Starting IEC61850 server on {bind_ip}:{self.config.port}")
+            logger.info(f"Starting IEC61850 server on 0.0.0.0:{self.config.port}")
             start_result = lib.IedServer_start(self.server, int(self.config.port))
 
             # Some libiec61850 builds return void; check isRunning if so
@@ -360,8 +436,8 @@ class IEC61850ServerAdapter(BaseProtocol):
 
     def _extract_icd_from_scd(self, scd_path: str, ied_name: str) -> Optional[str]:
         """
-        Extract ICD (IED Capability Description) from SCD for a specific IED.
-        ICD files contain only the IED section and DataTypeTemplates, which libiec61850 handles better.
+        Extract ICD for specific IED from SCD.
+        Simply extracts the IED element and DataTypeTemplates.
         """
         try:
             tree = ET.parse(scd_path)
@@ -376,39 +452,49 @@ class IEC61850ServerAdapter(BaseProtocol):
                 return f"{{{ns_uri}}}{tag}" if ns_uri else tag
 
             # Find the target IED
-            target_ied = None
+            source_ied = None
             for ied in root.findall(f".//{_ns('IED')}"):
                 if ied.get('name') == ied_name:
-                    target_ied = ied
+                    source_ied = ied
                     break
             
-            if target_ied is None:
+            if source_ied is None:
                 logger.error(f"IED '{ied_name}' not found in SCD")
                 return None
 
-            # Create new ICD root (simplified SCL with just this IED)
-            # Copy root attributes but change to ICD-like structure
-            icd_root = ET.Element(root.tag, root.attrib)
+            # Create new SCL root for ICD (minimal, standards-compliant)
+            # Use same namespace and schema as source
+            icd_root = ET.Element(root.tag)
+            # Copy only essential root attributes
+            for attr in ['version', 'revision', 'release']:
+                if attr in root.attrib:
+                    icd_root.set(attr, root.attrib[attr])
             
-            # Copy Header if exists
+            # Copy namespace declarations
+            for attr, value in root.attrib.items():
+                if attr.startswith('{') or 'xmlns' in attr:
+                    icd_root.set(attr, value)
+            
+            # Copy Header (optional but recommended)
             header = root.find(_ns('Header'))
             if header is not None:
-                icd_root.append(header)
+                icd_root.append(ET.fromstring(ET.tostring(header)))
             
-            # Add the IED
-            icd_root.append(target_ied)
+            # Copy the IED as-is (ABB SCDs already have proper ICD-style structure)
+            icd_root.append(ET.fromstring(ET.tostring(source_ied)))
             
-            # CRITICAL: Copy DataTypeTemplates - required for model creation
+            # CRITICAL: Copy DataTypeTemplates - absolutely required
             dtt = root.find(_ns('DataTypeTemplates'))
             if dtt is not None:
-                icd_root.append(dtt)
+                icd_root.append(ET.fromstring(ET.tostring(dtt)))
             else:
-                logger.warning("No DataTypeTemplates found in SCD - model creation will likely fail")
+                logger.error("No DataTypeTemplates in SCD - cannot create valid ICD")
+                return None
             
-            # Write to temporary ICD file
+            # Write to temporary ICD file with proper encoding
             icd_tree = ET.ElementTree(icd_root)
-            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".icd")
-            icd_tree.write(tmp.name, encoding="utf-8", xml_declaration=True)
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".icd", mode='wb')
+            icd_tree.write(tmp, encoding="utf-8", xml_declaration=True)
             tmp.close()
             
             file_size = os.path.getsize(tmp.name)
@@ -515,8 +601,8 @@ class IEC61850ServerAdapter(BaseProtocol):
             logger.error(f"Minimal model creation failed: {e}")
             return None
 
-    def _create_model_from_scd_parser(self) -> Optional[int]:
-        """Build a dynamic model from parsed SCD/ICD data (best-effort)."""
+    def _create_model_from_scd_parser(self, max_attributes: int = 1000) -> Optional[int]:
+        """Build a dynamic model from parsed SCD/ICD data (best-effort with safety limits)."""
         try:
             if not self.config.scd_file_path:
                 return None
@@ -632,6 +718,10 @@ class IEC61850ServerAdapter(BaseProtocol):
                     )
                     if da:
                         created_attrs += 1
+                        # Safety limit: stop if we've created too many attributes
+                        if created_attrs >= max_attributes:
+                            logger.warning(f"Reached safety limit of {max_attributes} attributes, stopping")
+                            break
                 except Exception as e:
                     logger.debug(f"Failed to create DA {da_name} in {addr_ld_norm}/{ln_name}: {e}")
 
@@ -774,13 +864,16 @@ class IEC61850ServerAdapter(BaseProtocol):
             control_handler = self._make_sbo_control_handler(control_ctx)
 
             param = ctypes.py_object(control_ctx)
-            param_ptr = ctypes.cast(ctypes.pointer(param), ctypes.c_void_p)
+            # pointers must be kept alive!
+            p_obj = ctypes.pointer(param)
+            param_ptr = ctypes.cast(p_obj, ctypes.c_void_p)
 
             lib.IedServer_setPerformCheckHandler(self.server, data_object, check_handler, param_ptr)
             lib.IedServer_setControlHandler(self.server, data_object, control_handler, param_ptr)
 
             self._control_handlers.append((check_handler, control_handler))
             self._control_handler_params.append(param)
+            self._control_handler_ptrs.append(p_obj)  # Keep pointer alive
 
             logger.info(f"Registered SBO handlers for {ref}")
 
@@ -863,59 +956,72 @@ class IEC61850ServerAdapter(BaseProtocol):
             return None
         return ctypes.cast(child, ctypes.POINTER(lib.DataAttribute))
 
+    # REMOVED: _make_write_access_handler - definition invalid
+
     def _make_sbo_check_handler(self, ctx):
         @lib.ControlPerformCheckHandler
         def _handler(action, _param, value, _test, _interlock_check):
-            ref = ctx["ref"]
-            now = int(lib.Hal_getTimeInMs())
+            try:
+                ref = ctx["ref"]
+                now = int(lib.Hal_getTimeInMs())
 
-            if lib.ControlAction_isSelect(action):
+                if lib.ControlAction_isSelect(action):
+                    selected_at = self._sbo_state.get(ref)
+                    # 30s timeout default
+                    if selected_at and (now - selected_at) < self._sbo_select_timeout_ms:
+                        lib.ControlAction_setAddCause(action, lib.ADD_CAUSE_OBJECT_ALREADY_SELECTED)
+                        return lib.CONTROL_OBJECT_ACCESS_DENIED
+
+                    self._sbo_state[ref] = now
+                    # logger.debug(f"SBO Select accepted for {ref}")
+                    return lib.CONTROL_ACCEPTED
+
+                # Operate: require selection
                 selected_at = self._sbo_state.get(ref)
-                if selected_at and (now - selected_at) < self._sbo_select_timeout_ms:
-                    lib.ControlAction_setAddCause(action, lib.ADD_CAUSE_OBJECT_ALREADY_SELECTED)
-                    return lib.CONTROL_OBJECT_ACCESS_DENIED
+                if not selected_at or (now - selected_at) > self._sbo_select_timeout_ms:
+                    lib.ControlAction_setAddCause(action, lib.ADD_CAUSE_OBJECT_NOT_SELECTED)
+                    return lib.CONTROL_WAITING_FOR_SELECT
 
-                self._sbo_state[ref] = now
+                # logger.debug(f"SBO Operate accepted for {ref}")
                 return lib.CONTROL_ACCEPTED
-
-            # Operate: require selection
-            selected_at = self._sbo_state.get(ref)
-            if not selected_at or (now - selected_at) > self._sbo_select_timeout_ms:
-                lib.ControlAction_setAddCause(action, lib.ADD_CAUSE_OBJECT_NOT_SELECTED)
-                return lib.CONTROL_WAITING_FOR_SELECT
-
-            return lib.CONTROL_ACCEPTED
-
+            except Exception as e:
+                logger.error(f"Exception in SBO check handler: {e}")
+                return lib.CONTROL_OBJECT_ACCESS_DENIED
         return _handler
 
     def _make_sbo_control_handler(self, ctx):
         @lib.ControlHandler
         def _handler(action, _param, value, _test):
-            ref = ctx["ref"]
             try:
-                state = bool(lib.MmsValue_getBoolean(value)) if value else False
-            except Exception:
+                ref = ctx["ref"]
                 state = False
+                try:
+                    state = bool(lib.MmsValue_getBoolean(value)) if value else False
+                except Exception:
+                    pass
 
-            # Update opOk if available
-            if ctx.get("op_ok"):
-                op_ok_val = lib.MmsValue_newBoolean(True)
-                lib.IedServer_updateAttributeValue(self.server, ctx["op_ok"], op_ok_val)
-                lib.MmsValue_delete(op_ok_val)
+                # Update opOk if available
+                if ctx.get("op_ok"):
+                    op_ok_val = lib.MmsValue_newBoolean(True)
+                    lib.IedServer_updateAttributeValue(self.server, ctx["op_ok"], op_ok_val)
+                    lib.MmsValue_delete(op_ok_val)
 
-            # Update stVal if available
-            if ctx.get("st_val"):
-                st_val = lib.MmsValue_newBoolean(state)
-                lib.IedServer_updateAttributeValue(self.server, ctx["st_val"], st_val)
-                lib.MmsValue_delete(st_val)
+                # Update stVal if available
+                if ctx.get("st_val"):
+                    st_val = lib.MmsValue_newBoolean(state)
+                    lib.IedServer_updateAttributeValue(self.server, ctx["st_val"], st_val)
+                    lib.MmsValue_delete(st_val)
 
-            # Update timestamp if available
-            if ctx.get("t"):
-                ts = int(lib.Hal_getTimeInMs())
-                lib.IedServer_updateUTCTimeAttributeValue(self.server, ctx["t"], ts)
+                # Update timestamp if available
+                if ctx.get("t"):
+                    ts = int(lib.Hal_getTimeInMs())
+                    lib.IedServer_updateUTCTimeAttributeValue(self.server, ctx["t"], ts)
 
-            # Clear selection on operate
-            self._sbo_state.pop(ref, None)
-            return lib.CONTROL_RESULT_OK
-
+                # Clear selection on operate
+                self._sbo_state.pop(ref, None)
+                # logger.info(f"Control operate executed for {ref} (state={state})")
+                return lib.CONTROL_RESULT_OK
+            except Exception as e:
+                logger.error(f"Exception in SBO control handler: {e}")
+                return lib.CONTROL_RESULT_FAILED
         return _handler

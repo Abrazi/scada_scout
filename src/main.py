@@ -19,23 +19,19 @@ def main():
     Application Entry Point.
     """
     try:
-        # Prevent running the GUI as root: using sudo breaks DBus/X11 permissions
-        # and causes unpredictable GUI behavior. Exit with a clear message.
-        def is_running_as_root() -> bool:
-            """Return True when running with elevated privileges.
-
-            Cross-platform: on Unix use `os.geteuid()` when available; on
-            Windows attempt `IsUserAnAdmin` via ctypes. Fail safe returns
-            False on unknown platforms or when checks are unavailable.
+        # Prevent running the GUI with sudo on Linux/Unix: breaks DBus/X11 permissions
+        # Windows Administrator mode is safe and sometimes needed (e.g., for port 102)
+        def is_running_as_root_on_unix() -> bool:
+            """Return True when running with sudo/root on Unix systems.
+            
+            Windows Administrator mode returns False (safe for GUI apps).
+            Only blocks sudo on Linux/Unix where it breaks X11/DBus.
             """
-            # Windows: use IsUserAnAdmin if available
+            # Windows: Administrator mode is safe, return False to allow
             if os.name == 'nt':
-                try:
-                    return bool(ctypes.windll.shell32.IsUserAnAdmin())
-                except Exception:
-                    return False
+                return False
 
-            # POSIX: prefer geteuid when present
+            # POSIX: check for root user (UID 0)
             geteuid = getattr(os, 'geteuid', None)
             if callable(geteuid):
                 try:
@@ -45,7 +41,7 @@ def main():
 
             return False
 
-        is_root = is_running_as_root()
+        is_root = is_running_as_root_on_unix()
 
         if is_root:
             sys.stderr.write("Refusing to run SCADA Scout as root (sudo).\nPlease run without sudo: `source venv/bin/activate && python src/main.py`\n")

@@ -857,7 +857,7 @@ del loaderclass
 
 # End loader
 
-add_library_search_dirs([])
+add_library_search_dirs([os.path.join(os.path.dirname(__file__), "..", "..", "..", "lib")])
 
 # Begin libraries
 _libs["iec61850"] = load_library("iec61850")
