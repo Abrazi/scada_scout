@@ -71,10 +71,10 @@ class SCDImportDialog(QDialog):
         self.parsed_ieds = []
 
     def _browse_file(self):
-        filter_str = ("All Supported Files (*.scd *.cid *.icd *.iid *.xml *.zip *.rar *.sz *.7z *.tar *.tar.gz *.tgz);;"
-                     "SCL Files (*.scd *.cid *.icd *.iid *.xml);;"
-                     "Compressed Archives (*.zip *.rar *.sz *.7z *.tar *.tar.gz *.tgz);;"
-                     "All Files (*.*)")
+        filter_str = ("SCL Files (*.scd *.cid *.icd *.iid *.xml);;"
+                 "All Supported Files (*.scd *.cid *.icd *.iid *.xml *.zip *.rar *.sz *.7z *.tar *.tar.gz *.tgz);;"
+                 "Compressed Archives (*.zip *.rar *.sz *.7z *.tar *.tar.gz *.tgz);;"
+                 "All Files (*.*)")
         fname, _ = QFileDialog.getOpenFileName(self, "Open SCL File or Archive", "", filter_str)
         if fname:
             # Check if it's a compressed file
