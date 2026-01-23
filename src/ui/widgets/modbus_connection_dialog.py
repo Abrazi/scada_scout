@@ -3,7 +3,14 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QFormLayout, QLineEdit,
                                 QHBoxLayout, QFileDialog, QListWidget, QLabel, QMenu,
                                 QSpinBox, QDoubleSpinBox, QStackedWidget, QWidget, QGroupBox)
 from PySide6.QtCore import QSettings, Qt
+from PySide6.QtGui import QGuiApplication
+import os
+import tempfile
+import logging
 from src.models.device_models import DeviceConfig, DeviceType, ModbusDataType, ModbusEndianness, ModbusRegisterMap
+from src.utils.archive_utils import ArchiveExtractor
+
+logger = logging.getLogger(__name__)
 
 class ConnectionDialog(QDialog):
     """
@@ -179,9 +186,62 @@ class ConnectionDialog(QDialog):
             self.protocol_stack.setCurrentIndex(2)
     
     def _browse_scd(self):
-        fname, _ = QFileDialog.getOpenFileName(self, "Open SCD/SCL File", "", "SCL Files (*.scd *.cid *.icd *.xml)")
+        filter_str = ("All Supported Files (*.scd *.cid *.icd *.xml *.zip *.rar *.sz *.7z *.tar *.tar.gz *.tgz);;"
+                     "SCL Files (*.scd *.cid *.icd *.xml);;"
+                     "Compressed Archives (*.zip *.rar *.sz *.7z *.tar *.tar.gz *.tgz);;"
+                     "All Files (*.*)")
+        fname, _ = QFileDialog.getOpenFileName(self, "Open SCD/SCL File or Archive", "", filter_str)
         if fname:
-            self.scd_input.setText(fname)
+            if ArchiveExtractor.is_archive(fname):
+                try:
+                    msg = QMessageBox(self)
+                    msg.setIcon(QMessageBox.Information)
+                    msg.setText("Extracting archive, please wait...")
+                    msg.setWindowTitle("Extracting")
+                    msg.setStandardButtons(QMessageBox.NoButton)
+                    msg.show()
+                    QGuiApplication.processEvents()
+                    
+                    files_in_archive = ArchiveExtractor.list_files(fname)
+                    scd_files = [f for f in files_in_archive 
+                                if f.lower().endswith(('.scd', '.cid', '.icd', '.xml'))]
+                    
+                    if not scd_files:
+                        msg.close()
+                        QMessageBox.warning(self, "No SCD File",
+                                          "No .scd, .cid, .icd, or .xml file found in the archive.")
+                        return
+                    
+                    selected_file = None
+                    for ext in ['.scd', '.cid', '.icd', '.xml']:
+                        for f in scd_files:
+                            if f.lower().endswith(ext):
+                                selected_file = f
+                                break
+                        if selected_file:
+                            break
+                    
+                    if not selected_file:
+                        selected_file = scd_files[0]
+                    
+                    temp_dir = tempfile.mkdtemp(prefix="scada_scout_scd_")
+                    extracted_path = ArchiveExtractor.extract_file(fname, selected_file, temp_dir)
+                    
+                    msg.close()
+                    
+                    if os.path.exists(extracted_path):
+                        self.scd_input.setText(extracted_path)
+                        logger.info(f"Extracted {selected_file} from {fname} to {extracted_path}")
+                    else:
+                        QMessageBox.warning(self, "Extraction Failed",
+                                          f"Failed to extract {selected_file} from archive.")
+                        
+                except Exception as e:
+                    logger.error(f"Failed to extract archive {fname}: {e}")
+                    QMessageBox.critical(self, "Extraction Error",
+                                       f"Failed to extract archive:\n{str(e)}")
+            else:
+                self.scd_input.setText(fname)
     
     def _import_register_map(self):
         """Import Modbus register map from CSV"""

@@ -4,8 +4,15 @@ from PySide6.QtWidgets import (
     QLineEdit, QComboBox, QSpinBox
 )
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QGuiApplication
 from typing import List
+import os
+import tempfile
+import logging
 from src.models.device_models import DeviceConfig, DeviceType
+from src.utils.archive_utils import ArchiveExtractor
+
+logger = logging.getLogger(__name__)
 
 
 class IEC61850SimulatorDialog(QDialog):
@@ -67,11 +74,66 @@ class IEC61850SimulatorDialog(QDialog):
         self.parsed_ieds = []
 
     def _browse_file(self):
-        fname, _ = QFileDialog.getOpenFileName(self, "Open SCL File", "", "SCL Files (*.scd *.cid *.icd *.xml)")
+        filter_str = ("All Supported Files (*.scd *.cid *.icd *.xml *.zip *.rar *.sz *.7z *.tar *.tar.gz *.tgz);;"
+                     "SCL Files (*.scd *.cid *.icd *.xml);;"
+                     "Compressed Archives (*.zip *.rar *.sz *.7z *.tar *.tar.gz *.tgz);;"
+                     "All Files (*.*)")
+        fname, _ = QFileDialog.getOpenFileName(self, "Open SCL File or Archive", "", filter_str)
         if fname:
-            self.scd_path = fname
-            self.lbl_file.setText(fname)
-            self._parse_and_list_with_progress(fname)
+            if ArchiveExtractor.is_archive(fname):
+                try:
+                    msg = QMessageBox(self)
+                    msg.setIcon(QMessageBox.Information)
+                    msg.setText("Extracting archive, please wait...")
+                    msg.setWindowTitle("Extracting")
+                    msg.setStandardButtons(QMessageBox.NoButton)
+                    msg.show()
+                    QGuiApplication.processEvents()
+                    
+                    files_in_archive = ArchiveExtractor.list_files(fname)
+                    scd_files = [f for f in files_in_archive 
+                                if f.lower().endswith(('.scd', '.cid', '.icd', '.xml'))]
+                    
+                    if not scd_files:
+                        msg.close()
+                        QMessageBox.warning(self, "No SCD File",
+                                          "No .scd, .cid, .icd, or .xml file found in the archive.")
+                        return
+                    
+                    selected_file = None
+                    for ext in ['.scd', '.cid', '.icd', '.xml']:
+                        for f in scd_files:
+                            if f.lower().endswith(ext):
+                                selected_file = f
+                                break
+                        if selected_file:
+                            break
+                    
+                    if not selected_file:
+                        selected_file = scd_files[0]
+                    
+                    temp_dir = tempfile.mkdtemp(prefix="scada_scout_scd_")
+                    extracted_path = ArchiveExtractor.extract_file(fname, selected_file, temp_dir)
+                    
+                    msg.close()
+                    
+                    if os.path.exists(extracted_path):
+                        self.scd_path = extracted_path
+                        self.lbl_file.setText(f"{os.path.basename(fname)} → {os.path.basename(extracted_path)}")
+                        logger.info(f"Extracted {selected_file} from {fname} to {extracted_path}")
+                        self._parse_and_list_with_progress(extracted_path)
+                    else:
+                        QMessageBox.warning(self, "Extraction Failed",
+                                          f"Failed to extract {selected_file} from archive.")
+                        
+                except Exception as e:
+                    logger.error(f"Failed to extract archive {fname}: {e}")
+                    QMessageBox.critical(self, "Extraction Error",
+                                       f"Failed to extract archive:\n{str(e)}")
+            else:
+                self.scd_path = fname
+                self.lbl_file.setText(fname)
+                self._parse_and_list_with_progress(fname)
 
     def _parse_and_list_with_progress(self, path):
         from PySide6.QtWidgets import QProgressDialog, QApplication

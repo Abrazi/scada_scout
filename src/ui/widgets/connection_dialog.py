@@ -7,7 +7,13 @@ from PySide6.QtGui import QGuiApplication
 import platform
 import psutil
 import socket
+import os
+import tempfile
+import logging
 from src.models.device_models import DeviceConfig, DeviceType
+from src.utils.archive_utils import ArchiveExtractor
+
+logger = logging.getLogger(__name__)
 
 class ConnectionDialog(QDialog):
     """
@@ -246,9 +252,73 @@ class ConnectionDialog(QDialog):
             self.port_input.setText("102")
 
     def _browse_scd(self):
-        fname, _ = QFileDialog.getOpenFileName(self, "Open SCD/SCL File", "", "SCL Files (*.scd *.cid *.icd *.xml)")
+        # Accept both direct SCD files and compressed archives
+        filter_str = ("All Supported Files (*.scd *.cid *.icd *.xml *.zip *.rar *.sz *.7z *.tar *.tar.gz *.tgz);;"
+                     "SCL Files (*.scd *.cid *.icd *.xml);;"
+                     "Compressed Archives (*.zip *.rar *.sz *.7z *.tar *.tar.gz *.tgz);;"
+                     "All Files (*.*)")
+        fname, _ = QFileDialog.getOpenFileName(self, "Open SCD/SCL File or Archive", "", filter_str)
         if fname:
-            self.scd_input.setText(fname)
+            # Check if it's a compressed file
+            if ArchiveExtractor.is_archive(fname):
+                try:
+                    # Show a message that extraction is happening
+                    msg = QMessageBox(self)
+                    msg.setIcon(QMessageBox.Information)
+                    msg.setText("Extracting archive, please wait...")
+                    msg.setWindowTitle("Extracting")
+                    msg.setStandardButtons(QMessageBox.NoButton)
+                    msg.show()
+                    QGuiApplication.processEvents()
+                    
+                    # List files in archive
+                    files_in_archive = ArchiveExtractor.list_files(fname)
+                    
+                    # Find SCD/CID/ICD/XML files
+                    scd_files = [f for f in files_in_archive 
+                                if f.lower().endswith(('.scd', '.cid', '.icd', '.xml'))]
+                    
+                    if not scd_files:
+                        msg.close()
+                        QMessageBox.warning(self, "No SCD File",
+                                          "No .scd, .cid, .icd, or .xml file found in the archive.")
+                        return
+                    
+                    # If multiple, pick the first .scd, or first available
+                    selected_file = None
+                    for ext in ['.scd', '.cid', '.icd', '.xml']:
+                        for f in scd_files:
+                            if f.lower().endswith(ext):
+                                selected_file = f
+                                break
+                        if selected_file:
+                            break
+                    
+                    if not selected_file:
+                        selected_file = scd_files[0]
+                    
+                    # Extract to temporary location
+                    temp_dir = tempfile.mkdtemp(prefix="scada_scout_scd_")
+                    extracted_path = ArchiveExtractor.extract_file(fname, selected_file, temp_dir)
+                    
+                    msg.close()
+                    
+                    if os.path.exists(extracted_path):
+                        self.scd_input.setText(extracted_path)
+                        logger.info(f"Extracted {selected_file} from {fname} to {extracted_path}")
+                        QMessageBox.information(self, "Success", 
+                                              f"Extracted: {os.path.basename(selected_file)}")
+                    else:
+                        QMessageBox.warning(self, "Extraction Failed",
+                                          f"Failed to extract {selected_file} from archive.")
+                        
+                except Exception as e:
+                    logger.error(f"Failed to extract archive {fname}: {e}")
+                    QMessageBox.critical(self, "Extraction Error",
+                                       f"Failed to extract archive:\n{str(e)}")
+            else:
+                # Direct SCD file
+                self.scd_input.setText(fname)
 
     def set_config(self, config: DeviceConfig):
         """Pre-fills the dialog with existing config."""
