@@ -157,6 +157,44 @@ class SCDParseWorker(QThread):
         except Exception as e:
             self.finished_parsing.emit([], str(e))
 
+
+class ExtractWorker(QThread):
+    """Worker to extract a single file from an archive in background."""
+    progress = Signal(str, int)
+    finished = Signal(str, str)  # (extracted_path, error_msg)
+
+    def __init__(self, archive_path: str, file_to_extract: str, dest_dir: str):
+        super().__init__()
+        self.archive_path = archive_path
+        self.file_to_extract = file_to_extract
+        self.dest_dir = dest_dir
+        self._cancel_requested = False
+
+    def cancel(self):
+        self._cancel_requested = True
+
+    def run(self):
+        try:
+            self.progress.emit("Extracting...", 10)
+            # perform extraction
+            from src.utils.archive_utils import ArchiveExtractor
+
+            # If cancellation requested before starting
+            if self._cancel_requested:
+                self.finished.emit('', 'cancelled')
+                return
+
+            extracted_path = ArchiveExtractor.extract_file(self.archive_path, self.file_to_extract, self.dest_dir)
+
+            if self._cancel_requested:
+                self.finished.emit('', 'cancelled')
+                return
+
+            self.progress.emit("Finalizing...", 90)
+            self.finished.emit(extracted_path, '')
+        except Exception as e:
+            self.finished.emit('', str(e))
+
 class SCDImportWorker(QThread):
     """Worker to import multiple devices from SCD without blocking UI."""
     log = Signal(str)

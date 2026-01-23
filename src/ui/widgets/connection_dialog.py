@@ -262,60 +262,82 @@ class ConnectionDialog(QDialog):
             # Check if it's a compressed file
             if ArchiveExtractor.is_archive(fname):
                 try:
-                    # Show a message that extraction is happening
-                    msg = QMessageBox(self)
-                    msg.setIcon(QMessageBox.Information)
-                    msg.setText("Extracting archive, please wait...")
-                    msg.setWindowTitle("Extracting")
-                    msg.setStandardButtons(QMessageBox.NoButton)
-                    msg.show()
-                    QGuiApplication.processEvents()
-                    
                     # List files in archive
                     files_in_archive = ArchiveExtractor.list_files(fname)
-                    
-                    # Find SCD/CID/ICD/XML files
                     scd_files = [f for f in files_in_archive 
                                 if f.lower().endswith(('.scd', '.cid', '.icd', '.xml'))]
                     
+                    if not scd_files and files_in_archive:
+                        scd_files = files_in_archive
+                    
                     if not scd_files:
-                        msg.close()
                         QMessageBox.warning(self, "No SCD File",
                                           "No .scd, .cid, .icd, or .xml file found in the archive.")
                         return
                     
-                    # If multiple, pick the first .scd, or first available
-                    selected_file = None
-                    for ext in ['.scd', '.cid', '.icd', '.xml']:
+                    # If multiple, let user select
+                    selected_file = scd_files[0]
+                    if len(scd_files) > 1:
+                        from PySide6.QtWidgets import QDialog, QVBoxLayout, QListWidget, QDialogButtonBox, QLabel
+                        dialog = QDialog(self)
+                        dialog.setWindowTitle("Select file from archive")
+                        dlg_layout = QVBoxLayout(dialog)
+                        dlg_layout.addWidget(QLabel("Select file to extract:"))
+                        lw = QListWidget()
                         for f in scd_files:
-                            if f.lower().endswith(ext):
-                                selected_file = f
-                                break
-                        if selected_file:
-                            break
+                            lw.addItem(f)
+                        lw.setCurrentRow(0)
+                        dlg_layout.addWidget(lw)
+                        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+                        btns.accepted.connect(dialog.accept)
+                        btns.rejected.connect(dialog.reject)
+                        dlg_layout.addWidget(btns)
+                        if dialog.exec() == QDialog.Accepted:
+                            selected_file = lw.currentItem().text()
+                        else:
+                            return
                     
-                    if not selected_file:
-                        selected_file = scd_files[0]
-                    
-                    # Extract to temporary location
+                    # Run extraction in background
+                    from PySide6.QtWidgets import QProgressDialog, QApplication
+                    from src.core.workers import ExtractWorker
                     temp_dir = tempfile.mkdtemp(prefix="scada_scout_scd_")
-                    extracted_path = ArchiveExtractor.extract_file(fname, selected_file, temp_dir)
-                    
-                    msg.close()
-                    
-                    if os.path.exists(extracted_path):
-                        self.scd_input.setText(extracted_path)
-                        logger.info(f"Extracted {selected_file} from {fname} to {extracted_path}")
-                        QMessageBox.information(self, "Success", 
-                                              f"Extracted: {os.path.basename(selected_file)}")
-                    else:
-                        QMessageBox.warning(self, "Extraction Failed",
-                                          f"Failed to extract {selected_file} from archive.")
-                        
-                except Exception as e:
-                    logger.error(f"Failed to extract archive {fname}: {e}")
-                    QMessageBox.critical(self, "Extraction Error",
-                                       f"Failed to extract archive:\n{str(e)}")
+                    self.extract_worker = ExtractWorker(fname, selected_file, temp_dir)
+
+                    progress = QProgressDialog(f"Extracting {os.path.basename(selected_file)}...", "Cancel", 0, 100, self)
+                    progress.setWindowTitle("Extracting")
+                    progress.setWindowModality(Qt.WindowModal)
+                    progress.setMinimumDuration(0)
+                    progress.setValue(0)
+
+                    def on_progress(msg_text, val):
+                        try:
+                            progress.setLabelText(msg_text)
+                            progress.setValue(max(0, min(100, val)))
+                            QApplication.processEvents()
+                        except Exception:
+                            pass
+
+                    def on_finished(extracted_path, error_msg):
+                        progress.close()
+                        if error_msg:
+                            if error_msg == 'cancelled':
+                                QMessageBox.information(self, "Cancelled", "Extraction cancelled by user.")
+                                return
+                            logger.error(f"Extraction error: {error_msg}")
+                            QMessageBox.critical(self, "Extraction Error", f"Failed to extract file:\n{error_msg}")
+                            return
+
+                        if os.path.exists(extracted_path):
+                            self.scd_input.setText(extracted_path)
+                            logger.info(f"Extracted {selected_file} from {fname} to {extracted_path}")
+                            QMessageBox.information(self, "Success", f"Extracted: {os.path.basename(selected_file)}")
+                        else:
+                            QMessageBox.warning(self, "Extraction Failed", f"Failed to extract {selected_file} from archive.")
+
+                    self.extract_worker.progress.connect(on_progress)
+                    self.extract_worker.finished.connect(on_finished)
+                    progress.canceled.connect(lambda: self.extract_worker.cancel())
+                    self.extract_worker.start()
             else:
                 # Direct SCD file
                 self.scd_input.setText(fname)

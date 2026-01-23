@@ -106,28 +106,56 @@ class SCDImportDialog(QDialog):
                     else:
                         selected_file = scd_files[0]
                     
-                    # Show extraction progress
-                    msg = QMessageBox(self)
-                    msg.setIcon(QMessageBox.Information)
-                    msg.setText(f"Extracting {os.path.basename(selected_file)}...")
-                    msg.setWindowTitle("Extracting")
-                    msg.setStandardButtons(QMessageBox.NoButton)
-                    msg.show()
-                    QGuiApplication.processEvents()
-                    
+                    # Extract in background to avoid UI freeze
+                    from PySide6.QtWidgets import QProgressDialog, QApplication
+                    from src.core.workers import ExtractWorker
+
                     temp_dir = tempfile.mkdtemp(prefix="scada_scout_scd_")
-                    extracted_path = ArchiveExtractor.extract_file(fname, selected_file, temp_dir)
-                    
-                    msg.close()
-                    
-                    if os.path.exists(extracted_path):
-                        self.scd_path = extracted_path
-                        self.lbl_file.setText(f"{os.path.basename(fname)} → {os.path.basename(extracted_path)}")
-                        logger.info(f"Extracted {selected_file} from {fname} to {extracted_path}")
-                        self._parse_and_list_with_progress(extracted_path)
-                    else:
-                        QMessageBox.warning(self, "Extraction Failed",
-                                          f"Failed to extract {selected_file} from archive.")
+                    self.extract_worker = ExtractWorker(fname, selected_file, temp_dir)
+
+                    progress = QProgressDialog(f"Extracting {os.path.basename(selected_file)}...", "Cancel", 0, 100, self)
+                    progress.setWindowTitle("Extracting")
+                    progress.setWindowModality(Qt.WindowModal)
+                    progress.setMinimumDuration(0)
+                    progress.setValue(0)
+
+                    def on_progress(msg_text, val):
+                        try:
+                            progress.setLabelText(msg_text)
+                            progress.setValue(max(0, min(100, val)))
+                            QApplication.processEvents()
+                        except Exception:
+                            pass
+
+                    def on_finished(extracted_path, error_msg):
+                        progress.close()
+                        if error_msg:
+                            if error_msg == 'cancelled':
+                                QMessageBox.information(self, "Cancelled", "Extraction cancelled by user.")
+                                return
+                            logger.error(f"Extraction error: {error_msg}")
+                            QMessageBox.critical(self, "Extraction Error", f"Failed to extract file:\n{error_msg}")
+                            return
+
+                        if os.path.exists(extracted_path):
+                            self.scd_path = extracted_path
+                            self.lbl_file.setText(f"{os.path.basename(fname)} → {os.path.basename(extracted_path)}")
+                            logger.info(f"Extracted {selected_file} from {fname} to {extracted_path}")
+                            self._parse_and_list_with_progress(extracted_path)
+                        else:
+                            QMessageBox.warning(self, "Extraction Failed", f"Failed to extract {selected_file} from archive.")
+
+                    self.extract_worker.progress.connect(on_progress)
+                    self.extract_worker.finished.connect(on_finished)
+
+                    def on_cancel():
+                        try:
+                            self.extract_worker.cancel()
+                        except Exception:
+                            pass
+
+                    progress.canceled.connect(on_cancel)
+                    self.extract_worker.start()
                         
                 except Exception as e:
                     logger.error(f"Failed to extract archive {fname}: {e}")
