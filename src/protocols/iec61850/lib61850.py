@@ -6643,7 +6643,7 @@ if _libs["iec61850"].has("ModelNode_getChildren", "cdecl"):
 # /usr/local/include/libiec61850/iec61850_model.h: 465
 if _libs["iec61850"].has("IedModel_setIedName", "cdecl"):
     IedModel_setIedName = _libs["iec61850"].get("IedModel_setIedName", "cdecl")
-    IedModel_setIedName.argtypes = [POINTER(IedModel), String]
+    IedModel_setIedName.argtypes = [POINTER(IedModel), c_char_p]
     IedModel_setIedName.restype = None
 
 # /usr/local/include/libiec61850/iec61850_model.h: 479
@@ -7036,13 +7036,13 @@ if _libs["iec61850"].has("CDC_TMS_create", "cdecl"):
 # /usr/local/include/libiec61850/iec61850_dynamic_model.h: 55
 if _libs["iec61850"].has("IedModel_create", "cdecl"):
     IedModel_create = _libs["iec61850"].get("IedModel_create", "cdecl")
-    IedModel_create.argtypes = [String]
+    IedModel_create.argtypes = [c_char_p]
     IedModel_create.restype = POINTER(IedModel)
 
 # /usr/local/include/libiec61850/iec61850_dynamic_model.h: 70
 if _libs["iec61850"].has("IedModel_setIedNameForDynamicModel", "cdecl"):
     IedModel_setIedNameForDynamicModel = _libs["iec61850"].get("IedModel_setIedNameForDynamicModel", "cdecl")
-    IedModel_setIedNameForDynamicModel.argtypes = [POINTER(IedModel), String]
+    IedModel_setIedNameForDynamicModel.argtypes = [POINTER(IedModel), c_char_p]
     IedModel_setIedNameForDynamicModel.restype = None
 
 # /usr/local/include/libiec61850/iec61850_dynamic_model.h: 82
@@ -7054,25 +7054,25 @@ if _libs["iec61850"].has("IedModel_destroy", "cdecl"):
 # /usr/local/include/libiec61850/iec61850_dynamic_model.h: 92
 if _libs["iec61850"].has("LogicalDevice_create", "cdecl"):
     LogicalDevice_create = _libs["iec61850"].get("LogicalDevice_create", "cdecl")
-    LogicalDevice_create.argtypes = [String, POINTER(IedModel)]
+    LogicalDevice_create.argtypes = [c_char_p, POINTER(IedModel)]
     LogicalDevice_create.restype = POINTER(LogicalDevice)
 
 # /usr/local/include/libiec61850/iec61850_dynamic_model.h: 104
 if _libs["iec61850"].has("LogicalNode_create", "cdecl"):
     LogicalNode_create = _libs["iec61850"].get("LogicalNode_create", "cdecl")
-    LogicalNode_create.argtypes = [String, POINTER(LogicalDevice)]
+    LogicalNode_create.argtypes = [c_char_p, POINTER(LogicalDevice)]
     LogicalNode_create.restype = POINTER(LogicalNode)
 
 # /usr/local/include/libiec61850/iec61850_dynamic_model.h: 118
 if _libs["iec61850"].has("DataObject_create", "cdecl"):
     DataObject_create = _libs["iec61850"].get("DataObject_create", "cdecl")
-    DataObject_create.argtypes = [String, POINTER(ModelNode), c_int]
+    DataObject_create.argtypes = [c_char_p, POINTER(ModelNode), c_int]
     DataObject_create.restype = POINTER(DataObject)
 
 # /usr/local/include/libiec61850/iec61850_dynamic_model.h: 136
 if _libs["iec61850"].has("DataAttribute_create", "cdecl"):
     DataAttribute_create = _libs["iec61850"].get("DataAttribute_create", "cdecl")
-    DataAttribute_create.argtypes = [String, POINTER(ModelNode), DataAttributeType, FunctionalConstraint, uint8_t, c_int, uint32_t]
+    DataAttribute_create.argtypes = [c_char_p, POINTER(ModelNode), DataAttributeType, FunctionalConstraint, uint8_t, c_int, uint32_t]
     DataAttribute_create.restype = POINTER(DataAttribute)
 
 # /usr/local/include/libiec61850/iec61850_dynamic_model.h: 148
@@ -7637,7 +7637,7 @@ if _libs["iec61850"].has("IedServer_setLocalIpAddress", "cdecl"):
 # /usr/local/include/libiec61850/iec61850_server.h: 511
 if _libs["iec61850"].has("IedServer_setServerIdentity", "cdecl"):
     IedServer_setServerIdentity = _libs["iec61850"].get("IedServer_setServerIdentity", "cdecl")
-    IedServer_setServerIdentity.argtypes = [IedServer, String, String, String]
+    IedServer_setServerIdentity.argtypes = [IedServer, c_char_p, c_char_p, c_char_p]
     IedServer_setServerIdentity.restype = None
 
 # /usr/local/include/libiec61850/iec61850_server.h: 524

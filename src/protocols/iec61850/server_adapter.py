@@ -146,11 +146,16 @@ class IEC61850ServerAdapter(BaseProtocol):
 
             try:
                 # Set server identity
+                # Store as instance variables to avoid GC issues with C pointers
+                self._ied_name_bytes = self.ied_name.encode("utf-8")
+                self._vendor_bytes = b"SCADA Scout"
+                self._model_bytes = b"IEC61850 Simulator"
+                
                 lib.IedServer_setServerIdentity(
                     self.server,
-                    self.ied_name.encode("utf-8"),
-                    b"SCADA Scout",
-                    b"IEC61850 Simulator"
+                    self._ied_name_bytes,
+                    self._vendor_bytes,
+                    self._model_bytes
                 )
                 logger.info(f"Set server identity: {self.ied_name}")
             except Exception as e:
@@ -609,15 +614,20 @@ class IEC61850ServerAdapter(BaseProtocol):
             if not root or root.name in ("IED_Not_Found", "Error_No_SCD"):
                 return None
 
-            # Always use the IED name from config for the model, not just the SCD root
-            ied_name = self.ied_name or root.name
-            model = lib.IedModel_create(ied_name.encode("utf-8"))
+            # Authority: use root.name if available from SCD, as it's the official IED name
+            # ied_name from config is often a user-friendly label or IP based.
+            ied_name = root.name if root and root.name not in ("IED_Not_Found", "Error_No_SCD") else (self.ied_name or "TEMPLATE")
+            
+            # Store the encoded model IED name separately to ensure it stays in memory
+            self._model_ied_name_bytes = ied_name.encode("utf-8")
+            
+            model = lib.IedModel_create(self._model_ied_name_bytes)
             if not model:
                 logger.warning("IedModel_create returned NULL")
                 return None
 
             try:
-                lib.IedModel_setIedName(model, ied_name.encode("utf-8"))
+                lib.IedModel_setIedName(model, self._model_ied_name_bytes)
             except Exception:
                 pass
 
