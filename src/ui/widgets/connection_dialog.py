@@ -338,6 +338,10 @@ class ConnectionDialog(QDialog):
                     self.extract_worker.finished.connect(on_finished)
                     progress.canceled.connect(lambda: self.extract_worker.cancel())
                     self.extract_worker.start()
+                except Exception as e:
+                    logger.exception("Error extracting archive")
+                    QMessageBox.critical(self, "Extraction Error", f"Failed to extract archive:\n{e}")
+                    return
             else:
                 # Direct SCD file
                 self.scd_input.setText(fname)
