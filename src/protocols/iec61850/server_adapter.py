@@ -95,10 +95,7 @@ class IEC61850ServerAdapter(BaseProtocol):
                             "   • May work with some libiec61850 builds\n"
                             "   • Set IEC61850_USE_DYNAMIC_BUILDER=false to disable"
                         )
-                    
-                    # Try dynamic model builder from SCD parser (increased limit)
-                    self.model = self._create_model_from_scd_parser(max_attributes=10000)
-                    
+                    self.model = self._create_model_from_scd_parser()
                     if self.model:
                         logger.info("Successfully created dynamic model from SCD parser")
                         if self.event_logger:
@@ -601,8 +598,8 @@ class IEC61850ServerAdapter(BaseProtocol):
             logger.error(f"Minimal model creation failed: {e}")
             return None
 
-    def _create_model_from_scd_parser(self, max_attributes: int = 1000) -> Optional[int]:
-        """Build a dynamic model from parsed SCD/ICD data (best-effort with safety limits)."""
+    def _create_model_from_scd_parser(self) -> Optional[int]:
+        """Build a dynamic model from parsed SCD/ICD data (no artificial attribute safety limits)."""
         try:
             if not self.config.scd_file_path:
                 return None
@@ -612,13 +609,15 @@ class IEC61850ServerAdapter(BaseProtocol):
             if not root or root.name in ("IED_Not_Found", "Error_No_SCD"):
                 return None
 
-            model = lib.IedModel_create(root.name.encode("utf-8"))
+            # Always use the IED name from config for the model, not just the SCD root
+            ied_name = self.ied_name or root.name
+            model = lib.IedModel_create(ied_name.encode("utf-8"))
             if not model:
                 logger.warning("IedModel_create returned NULL")
                 return None
 
             try:
-                lib.IedModel_setIedName(model, root.name.encode("utf-8"))
+                lib.IedModel_setIedName(model, ied_name.encode("utf-8"))
             except Exception:
                 pass
 
@@ -653,7 +652,7 @@ class IEC61850ServerAdapter(BaseProtocol):
             skipped_no_dot = 0
             skipped_no_lnode = 0
             skipped_short_path = 0
-            
+
             # Build DataObjects/DataAttributes from signals (recursively)
             for signal in self._iter_signals(root):
                 if not signal.address or "/" not in signal.address:
@@ -673,7 +672,7 @@ class IEC61850ServerAdapter(BaseProtocol):
                         logger.debug(f"LN not found: ({addr_ld_norm}, {ln_name}) from {signal.address}")
                     skipped_no_lnode += 1
                     continue
-                
+
                 processed += 1
 
                 parts = path.split(".")
@@ -718,10 +717,7 @@ class IEC61850ServerAdapter(BaseProtocol):
                     )
                     if da:
                         created_attrs += 1
-                        # Safety limit: stop if we've created too many attributes
-                        if created_attrs >= max_attributes:
-                            logger.warning(f"Reached safety limit of {max_attributes} attributes, stopping")
-                            break
+                        # No safety limit: allow full attribute creation
                 except Exception as e:
                     logger.debug(f"Failed to create DA {da_name} in {addr_ld_norm}/{ln_name}: {e}")
 
