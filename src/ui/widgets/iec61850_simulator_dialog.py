@@ -1,7 +1,7 @@
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QPushButton, QHBoxLayout, QFileDialog, QTableWidget,
     QTableWidgetItem, QHeaderView, QDialogButtonBox, QLabel, QMessageBox,
-    QLineEdit, QComboBox, QSpinBox
+    QLineEdit, QComboBox, QSpinBox, QListWidget
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QGuiApplication
@@ -74,43 +74,47 @@ class IEC61850SimulatorDialog(QDialog):
         self.parsed_ieds = []
 
     def _browse_file(self):
-        filter_str = ("All Supported Files (*.scd *.cid *.icd *.xml *.zip *.rar *.sz *.7z *.tar *.tar.gz *.tgz);;"
-                     "SCL Files (*.scd *.cid *.icd *.xml);;"
+        filter_str = ("All Supported Files (*.scd *.cid *.icd *.iid *.xml *.zip *.rar *.sz *.7z *.tar *.tar.gz *.tgz);;"
+                     "SCL Files (*.scd *.cid *.icd *.iid *.xml);;"
                      "Compressed Archives (*.zip *.rar *.sz *.7z *.tar *.tar.gz *.tgz);;"
                      "All Files (*.*)")
         fname, _ = QFileDialog.getOpenFileName(self, "Open SCL File or Archive", "", filter_str)
         if fname:
             if ArchiveExtractor.is_archive(fname):
                 try:
+                    # List files in archive
+                    files_in_archive = ArchiveExtractor.list_files(fname)
+                    
+                    # Find all IEC 61850 compatible files
+                    scd_files = [f for f in files_in_archive 
+                                if f.lower().endswith(('.scd', '.cid', '.icd', '.iid', '.xml'))]
+                    
+                    # If no files with proper extensions, include all files
+                    if not scd_files and files_in_archive:
+                        scd_files = files_in_archive
+                    
+                    if not scd_files:
+                        QMessageBox.warning(self, "No SCD File",
+                                          "No .scd, .cid, .icd, .iid, or .xml file found in the archive.")
+                        return
+                    
+                    # If multiple files, let user select
+                    selected_file = None
+                    if len(scd_files) > 1:
+                        selected_file = self._show_file_selection_dialog(scd_files, fname)
+                        if not selected_file:
+                            return  # User cancelled
+                    else:
+                        selected_file = scd_files[0]
+                    
+                    # Show extraction progress
                     msg = QMessageBox(self)
                     msg.setIcon(QMessageBox.Information)
-                    msg.setText("Extracting archive, please wait...")
+                    msg.setText(f"Extracting {os.path.basename(selected_file)}...")
                     msg.setWindowTitle("Extracting")
                     msg.setStandardButtons(QMessageBox.NoButton)
                     msg.show()
                     QGuiApplication.processEvents()
-                    
-                    files_in_archive = ArchiveExtractor.list_files(fname)
-                    scd_files = [f for f in files_in_archive 
-                                if f.lower().endswith(('.scd', '.cid', '.icd', '.xml'))]
-                    
-                    if not scd_files:
-                        msg.close()
-                        QMessageBox.warning(self, "No SCD File",
-                                          "No .scd, .cid, .icd, or .xml file found in the archive.")
-                        return
-                    
-                    selected_file = None
-                    for ext in ['.scd', '.cid', '.icd', '.xml']:
-                        for f in scd_files:
-                            if f.lower().endswith(ext):
-                                selected_file = f
-                                break
-                        if selected_file:
-                            break
-                    
-                    if not selected_file:
-                        selected_file = scd_files[0]
                     
                     temp_dir = tempfile.mkdtemp(prefix="scada_scout_scd_")
                     extracted_path = ArchiveExtractor.extract_file(fname, selected_file, temp_dir)
@@ -134,6 +138,64 @@ class IEC61850SimulatorDialog(QDialog):
                 self.scd_path = fname
                 self.lbl_file.setText(fname)
                 self._parse_and_list_with_progress(fname)
+    
+    def _show_file_selection_dialog(self, files: List[str], archive_name: str) -> str:
+        """Show dialog to select which file to extract from archive."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Select File to Import")
+        dialog.resize(500, 400)
+        
+        layout = QVBoxLayout(dialog)
+        
+        # Info label
+        info_label = QLabel(f"Archive '{os.path.basename(archive_name)}' contains multiple files.\\nSelect which file to import:")
+        layout.addWidget(info_label)
+        
+        # List widget with files
+        file_list = QListWidget()
+        
+        # Sort files: prefer .scd, then .cid, then .icd, then .iid, then .xml, then others
+        def file_sort_key(filename):
+            lower = filename.lower()
+            if lower.endswith('.scd'):
+                return (0, filename)
+            elif lower.endswith('.cid'):
+                return (1, filename)
+            elif lower.endswith('.icd'):
+                return (2, filename)
+            elif lower.endswith('.iid'):
+                return (3, filename)
+            elif lower.endswith('.xml'):
+                return (4, filename)
+            else:
+                return (5, filename)
+        
+        sorted_files = sorted(files, key=file_sort_key)
+        
+        for f in sorted_files:
+            file_list.addItem(f)
+        
+        # Select first item by default
+        if file_list.count() > 0:
+            file_list.setCurrentRow(0)
+        
+        # Double-click to select
+        file_list.itemDoubleClicked.connect(dialog.accept)
+        
+        layout.addWidget(file_list)
+        
+        # Buttons
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        
+        if dialog.exec() == QDialog.Accepted:
+            current_item = file_list.currentItem()
+            if current_item:
+                return current_item.text()
+        
+        return None
 
     def _parse_and_list_with_progress(self, path):
         from PySide6.QtWidgets import QProgressDialog, QApplication
