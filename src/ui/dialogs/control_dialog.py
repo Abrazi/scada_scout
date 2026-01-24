@@ -114,7 +114,7 @@ class ControlDialog(QDialog):
         # Determine Input Widget
         if "BOOL" in sig_type or "SPC" in self.signal.address or "ctlVal" in self.signal.name: 
             self.input_widget = QComboBox()
-            self.input_widget.addItems(["False (0) (Off)", "True (1) (On)"])
+            self.input_widget.addItems(["True (1) (On)", "False (0) (Off)"])
         elif "FLOAT" in sig_type:
             self.input_widget = QDoubleSpinBox()
             self.input_widget.setRange(-1e9, 1e9)

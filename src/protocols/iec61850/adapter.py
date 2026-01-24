@@ -1663,6 +1663,15 @@ class IEC61850Adapter(BaseProtocol):
                 return address[:-len(suffix)]
         return address
 
+    def _create_mms_value(self, value, signal):
+        """Create MmsValue with inverted ctlVal for this IED."""
+        if isinstance(value, bool):
+            return iec61850.MmsValue_newBoolean(not value)
+        elif isinstance(value, int):
+            return iec61850.MmsValue_newInt32(0 if value else 1)
+        else:
+            return None
+
     def _build_operate_struct(self, value, ctx: ControlObjectRuntime, is_select: bool = False):
         """Builds the complex Operate structure by modifying an existing template from the IED."""
         struct = None
@@ -1680,8 +1689,8 @@ class IEC61850Adapter(BaseProtocol):
              if not struct: return None
              
              # Overwrite ONLY critical components
-             # 0: ctlVal (BOOLEAN)
-             iec61850.MmsValue_setElement(struct, 0, iec61850.MmsValue_newBoolean(bool(value)))
+             # 0: ctlVal (BOOLEAN) - inverted for this IED
+             iec61850.MmsValue_setElement(struct, 0, iec61850.MmsValue_newBoolean(not bool(value)))
              
              size = iec61850.MmsValue_getArraySize(struct)
              # ctlNum index: SBOw=2, Oper=3
