@@ -40,19 +40,19 @@ def connect(host: str, port: int):
 
 
 def read_stval(conn, obj_ref):
-    # Try reading Oper.ctlVal as per user's successful read
+    # Try reading ctlVal as per user's successful read
     try:
-        val, err = iec61850.IedConnection_readBooleanValue(conn, f"{obj_ref}.Oper.ctlVal", iec61850.IEC61850_FC_CO)
+        val, err = iec61850.IedConnection_readBooleanValue(conn, f"{obj_ref}.ctlVal", iec61850.IEC61850_FC_CO)
         if err == iec61850.IED_ERROR_OK:
             return bool(val)
     except Exception:
         pass
 
-    val, err = iec61850.IedConnection_readInt32Value(conn, f"{obj_ref}.Oper.ctlVal", iec61850.IEC61850_FC_CO)
+    val, err = iec61850.IedConnection_readInt32Value(conn, f"{obj_ref}.ctlVal", iec61850.IEC61850_FC_CO)
     if err == iec61850.IED_ERROR_OK:
         return int(val)
     # If reading fails, assume False/0
-    print(f"Warning: Could not read {obj_ref}.Oper.ctlVal, assuming False")
+    print(f"Warning: Could not read {obj_ref}.ctlVal, assuming False")
     return False
 
 
@@ -98,6 +98,40 @@ def cli_main():
         cur = read_stval(conn, object_ref)
         log.info(f"Current stVal for {object_ref}: {cur!r}")
 
+        # Also try to read ctlVal
+        try:
+            ctl_val, err = iec61850.IedConnection_readBooleanValue(conn, f"{object_ref}.ctlVal", iec61850.IEC61850_FC_CO)
+            if err == iec61850.IED_ERROR_OK:
+                log.info(f"Current ctlVal (bool): {bool(ctl_val)}")
+            else:
+                ctl_val, err = iec61850.IedConnection_readInt32Value(conn, f"{object_ref}.ctlVal", iec61850.IEC61850_FC_CO)
+                if err == iec61850.IED_ERROR_OK:
+                    log.info(f"Current ctlVal (int): {int(ctl_val)}")
+                else:
+                    log.info("Could not read ctlVal")
+        except Exception as e:
+            log.info(f"Error reading ctlVal: {e}")
+
+        # Try to read control block
+        try:
+            blk, err = iec61850.IedConnection_readBooleanValue(conn, f"{object_ref}.Oper.ctlBlk", iec61850.IEC61850_FC_CO)
+            if err == iec61850.IED_ERROR_OK:
+                log.info(f"Control blocked: {bool(blk)}")
+            else:
+                log.info("Could not read ctlBlk")
+        except Exception as e:
+            log.info(f"Error reading ctlBlk: {e}")
+
+        # Try to read ctlModel
+        try:
+            model, err = iec61850.IedConnection_readInt32Value(conn, f"{object_ref}.Oper.ctlModel", iec61850.IEC61850_FC_CO)
+            if err == iec61850.IED_ERROR_OK:
+                log.info(f"Control model from data: {int(model)}")
+            else:
+                log.info("Could not read ctlModel")
+        except Exception as e:
+            log.info(f"Error reading ctlModel: {e}")
+
         # Compute toggle
         if isinstance(cur, bool):
             target = (not cur)
@@ -123,13 +157,26 @@ def cli_main():
         # Select (SBO or SBOw)
         log.info("Performing SELECT phase (SBO)")
         success = False
-        # Always use select, not selectWithValue
-        success = iec61850.ControlObjectClient_select(control_client)
-
+        
+        # As per user: SELECT with the inverted target value
+        # To close (target True), select 0
+        ctl_select = 0 if target else 1
+        log.info(f"Doing selectWithValue with inverted target value (int): {ctl_select}")
+        mms_select = iec61850.MmsValue_newInt32(ctl_select)
+        try:
+            success = iec61850.ControlObjectClient_selectWithValue(control_client, mms_select)
+        finally:
+            iec61850.MmsValue_delete(mms_select)
+        
         if not success:
-            log.warning("SELECT (SBO) failed, trying direct operate")
+            log.warning("selectWithValue with current failed, trying plain select")
+            success = iec61850.ControlObjectClient_select(control_client)
+        
+        if not success:
+            log.warning("All SELECT attempts failed, trying direct operate")
             # Try direct operate without SELECT
-            mms = iec61850.MmsValue_newBoolean(target) if isinstance(target, bool) else iec61850.MmsValue_newInt32(int(target))
+            ctl_val_int = 0 if target else 1
+            mms = iec61850.MmsValue_newInt32(ctl_val_int)
             try:
                 success = iec61850.ControlObjectClient_operate(control_client, mms, 0)
             finally:
@@ -157,7 +204,7 @@ def cli_main():
                     log.error(f"Failed: stVal is {new_val}, expected {target}")
                 return
             else:
-                raise RuntimeError("Both SELECT and direct operate failed")
+                raise RuntimeError("All SELECT and direct operate failed")
         log.info("SELECT succeeded")
 
         # Give IED a moment to populate SBO ctlNum
@@ -182,10 +229,9 @@ def cli_main():
 
         # OPERATE
         log.info("Performing OPERATE (toggle)")
-        if isinstance(target, bool):
-            mms = iec61850.MmsValue_newBoolean(target)
-        else:
-            mms = iec61850.MmsValue_newInt32(int(target))
+        # Inverted ctlVal: to close (True), send 0; to open (False), send 1
+        ctl_val_int = 0 if target else 1
+        mms = iec61850.MmsValue_newInt32(ctl_val_int)
         try:
             ok = iec61850.ControlObjectClient_operate(control_client, mms, 0)
         finally:
