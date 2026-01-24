@@ -44,6 +44,51 @@ class ScriptContext:
             return False
         return self._dm.write_signal(device_name, sig, value)
 
+    def send_command(self, tag_address: str, value, params: dict = None) -> bool:
+        """
+        Send an IEC 61850 control command (supports SBO workflow automatically).
+        
+        For IEC 61850 controls with SBO (Select Before Operate), this automatically
+        handles the SELECT -> wait -> OPERATE sequence.
+        
+        Args:
+            tag_address: Unique tag address (Device::Address)
+            value: Control value (typically boolean for switch controls)
+            params: Optional parameters dict with keys like:
+                - sbo_timeout: Timeout in ms between SELECT and OPERATE (default 100)
+                - originator_cat: Originator category (default 3 = Remote)
+                - originator_id: Originator identifier string (default "SCADA")
+        
+        Returns:
+            bool: True if command succeeded, False otherwise
+            
+        Example:
+            # Control a circuit breaker with SBO
+            ctx.send_command('IED1::simpleIOGenericIO/CSWI1.Pos', True)
+            
+            # With custom parameters
+            ctx.send_command('IED1::simpleIOGenericIO/CSWI1.Pos', False, 
+                           params={'sbo_timeout': 200, 'originator_id': 'SCADA_MASTER'})
+        """
+        sig = self._dm.get_signal_by_unique_address(tag_address)
+        if not sig:
+            return False
+        device_name, _ = self._dm.parse_unique_address(tag_address)
+        if not device_name:
+            return False
+        
+        # Get the protocol adapter
+        adapter = self._dm.get_protocol(device_name)
+        if not adapter:
+            return False
+        
+        # Check if adapter supports send_command
+        if not hasattr(adapter, 'send_command'):
+            # Fallback to regular write
+            return self._dm.write_signal(device_name, sig, value)
+        
+        return adapter.send_command(sig, value, params)
+
     def list_tags(self, device_name: Optional[str] = None):
         """List unique tag addresses (optionally for a single device)."""
         return self._dm.list_unique_addresses(device_name=device_name)

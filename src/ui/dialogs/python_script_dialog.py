@@ -60,6 +60,8 @@ class PythonScriptDialog(QDialog):
             "# def tick(ctx):\n"
             "#     v = ctx.get('Device::SomeAddress')\n"
             "#     ctx.set('Device::OtherAddress', v)\n"
+            "#     # For IEC 61850 SBO controls:\n"
+            "#     ctx.send_command('IED::path/to/control', True)\n"
         )
         # Tooltip explaining completions and wildcard usage
         try:
@@ -87,6 +89,7 @@ class PythonScriptDialog(QDialog):
             #   - ctx.get(tag_address, default=None)
             #   - ctx.read(tag_address)  # force read (best-effort)
             #   - ctx.set(tag_address, value)  # write value to a tag
+            #   - ctx.send_command(tag_address, value, params=None)  # IEC 61850 SBO control
             #   - ctx.list_tags(device_name=None)
             #   - ctx.log(level, message)
             #
@@ -103,24 +106,42 @@ class PythonScriptDialog(QDialog):
             import math
 
             def tick(ctx):
-                # Read a value from another device (non-blocking best-effort)
+                # Example 1: Read and compute
                 src = 'IED1::LLN0$MMXU$Amp.instMag'    # replace with an actual tag
                 val = ctx.get(src, 0)
-
-                # Compute something simple
                 new_val = math.floor((val or 0) * 1.1)
 
-                # Write result to a target tag
+                # Example 2: Write to Modbus register
                 dst = 'Simulator::holding:40010'  # replace with your target tag
                 ok = ctx.set(dst, new_val)
 
-                # Optionally force a read and log result
+                # Example 3: IEC 61850 SBO Control (Select Before Operate)
+                # Control a circuit breaker or switch - automatically handles SBO workflow
+                # Replace with your actual IED name and control point address
+                # control_tag = 'IED1::simpleIOGenericIO/CSWI1.Pos'
+                # success = ctx.send_command(control_tag, True)  # Close breaker
+                # if success:
+                #     ctx.log('info', f'Successfully operated {control_tag}')
+                # else:
+                #     ctx.log('error', f'Failed to operate {control_tag}')
+
+                # Example 4: IEC 61850 control with custom parameters
+                # params = {
+                #     'sbo_timeout': 150,  # Wait 150ms between SELECT and OPERATE
+                #     'originator_id': 'SCADA_AUTO'  # Custom originator
+                # }
+                # ctx.send_command(control_tag, False, params=params)  # Open breaker
+
+                # Log result
                 forced = ctx.read(src)
                 ctx.log('info', f'Computed {new_val} from {src} (forced={forced})')
 
             # For one-off scripts you can also define `main(ctx)` and run once.
             # def main(ctx):
-            #     print('This runs a single time')
+            #     # Example: Operate a simulated IED control point once
+            #     ied_control = 'SimulatedIED::CTRL/CSWI1.Pos'
+            #     ctx.send_command(ied_control, True)
+            #     ctx.log('info', 'One-time control command sent')
             """
         ).strip()
         # Only set example text if editor is empty

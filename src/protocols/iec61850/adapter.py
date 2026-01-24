@@ -1418,12 +1418,13 @@ class IEC61850Adapter(BaseProtocol):
                 sbo_available = False
                 try:
                     # Try to read the SBO reference to see if it exists
-                    test_val, test_err = iec61850.IedConnection_readBooleanValue(
+                    # Note: SBO/SBOw are structures, so we read the object, not just a boolean
+                    test_val = iec61850.IedConnection_readObject(
                         self.connection, ctx.sbo_reference, iec61850.IEC61850_FC_CO
                     )
-                    if test_err == iec61850.IED_ERROR_OK:
+                    if test_val:
                         sbo_available = True
-                        iec61850.MmsValue_delete(test_val) if test_val else None
+                        iec61850.MmsValue_delete(test_val)
                 except:
                     pass
                 
@@ -1861,8 +1862,10 @@ class IEC61850Adapter(BaseProtocol):
     def _get_control_object_reference(self, address: str) -> str:
         """Extract the Control Object Reference (DO path)."""
         if not address: return None
-        suffixes = [".Oper.ctlVal", ".Oper", ".SBO.ctlVal", ".SBO", ".SBOw.ctlVal", ".SBOw", 
-                    ".Cancel.ctlVal", ".Cancel", ".ctlVal", ".stVal", ".q", ".t"]
+        # Order matters: try longer suffixes first to avoid partial matches
+        suffixes = [".Oper.ctlVal", ".SBO.ctlVal", ".SBOw.ctlVal", ".Cancel.ctlVal",
+                    ".Oper", ".SBO", ".SBOw", ".Cancel", 
+                    ".ctlVal", ".stVal", ".q", ".t"]
         for suffix in suffixes:
             if address.endswith(suffix):
                 return address[:-len(suffix)]
@@ -1973,20 +1976,28 @@ class IEC61850Adapter(BaseProtocol):
 
     def _fallback_select(self, signal: Signal, value: Any, object_ref: str) -> bool:
         """
-        Fallback method: Simple write to .SBO or .SBOw attribute.
+        Fallback method: Write to .SBO or .SBOw attribute with proper structure.
         Used when ControlObjectClient_create fails (e.g., IED timeout, incompatibility).
         """
         if self.event_logger:
             self.event_logger.info("IEC61850", "Using FALLBACK method: Direct write to SBO attribute")
         
         try:
+            # Get control context for ctlNum and originator info
+            ctx = self.controls.get(object_ref)
+            
             # Try SBOw first (enhanced), then SBO (normal)
             for sbo_attr in [f"{object_ref}.SBOw", f"{object_ref}.SBO"]:
                 if self.event_logger:
                     self.event_logger.debug("IEC61850", f"Trying write to {sbo_attr}")
                 
-                # Create simple MmsValue (just the control value, not full structure)
-                mms_val = self._create_mms_value(value, signal) if value is not None else iec61850.MmsValue_newBoolean(True)
+                # For SBO, we need to write a structure, not just a simple value
+                # Try with full 7-element structure first (like Operate)
+                if ctx:
+                    mms_val = self._build_operate_struct(value, ctx, is_select=True)
+                else:
+                    # If no context, create a simple boolean value
+                    mms_val = self._create_mms_value(value, signal) if value is not None else iec61850.MmsValue_newBoolean(True)
                 
                 if not mms_val:
                     continue
@@ -1999,6 +2010,11 @@ class IEC61850Adapter(BaseProtocol):
                         if self.event_logger:
                             self.event_logger.transaction("IEC61850", "← FALLBACK SELECT SUCCESS")
                             self.event_logger.info("IEC61850", f"Fallback SELECT succeeded with {sbo_attr}")
+                        
+                        # Update context if it exists
+                        if ctx:
+                            ctx.state = ControlState.SELECTED
+                            ctx.last_select_time = datetime.now()
                         return True
                 except Exception as e:
                     if self.event_logger:
@@ -2017,43 +2033,66 @@ class IEC61850Adapter(BaseProtocol):
 
     def _fallback_operate(self, signal: Signal, value: Any, object_ref: str) -> bool:
         """
-        Fallback method: Simple write to .Oper.ctlVal attribute.
+        Fallback method: Write to .Oper attribute with proper structure.
         Used when ControlObjectClient_create fails (e.g., IED timeout, incompatibility).
         """
         if self.event_logger:
-            self.event_logger.info("IEC61850", "Using FALLBACK method: Direct write to Oper.ctlVal")
+            self.event_logger.info("IEC61850", "Using FALLBACK method: Direct write to Oper attribute")
         
         try:
-            # Try direct write to .Oper.ctlVal
-            oper_attr = f"{object_ref}.Oper.ctlVal"
+            # Get control context for ctlNum and originator info
+            ctx = self.controls.get(object_ref)
+            
+            # Try direct write to .Oper or .Oper.ctlVal
+            for oper_attr in [f"{object_ref}.Oper", f"{object_ref}.Oper.ctlVal"]:
+                if self.event_logger:
+                    self.event_logger.debug("IEC61850", f"Writing to {oper_attr}")
+                
+                # For .Oper, use full structure; for .Oper.ctlVal, use simple value
+                if oper_attr.endswith(".Oper"):
+                    if ctx:
+                        mms_val = self._build_operate_struct(value, ctx, is_select=False)
+                    else:
+                        # No context - skip structure writes
+                        continue
+                else:
+                    # .Oper.ctlVal - write simple value
+                    mms_val = self._create_mms_value(value, signal)
+                
+                if not mms_val:
+                    if self.event_logger:
+                        self.event_logger.debug("IEC61850", f"Could not create MmsValue for {oper_attr}")
+                    continue
+                
+                try:
+                    err = iec61850.IedConnection_writeObject(self.connection, oper_attr, iec61850.IEC61850_FC_CO, mms_val)
+                    iec61850.MmsValue_delete(mms_val)
+                    
+                    if err == iec61850.IED_ERROR_OK:
+                        if self.event_logger:
+                            self.event_logger.transaction("IEC61850", "← FALLBACK OPERATE SUCCESS")
+                            self.event_logger.info("IEC61850", f"Fallback OPERATE succeeded with {oper_attr}")
+                        
+                        # Update context if it exists
+                        if ctx:
+                            ctx.state = ControlState.OPERATED
+                            ctx.last_operate_time = datetime.now()
+                            ctx.ctl_num += 1  # Increment for next operation
+                        return True
+                    else:
+                        if self.event_logger:
+                            self.event_logger.debug("IEC61850", f"Write to {oper_attr} returned error {err}")
+                        # Try next method
+                        continue
+                        
+                except Exception as e:
+                    if self.event_logger:
+                        self.event_logger.debug("IEC61850", f"Write to {oper_attr} failed: {e}")
+                    continue
             
             if self.event_logger:
-                self.event_logger.debug("IEC61850", f"Writing to {oper_attr}")
-            
-            mms_val = self._create_mms_value(value, signal)
-            if not mms_val:
-                if self.event_logger:
-                    self.event_logger.error("IEC61850", "Could not create MmsValue for fallback operate")
-                return False
-            
-            try:
-                err = iec61850.IedConnection_writeObject(self.connection, oper_attr, iec61850.IEC61850_FC_CO, mms_val)
-                iec61850.MmsValue_delete(mms_val)
-                
-                if err == iec61850.IED_ERROR_OK:
-                    if self.event_logger:
-                        self.event_logger.transaction("IEC61850", "← FALLBACK OPERATE SUCCESS")
-                        self.event_logger.info("IEC61850", f"Fallback OPERATE succeeded with {oper_attr}")
-                    return True
-                else:
-                    if self.event_logger:
-                        self.event_logger.error("IEC61850", f"← FALLBACK OPERATE FAILED: IED error {err}")
-                    return False
-                    
-            except Exception as e:
-                if self.event_logger:
-                    self.event_logger.error("IEC61850", f"Write to {oper_attr} failed: {e}")
-                return False
+                self.event_logger.error("IEC61850", "← FALLBACK OPERATE FAILED: All methods exhausted")
+            return False
             
         except Exception as e:
             logger.error(f"Fallback operate failed: {e}")
