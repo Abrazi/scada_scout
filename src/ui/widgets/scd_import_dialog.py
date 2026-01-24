@@ -58,6 +58,17 @@ class SCDImportDialog(QDialog):
         sel_layout.addWidget(btn_sel_all)
         sel_layout.addWidget(btn_desel_all)
         sel_layout.addWidget(btn_check_ips)
+
+        # Defer expansion toggle (default: defer for fastest import)
+        from PySide6.QtWidgets import QCheckBox, QLabel
+        self.chk_defer_expansion = QCheckBox("Defer full structure expansion (faster import)")
+        self.chk_defer_expansion.setChecked(True)
+        self.chk_defer_expansion.setToolTip(
+            "When checked the UI import will return quickly and the full IEC61850\n"
+            "model will be expanded in the background. Uncheck to expand the full\n"
+            "device structure immediately during import."
+        )
+        sel_layout.addWidget(self.chk_defer_expansion)
         sel_layout.addStretch()
         self.layout.addLayout(sel_layout)
         
@@ -418,6 +429,12 @@ class SCDImportDialog(QDialog):
                         if isinstance(data, dict):
                             ip = data.get('ip', '127.0.0.1')
                             ip_info = data
+
+    def get_user_options(self) -> dict:
+        """Return dialog-level user options (e.g. defer/expand choice)."""
+        return {
+            'defer_full_expansion': bool(getattr(self, 'chk_defer_expansion', None) and self.chk_defer_expansion.isChecked())
+        }
                 else:
                     ip_item = self.table.item(row, 1)
                     ip = ip_item.text() if ip_item else "127.0.0.1"

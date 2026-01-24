@@ -30,6 +30,8 @@ class DeviceManagerCore(EventEmitter):
         self._script_manager = None
         self._script_tag_manager = ScriptTagManager(self)
         self._saved_scripts = {}
+        # Executor for background SCD parsing (lazy-created)
+        self._scd_executor = None
         # Load persisted user scripts and update token internals
         try:
             self._load_user_scripts()
@@ -39,8 +41,12 @@ class DeviceManagerCore(EventEmitter):
         # Authoritative Subscription Manager
         self.subscription_manager = IECSubscriptionManager()
 
-    def add_device(self, config: DeviceConfig, save: bool = True):
-        """Creates a new device from config and registers it."""
+    def add_device(self, config: DeviceConfig, save: bool = True, run_offline_discovery: bool = True):
+        """Creates a new device from config and registers it.
+
+        If `run_offline_discovery` is False, the method will NOT trigger
+        immediate SCD-based offline discovery (useful for fast/bulk import).
+        """
         if config.name in self._devices:
             logger.warning(f"Device '{config.name}' already exists.")
             return None
@@ -60,8 +66,13 @@ class DeviceManagerCore(EventEmitter):
         if save:
             self.save_configuration()
         
-        # Try to populate tree immediately (Offline Discovery)
-        self.load_offline_scd(config.name)
+        # Populate tree depending on caller preference
+        if run_offline_discovery:
+            # Try to populate tree immediately (Offline Discovery)
+            self.load_offline_scd(config.name)
+        else:
+            # Defer offline discovery — caller or background worker will handle it
+            logger.debug(f"Deferred offline SCD discovery for {config.name}")
         
         return device
 
@@ -272,7 +283,12 @@ class DeviceManagerCore(EventEmitter):
         return self._protocols.get(device_name)
 
     def load_offline_scd(self, device_name: str):
-        """Triggers offline discovery from SCD file without connecting."""
+        """Triggers offline discovery from SCD file without connecting.
+
+        Non-blocking behaviour: if the SCD file is not already cached, schedule
+        a background parse and return quickly. When parsing completes the
+        device tree will be populated and `device_updated` emitted.
+        """
         device = self._devices.get(device_name)
         if not device:
             return
@@ -285,6 +301,7 @@ class DeviceManagerCore(EventEmitter):
         if not device.config.scd_file_path and not (is_modbus and has_maps):
             return
 
+        # Ensure protocol exists for callbacks (non-blocking)
         if device_name not in self._protocols:
              protocol = self._create_protocol(device.config)
              if protocol:
@@ -292,18 +309,116 @@ class DeviceManagerCore(EventEmitter):
                  self._protocols[device_name] = protocol
         
         protocol = self._protocols.get(device_name)
-        if protocol and hasattr(protocol, 'discover'):
+        if not (protocol and hasattr(protocol, 'discover')):
+            return
+
+        scd_path = device.config.scd_file_path
+
+        # If parse already cached, do synchronous fast-path (cache hit => fast)
+        from src.core.scd_parser import SCDParser
+        cached = SCDParser._cache.get(scd_path)
+        if cached:
             try:
                 root = protocol.discover()
                 device.root_node = root
                 self._assign_unique_addresses(device_name, device.root_node)
                 self.emit("device_updated", device_name)
-                logger.info(f"Offline SCD loaded for {device_name}")
+                logger.info(f"Offline SCD loaded for {device_name} (cache hit)")
             except Exception as e:
                 logger.error(f"Failed to load offline SCD for {device_name}: {e}")
+            return
+
+        # Cache miss: schedule background parse and return immediately
+        logger.info(f"Scheduling background parse for SCD: {scd_path}")
+        try:
+            self._schedule_scd_parse(device_name, scd_path)
+        except Exception as e:
+            logger.exception(f"Failed to schedule background SCD parse: {e}")
+        # UI will be updated when parse completes
+        return
 
     def get_all_devices(self) -> List[Device]:
         return list(self._devices.values())
+
+    # --- Background SCD parsing helpers ---------------------------------
+    def _get_scd_executor(self):
+        """Lazily create a ThreadPoolExecutor for background SCD parsing."""
+        if getattr(self, '_scd_executor', None) is None:
+            from concurrent.futures import ThreadPoolExecutor
+            # Keep a small pool to avoid oversubscription
+            self._scd_executor = ThreadPoolExecutor(max_workers=2)
+        return self._scd_executor
+
+    def _schedule_scd_parse(self, device_name: str, scd_path: str):
+        """Schedule parsing of an SCD file off the main thread and update device when done.
+
+        This is best-effort and non-blocking. The cache will be populated with a
+        lightweight 4-tuple; templates remain deferred until requested.
+        """
+        if not scd_path or not os.path.exists(scd_path):
+            logger.warning(f"SCD path does not exist for device {device_name}: {scd_path}")
+            return
+
+        executor = self._get_scd_executor()
+        from src.core.workers import _parse_scd_file
+        # Notify listeners/UI that a background parse has been scheduled
+        try:
+            self.emit('scd_parse_scheduled', device_name, scd_path)
+        except Exception:
+            pass
+
+        def _on_done(fut):
+            try:
+                result = fut.result()
+            except Exception as e:
+                logger.exception(f"Background SCD parse failed for {scd_path}: {e}")
+                return
+
+            if not result:
+                logger.warning(f"Background SCD parse returned no result for {scd_path}")
+                return
+
+            mtime, tree, root, ns = result
+            # Store lightweight 4-tuple (templates deferred)
+            try:
+                from src.core.scd_parser import SCDParser
+                SCDParser._cache[scd_path] = (mtime, tree, root, ns)
+            except Exception:
+                logger.debug("Failed to write SCDParser cache (best-effort)")
+
+            # Populate device root_node using the protocol discover() fast-path
+            try:
+                device = self._devices.get(device_name)
+                if not device:
+                    return
+                # Reuse existing protocol adapter if present
+                proto = self._protocols.get(device_name)
+                if not proto:
+                    proto = self._create_protocol(device.config)
+                    if proto:
+                        proto.set_data_callback(lambda sig: self._on_signal_update(device_name, sig))
+                        self._protocols[device_name] = proto
+
+                # Call discover() now that cache exists; this should be fast
+                root_node = proto.discover()
+                device.root_node = root_node
+                self._assign_unique_addresses(device_name, device.root_node)
+                # Notify listeners/UI
+                try:
+                    self.emit("device_updated", device_name)
+                    logger.info(f"Background SCD parse complete for {device_name}")
+                    try:
+                        self.emit('scd_parse_completed', device_name)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+            except Exception:
+                logger.exception(f"Failed to populate device tree after background parse for {device_name}")
+
+        fut = executor.submit(_parse_scd_file, scd_path)
+        fut.add_done_callback(_on_done)
+        return fut
 
     def clear_all_devices(self):
         """Remove all devices and cleanup protocols and workers."""
@@ -330,6 +445,17 @@ class DeviceManagerCore(EventEmitter):
                     except Exception:
                         pass
                 self.protocol_workers.clear()
+        except Exception:
+            pass
+
+        # Shutdown SCD executor if present
+        try:
+            if getattr(self, '_scd_executor', None):
+                try:
+                    self._scd_executor.shutdown(wait=False)
+                except Exception:
+                    pass
+                self._scd_executor = None
         except Exception:
             pass
 

@@ -32,14 +32,35 @@ class SCDParser:
             mtime = os.path.getmtime(self.file_path)
             file_size = os.path.getsize(self.file_path)
             
-            # Check cache
+            # Check cache (backwards-compatible with older 4-tuple cache entries)
             if self.file_path in self._cache:
-                cached_mtime, tree, root, ns, templates = self._cache[self.file_path]
+                cached = self._cache[self.file_path]
+                # Support legacy cache entries (mtime, tree, root, ns)
+                if isinstance(cached, tuple) and len(cached) == 5:
+                    cached_mtime, tree, root, ns, templates = cached
+                elif isinstance(cached, tuple) and len(cached) == 4:
+                    cached_mtime, tree, root, ns = cached
+                    templates = None
+                else:
+                    cached_mtime = None
+
                 if cached_mtime == mtime:
                     self.tree = tree
                     self.root = root
                     self.ns = ns
-                    self._templates = templates
+                    if templates is None:
+                        # Build templates on-demand for legacy cache entries and normalize cache
+                        try:
+                            self._templates = self._parse_templates()
+                        except Exception:
+                            self._templates = {}
+                        # Update cache to canonical (5-tuple) to avoid future unpack issues
+                        try:
+                            self._cache[self.file_path] = (cached_mtime, self.tree, self.root, self.ns, self._templates)
+                        except Exception:
+                            pass
+                    else:
+                        self._templates = templates
                     # logger.debug(f"Using cached SCD parse for {self.file_path}")
                     return
 
@@ -59,14 +80,19 @@ class SCDParser:
             else:
                 self.ns = {}
                 
-            # Pre-parse templates for fast lookup
-            self._templates = self._parse_templates()
-            
-            # Update cache
-            self._cache[self.file_path] = (mtime, self.tree, self.root, self.ns, self._templates)
-            
+            # NOTE: Do NOT pre-parse DataTypeTemplates for very large files by default.
+            # Template expansion is expensive and is only required when the caller
+            # needs to expand LN/DO types. We compute templates lazily to keep
+            # SCDParser(...) fast for common operations (e.g. extracting IED/Comm info).
+            self._templates = {}  # populated on-demand by _ensure_templates()
+
+            # Update cache with a lightweight 4-tuple (templates omitted until needed)
+            # This keeps the memory footprint lower and speeds up parallel pre-parsing
+            # when templates are not requested.
+            self._cache[self.file_path] = (mtime, self.tree, self.root, self.ns)
+
             if file_size > 10 * 1024 * 1024:
-                logger.info(f"SCD parsing complete")
+                logger.info(f"SCD parsing complete (templates deferred)")
                 
         except Exception as e:
             logger.error(f"Failed to parse SCD file: {e}")
@@ -319,6 +345,31 @@ class SCDParser:
 
         return templates
 
+    def _ensure_templates(self):
+        """Compute DataTypeTemplates on-demand and update the in-memory cache.
+
+        This is intentionally idempotent and inexpensive if templates were
+        already computed.
+        """
+        if getattr(self, '_templates', None):
+            return
+        try:
+            self._templates = self._parse_templates()
+        except Exception:
+            self._templates = {}
+
+        # Normalize cache to include templates for faster subsequent access
+        try:
+            if self.file_path in self._cache:
+                cached = self._cache[self.file_path]
+                if isinstance(cached, tuple) and len(cached) == 4:
+                    mtime, tree, root, ns = cached
+                    self._cache[self.file_path] = (mtime, tree, root, ns, self._templates)
+        except Exception:
+            # Best-effort only
+            pass
+
+
     def _expand_ln_type_with_path(self, ln_node: Node, ln_type_id: str, path_prefix: str, ld_name: str = "", depth: int = 0):
         """
         Recursively expand an LN Type into DOs and DAs.
@@ -328,9 +379,11 @@ class SCDParser:
             logger.warning(f"SCD recursion depth reached at {path_prefix}")
             return
 
+        # Ensure templates are available only when expansion is requested
+        self._ensure_templates()
         lntype_def = self._templates.get(ln_type_id)
         if lntype_def is None or isinstance(lntype_def, dict):
-            # logger.warning(f"LNType {ln_type_id} not found in templates")
+            # logger.debug(f"LNType {ln_type_id} not found in templates")
             return
 
         # Iterate DOs in LNType

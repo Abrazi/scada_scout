@@ -4,7 +4,6 @@ from datetime import datetime
 import logging
 import time
 import threading
-import re
 
 from src.protocols.base_protocol import BaseProtocol
 from src.models.device_models import DeviceConfig, Node, Signal, SignalType, SignalQuality
@@ -25,30 +24,6 @@ class VendorProfile(Enum):
     SEL = "SEL"
     GE = "GE"
     NR_ELECTRIC = "NRElectric"
-
-# Map of IedClientError codes to descriptive strings
-IED_CLIENT_ERROR_MAP = {
-    0: "OK",
-    1: "Not connected",
-    2: "Already connected",
-    3: "Connection lost",
-    4: "Service not supported",
-    5: "Connection rejected",
-    6: "Outstanding call limit reached",
-    7: "Invalid argument",
-    10: "Object Reference invalid",
-    11: "Unexpected value received",
-    12: "Timeout",
-    13: "Access denied",
-    14: "Object undefined",
-    15: "Invalid address",
-    16: "Hardware fault",
-    17: "Type inconsistent",
-    18: "Temporarily unavailable",
-    19: "Object value invalid",
-    20: "Option not supported",
-    99: "Unknown error"
-}
 
 class IEC61850Adapter(BaseProtocol):
     """
@@ -119,65 +94,66 @@ class IEC61850Adapter(BaseProtocol):
             if self.event_logger:
                 self.event_logger.info("Connection", f"Step 3/4: Establishing IEC 61850 connection...")
             
-            with self._lock:
-                if self.connection:
-                    logger.info("Already connecting or connected.")
-                    return True
-
-                logger.info(f"Connecting to {self.config.ip_address} using libiec61850...")
-                self.connection = iec61850.IedConnection_create()
-                if not self.connection:
-                    logger.error("Failed to create IedConnection handle")
-                    return False
+            logger.info(f"Connecting to {self.config.ip_address} using libiec61850...")
+            self.connection = iec61850.IedConnection_create()
+            
+            if self.event_logger:
+                self.event_logger.transaction("IEC61850", f"→ IedConnection_connect({self.config.ip_address}, {self.config.port})")
+            
+            error = iec61850.IedConnection_connect(
+                self.connection,
+                self.config.ip_address,
+                self.config.port
+            )
+            
+            if error != 0:
+                # Map error codes to human-readable messages
+                error_messages = {
+                    1: "Not connected",
+                    2: "Already connected",
+                    3: "Connection lost",
+                    4: "Service not supported",
+                    5: "Connection rejected (no server responding on this port)",
+                    6: "Outstanding call limit reached",
+                    10: "Invalid argument provided",
+                    20: "Timeout",
+                    21: "Access denied",
+                    22: "Object does not exist",
+                }
+                
+                error_description = error_messages.get(error, f"Unknown error ({error})")
+                error_msg = f"Error code {error}: {error_description}"
                 
                 if self.event_logger:
-                    self.event_logger.transaction("IEC61850", f"→ IedConnection_connect({self.config.ip_address}, {self.config.port})")
-                
-                error = iec61850.IedConnection_connect(
-                    self.connection,
-                    self.config.ip_address,
-                    self.config.port
-                )
-                
-                if error != 0:
-                    # Map error codes to human-readable messages
-                    error_messages = {
-                        1: "Not connected",
-                        2: "Already connected",
-                        3: "Connection lost",
-                        4: "Service not supported",
-                        5: "Connection rejected (no server responding on this port)",
-                        6: "Outstanding call limit reached",
-                        10: "Invalid argument provided",
-                        20: "Timeout",
-                        21: "Access denied",
-                        22: "Object does not exist",
-                    }
-                    
-                    error_description = error_messages.get(error, f"Unknown error ({error})")
-                    error_msg = f"Error code {error}: {error_description}"
-                    
-                    if self.event_logger:
-                        if error == 5:
-                            self.event_logger.error(
-                                "Connection", 
-                                f"❌ IEC 61850 connection FAILED\n   {error_msg}\n   \n   Possible causes:\n   • No IEC 61850 server running on {self.config.ip_address}:{self.config.port}\n"
-                            )
-                        else:
-                            self.event_logger.error("Connection", f"❌ IEC 61850 connection FAILED - {error_msg}")
-                    logger.error(f"Failed to connect: {error_msg}")
-                    iec61850.IedConnection_destroy(self.connection)
-                    self.connection = None
-                    self.connected = False
-                    return False
-                
-                self.connected = True
-                if self.event_logger:
-                    self.event_logger.transaction("IEC61850", f"← Connection SUCCESS")
-                    self.event_logger.info("Connection", f"✓ IEC 61850 connection established")
-                
-                logger.info("Connected successfully!")
-                return True
+                    if error == 5:
+                        self.event_logger.error(
+                            "Connection", 
+                            f"❌ IEC 61850 connection FAILED\n"
+                            f"   {error_msg}\n"
+                            f"   \n"
+                            f"   Possible causes:\n"
+                            f"   • No IEC 61850 server running on {self.config.ip_address}:{self.config.port}\n"
+                            f"   • Server is running on a different port\n"
+                            f"   • Firewall blocking the connection\n"
+                            f"   \n"
+                            f"   💡 To start a simulator: Right-click an IED → 'Start Simulator for this IED...'"
+                        )
+                    else:
+                        self.event_logger.error("Connection", f"❌ IEC 61850 connection FAILED - {error_msg}")
+                logger.error(f"Failed to connect: {error_msg}")
+                iec61850.IedConnection_destroy(self.connection)
+                self.connection = None
+                self.connected = False
+                return False
+            
+            self.connected = True
+            if self.event_logger:
+                self.event_logger.transaction("IEC61850", f"← Connection SUCCESS")
+                self.event_logger.info("Connection", f"✓ IEC 61850 connection established")
+                self.event_logger.info("Connection", f"Step 4/4: Connection ready for operations")
+            
+            logger.info("Connected successfully!")
+            return True
             
         except Exception as e:
             if self.event_logger:
@@ -314,52 +290,19 @@ class IEC61850Adapter(BaseProtocol):
              size = iec61850.MmsValue_getArraySize(mms_val)
              return f"[Array[{size}]]", SignalType.STATE, ""
              
+        else:
              return "[Complex Data]", SignalType.STATE, ""
 
-    def _safe_destroy_list(self, list_ptr):
-        """Safely destroy a LinkedList handle and ensure it's valid."""
-        if list_ptr:
-            try:
-                # Always destroy list while holding the connection lock 
-                # as the list is linked to the connection's memory context
-                with self._lock:
-                    if self.connection:
-                        iec61850.LinkedList_destroy(list_ptr)
-            except: pass
-
-    def _safe_delete_mms(self, mms_val):
-        """Safely delete an MmsValue handle."""
-        if mms_val:
-            try:
-                iec61850.MmsValue_delete(mms_val)
-            except: pass
-
-    def _safe_destroy_control_client(self, client):
-        """Safely destroy a ControlObjectClient handle."""
-        if client:
-            try:
-                # Holding lock is safer as client references connection
-                with self._lock:
-                    if self.connection:
-                        iec61850.ControlObjectClient_destroy(client)
-            except: pass
-
     def disconnect(self):
-        with self._lock:
-            if self.connection:
-                try:
-                    iec61850.IedConnection_close(self.connection)
-                except: pass
-                self._cleanup_connection_locked()
+        if self.connection:
+            iec61850.IedConnection_close(self.connection)
+            self._cleanup_connection()
         self.connected = False
         logger.info("Disconnected.")
 
-    def _cleanup_connection_locked(self):
-        """Internal cleanup, MUST be called with self._lock held."""
+    def _cleanup_connection(self):
         if self.connection:
-            try:
-                iec61850.IedConnection_destroy(self.connection)
-            except: pass
+            iec61850.IedConnection_destroy(self.connection)
             self.connection = None
 
     def discover(self) -> Node:
@@ -403,15 +346,17 @@ class IEC61850Adapter(BaseProtocol):
         try:
             # Try to get children
             with self._lock:
-                if not self.connection: return
                 ret = iec61850.IedConnection_getDataDirectory(self.connection, parent_path)
-            
-            children = ret[0] if isinstance(ret, (list, tuple)) else ret
+            children = None
+            if isinstance(ret, (list, tuple)):
+                children = ret[0]
+            else:
+                children = ret
             
             child_names = []
             if children:
                 child_names = self._extract_string_list(children)
-                self._safe_destroy_list(children)
+                iec61850.LinkedList_destroy(children)
             
             if not child_names:
                 # It's a leaf (or empty structure)
@@ -530,10 +475,14 @@ class IEC61850Adapter(BaseProtocol):
         try:
             # Get the server directory (Logical Devices)
             with self._lock:
-                if not self.connection: return root
                 ret = iec61850.IedConnection_getLogicalDeviceList(self.connection)
             
-            ld_list = ret[0] if isinstance(ret, (list, tuple)) else ret
+            ld_list = None
+            if isinstance(ret, (list, tuple)):
+                if len(ret) > 0:
+                    ld_list = ret[0]
+            else:
+                ld_list = ret
             
             if not ld_list:
                 if self.event_logger:
@@ -580,12 +529,12 @@ class IEC61850Adapter(BaseProtocol):
                 try:
                     vendor_path = f"{ld_name}/LLN0.NamPlt.vendor"
                     with self._lock:
-                        if not self.connection: break
                         vendor_res = iec61850.IedConnection_readStringValue(self.connection, vendor_path, iec61850.IEC61850_FC_DC)
-                    
                     if isinstance(vendor_res, (list, tuple)) and vendor_res[1] == iec61850.IED_ERROR_OK:
                         vendor = vendor_res[0]
                         root.description = f"IED: {vendor}"
+                        # If we have a vendor, maybe we can get a better name?
+                        # But 'root.name' is used for the tree root.
                         if self.event_logger and vendor and vendor not in seen_vendors:
                             self.event_logger.info("Discovery", f"Found Vendor: {vendor}")
                             seen_vendors.add(vendor)
@@ -686,15 +635,13 @@ class IEC61850Adapter(BaseProtocol):
                                                                 ))
                                                     
                                                     found_signals = True
-                                                    with self._lock:
-                                                        iec61850.LinkedList_destroy(da_list)
+                                                    iec61850.LinkedList_destroy(da_list)
                                             except: continue
                                         
                                         if not found_signals:
                                             # Fallback generic browse
                                             try:
-                                                with self._lock:
-                                                    ret_da = iec61850.IedConnection_getDataDirectory(self.connection, full_do_ref)
+                                                ret_da = iec61850.IedConnection_getDataDirectory(self.connection, full_do_ref)
                                                 da_list = ret_da[0] if isinstance(ret_da, (list, tuple)) else ret_da
                                                 if da_list:
                                                     da_names = self._extract_string_list(da_list)
@@ -704,8 +651,7 @@ class IEC61850Adapter(BaseProtocol):
                                                             address=f"{full_do_ref}.{da_name}",
                                                             access="RO"
                                                         ))
-                                                    with self._lock:
-                                                        iec61850.LinkedList_destroy(da_list)
+                                                    iec61850.LinkedList_destroy(da_list)
                                             except: pass
 
                             except Exception:
@@ -720,16 +666,12 @@ class IEC61850Adapter(BaseProtocol):
                             except Exception:
                                 pass
                     
-                    try:
-                        with self._lock:
-                            iec61850.LinkedList_destroy(ln_list)
+                    try: iec61850.LinkedList_destroy(ln_list)
                     except: pass
                         
                 except Exception: pass
             
-            try:
-                with self._lock:
-                    iec61850.LinkedList_destroy(ld_list)
+            try: iec61850.LinkedList_destroy(ld_list)
             except: pass
             
             if self.event_logger:
@@ -747,11 +689,9 @@ class IEC61850Adapter(BaseProtocol):
     def _read_ctl_model_direct(self, ctl_model_path: str) -> int:
         """Helper to read ctlModel during discovery."""
         try:
-             with self._lock:
-                 if not self.connection: return 1
-                 val, err = iec61850.IedConnection_readInt32Value(
-                     self.connection, ctl_model_path, iec61850.IEC61850_FC_CF
-                 )
+             val, err = iec61850.IedConnection_readInt32Value(
+                 self.connection, ctl_model_path, iec61850.IEC61850_FC_CF
+             )
              if err == iec61850.IED_ERROR_OK:
                  return val
         except Exception:
@@ -793,9 +733,7 @@ class IEC61850Adapter(BaseProtocol):
             return
         try:
             with self._lock:
-                if not self.connection: return
                 ret = iec61850.IedConnection_getDataSetDirectory(self.connection, dataset_ref)
-            
             ds_list = ret[0] if isinstance(ret, (list, tuple)) else ret
             err = ret[1] if isinstance(ret, (list, tuple)) and len(ret) > 1 else None
 
@@ -807,8 +745,7 @@ class IEC61850Adapter(BaseProtocol):
                         entries_root.children.append(Node(name=entry, description="FCDA"))
                     parent_node.children.append(entries_root)
             try:
-                with self._lock:
-                    iec61850.LinkedList_destroy(ds_list)
+                iec61850.LinkedList_destroy(ds_list)
             except Exception:
                 pass
         except Exception:
@@ -817,7 +754,6 @@ class IEC61850Adapter(BaseProtocol):
     def _discover_datasets_online(self, full_ln_ref: str, ln_node: Node) -> None:
         try:
             with self._lock:
-                if not self.connection: return
                 ret_ds = iec61850.IedConnection_getLogicalNodeDirectory(
                     self.connection,
                     full_ln_ref,
@@ -829,7 +765,6 @@ class IEC61850Adapter(BaseProtocol):
 
             ds_names = self._extract_string_list(ds_list)
             if not ds_names:
-                self._safe_destroy_list(ds_list)
                 return
 
             datasets_root = Node(name="DataSets", description="Container")
@@ -841,7 +776,7 @@ class IEC61850Adapter(BaseProtocol):
                 datasets_root.children.append(ds_node)
 
             ln_node.children.append(datasets_root)
-            self._safe_destroy_list(ds_list)
+            iec61850.LinkedList_destroy(ds_list)
         except Exception:
             pass
 
@@ -861,8 +796,7 @@ class IEC61850Adapter(BaseProtocol):
 
                 # Read common attributes
                 try:
-                    with self._lock:
-                        rpt_id, err = iec61850.IedConnection_readStringValue(self.connection, f"{rcb_ref}.RptID", fc)
+                    rpt_id, err = iec61850.IedConnection_readStringValue(self.connection, f"{rcb_ref}.RptID", fc)
                     if err == iec61850.IED_ERROR_OK:
                         self._add_detail_leaf(rpt_node, "RptID", rpt_id)
                 except Exception:
@@ -870,8 +804,7 @@ class IEC61850Adapter(BaseProtocol):
 
                 dat_set_val = ""
                 try:
-                    with self._lock:
-                        dat_set_val, err = iec61850.IedConnection_readStringValue(self.connection, f"{rcb_ref}.DatSet", fc)
+                    dat_set_val, err = iec61850.IedConnection_readStringValue(self.connection, f"{rcb_ref}.DatSet", fc)
                     if err == iec61850.IED_ERROR_OK:
                         self._add_detail_leaf(rpt_node, "DatSet", dat_set_val)
                 except Exception:
@@ -879,8 +812,7 @@ class IEC61850Adapter(BaseProtocol):
 
                 for attr in ["BufTm", "IntgPd"]:
                     try:
-                        with self._lock:
-                            val, err = iec61850.IedConnection_readUnsigned32Value(self.connection, f"{rcb_ref}.{attr}", fc)
+                        val, err = iec61850.IedConnection_readUnsigned32Value(self.connection, f"{rcb_ref}.{attr}", fc)
                         if err == iec61850.IED_ERROR_OK:
                             self._add_detail_leaf(rpt_node, attr, val)
                     except Exception:
@@ -888,8 +820,7 @@ class IEC61850Adapter(BaseProtocol):
 
                 for attr in ["TrgOps", "OptFlds"]:
                     try:
-                        with self._lock:
-                            val, err = iec61850.IedConnection_readBitStringValue(self.connection, f"{rcb_ref}.{attr}", fc)
+                        val, err = iec61850.IedConnection_readBitStringValue(self.connection, f"{rcb_ref}.{attr}", fc)
                         if err == iec61850.IED_ERROR_OK:
                             self._add_detail_leaf(rpt_node, attr, val)
                     except Exception:
@@ -910,13 +841,15 @@ class IEC61850Adapter(BaseProtocol):
             urcb_list = ret_urcb[0] if isinstance(ret_urcb, (list, tuple)) else ret_urcb
             urcb_names = self._extract_string_list(urcb_list) if urcb_list else []
             add_report_nodes(urcb_names, "URCB", iec61850.IEC61850_FC_RP)
-            self._safe_destroy_list(urcb_list)
+            try:
+                iec61850.LinkedList_destroy(urcb_list)
+            except Exception:
+                pass
         except Exception:
             pass
 
         try:
             with self._lock:
-                if not self.connection: return
                 ret_brcb = iec61850.IedConnection_getLogicalNodeDirectory(
                     self.connection,
                     full_ln_ref,
@@ -925,7 +858,10 @@ class IEC61850Adapter(BaseProtocol):
             brcb_list = ret_brcb[0] if isinstance(ret_brcb, (list, tuple)) else ret_brcb
             brcb_names = self._extract_string_list(brcb_list) if brcb_list else []
             add_report_nodes(brcb_names, "BRCB", iec61850.IEC61850_FC_BR)
-            self._safe_destroy_list(brcb_list)
+            try:
+                iec61850.LinkedList_destroy(brcb_list)
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -935,7 +871,6 @@ class IEC61850Adapter(BaseProtocol):
     def _discover_goose_online(self, full_ln_ref: str, ln_node: Node) -> None:
         try:
             with self._lock:
-                if not self.connection: return
                 ret_gocb = iec61850.IedConnection_getLogicalNodeDirectory(
                     self.connection,
                     full_ln_ref,
@@ -947,7 +882,6 @@ class IEC61850Adapter(BaseProtocol):
 
             gocb_names = self._extract_string_list(gocb_list)
             if not gocb_names:
-                self._safe_destroy_list(gocb_list)
                 return
 
             goose_root = Node(name="GOOSE", description="Container")
@@ -958,18 +892,14 @@ class IEC61850Adapter(BaseProtocol):
 
                 dat_set_val = ""
                 try:
-                    with self._lock:
-                        if not self.connection: break
-                        go_id, err = iec61850.IedConnection_readStringValue(self.connection, f"{gocb_ref}.GoID", iec61850.IEC61850_FC_GO)
+                    go_id, err = iec61850.IedConnection_readStringValue(self.connection, f"{gocb_ref}.GoID", iec61850.IEC61850_FC_GO)
                     if err == iec61850.IED_ERROR_OK:
                         self._add_detail_leaf(gse_node, "GoID", go_id)
                 except Exception:
                     self._add_detail_leaf(gse_node, "GoID", "")
 
                 try:
-                    with self._lock:
-                        if not self.connection: break
-                        dat_set_val, err = iec61850.IedConnection_readStringValue(self.connection, f"{gocb_ref}.DatSet", iec61850.IEC61850_FC_GO)
+                    dat_set_val, err = iec61850.IedConnection_readStringValue(self.connection, f"{gocb_ref}.DatSet", iec61850.IEC61850_FC_GO)
                     if err == iec61850.IED_ERROR_OK:
                         self._add_detail_leaf(gse_node, "DatSet", dat_set_val)
                 except Exception:
@@ -977,18 +907,14 @@ class IEC61850Adapter(BaseProtocol):
 
                 for attr in ["ConfRev", "MinTime", "MaxTime"]:
                     try:
-                        with self._lock:
-                            if not self.connection: break
-                            val, err = iec61850.IedConnection_readUnsigned32Value(self.connection, f"{gocb_ref}.{attr}", iec61850.IEC61850_FC_GO)
+                        val, err = iec61850.IedConnection_readUnsigned32Value(self.connection, f"{gocb_ref}.{attr}", iec61850.IEC61850_FC_GO)
                         if err == iec61850.IED_ERROR_OK:
                             self._add_detail_leaf(gse_node, attr, val)
                     except Exception:
                         self._add_detail_leaf(gse_node, attr, "")
 
                 try:
-                    with self._lock:
-                        if not self.connection: break
-                        app_id, err = iec61850.IedConnection_readStringValue(self.connection, f"{gocb_ref}.AppID", iec61850.IEC61850_FC_GO)
+                    app_id, err = iec61850.IedConnection_readStringValue(self.connection, f"{gocb_ref}.AppID", iec61850.IEC61850_FC_GO)
                     if err == iec61850.IED_ERROR_OK:
                         self._add_detail_leaf(gse_node, "AppID", app_id)
                 except Exception:
@@ -1000,7 +926,10 @@ class IEC61850Adapter(BaseProtocol):
                 goose_root.children.append(gse_node)
 
             ln_node.children.append(goose_root)
-            self._safe_destroy_list(gocb_list)
+            try:
+                iec61850.LinkedList_destroy(gocb_list)
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -1054,6 +983,8 @@ class IEC61850Adapter(BaseProtocol):
             address = signal.address
             
             # Clean up address if it has duplicated LD/LD prefix
+            # This happens because SCD parser might add LD prefix, and then Adapter adds it again or similar.
+            # User reported "GPS01ECB01CB1/GPS01ECB01CB1/XCBR1.Beh.stVal" -> Invalid.
             parts = address.split('/')
             if len(parts) >= 3 and parts[0] == parts[1]:
                 # GPS/GPS/LN.DO... -> GPS/LN.DO...
@@ -1063,12 +994,26 @@ class IEC61850Adapter(BaseProtocol):
             
             # If address doesn't contain '/', it's missing LD - we need to find it
             if '/' not in address:
+                # Try to prepend the IED name or LD name from config
+                # Assuming config.name is the IED name
+                # We need the Logical Device name. Often IEDName + "LD0" or similar.
+                # But without knowing the LD structure, we can't guess. 
+                # Hopefully the new SCDParser fix resolves the generation of these addresses.
                 if self.event_logger:
                     self.event_logger.error("IEC61850", f"← INVALID ADDRESS: {address} (missing LD/)")
                 signal.quality = SignalQuality.INVALID
                 return signal
             
+            # Special handling for Control attributes (SBO, Oper, Cancel)
+            # These are often Write-Only or return specific structures.
+            # Reading them as standard Data Attributes might fail.
+            if any(x in address for x in [".SBO", ".SBOw", ".Oper", ".Cancel"]):
+                 # Should we try to read them? 
+                 # Maybe with FC=CO?
+                 pass 
+            
             # Common functional constraints to try
+            # Map string FC to constant
             fc_map = {
                 "ST": iec61850.IEC61850_FC_ST,
                 "MX": iec61850.IEC61850_FC_MX,
@@ -1082,70 +1027,175 @@ class IEC61850Adapter(BaseProtocol):
             }
 
             fcs_to_try = []
+            
+            # 1. OPTIMIZATION: If Signal has specific FC, use ONLY that one.
             if getattr(signal, 'fc', None) and signal.fc in fc_map:
                  fcs_to_try.append((signal.fc, fc_map[signal.fc]))
             else:
-                attr_name = re.split(r'[\.\$]', address)[-1]
+                # Intelligent FC selection based on attribute name patterns
+                attr_name = address.split('.')[-1] if '.' in address else address
+                
+                # Known CF (Configuration) attributes
                 cf_attrs = ['ctlModel', 'sboTimeout', 'sboClass', 'minVal', 'maxVal', 
                            'stepSize', 'dbRef', 'rangeC', 'units', 'd', 'dU', 'setVal',
                            'operTimeout', 'T0', 'T1', 'T2', 'T3']
+                # Known ST (Status) attributes  
                 st_attrs = ['stVal', 'q', 't', 'Beh', 'Health', 'Mod', 'general', 'dirGeneral']
+                # Known MX (Measurement) attributes
                 mx_attrs = ['mag', 'cVal', 'phsA', 'phsB', 'phsC', 'neut', 'res', 'angRef']
+                # Known CO (Control) attributes
                 co_attrs = ['Oper', 'SBO', 'SBOw', 'Cancel', 'origin', 'ctlNum']
                 
                 if attr_name in cf_attrs or any(attr_name.endswith(a) for a in cf_attrs):
-                    fcs_to_try = [("CF", iec61850.IEC61850_FC_CF), ("DC", iec61850.IEC61850_FC_DC), ("ST", iec61850.IEC61850_FC_ST)]
+                    fcs_to_try = [
+                        ("CF", iec61850.IEC61850_FC_CF),
+                        ("DC", iec61850.IEC61850_FC_DC),
+                        ("ST", iec61850.IEC61850_FC_ST),
+                    ]
                 elif attr_name in st_attrs or any(attr_name.endswith(a) for a in st_attrs):
-                    fcs_to_try = [("ST", iec61850.IEC61850_FC_ST), ("MX", iec61850.IEC61850_FC_MX)]
+                    fcs_to_try = [
+                        ("ST", iec61850.IEC61850_FC_ST),
+                        ("MX", iec61850.IEC61850_FC_MX),
+                    ]
                 elif attr_name in mx_attrs or any(attr_name.endswith(a) for a in mx_attrs):
-                    fcs_to_try = [("MX", iec61850.IEC61850_FC_MX), ("ST", iec61850.IEC61850_FC_ST)]
+                    fcs_to_try = [
+                        ("MX", iec61850.IEC61850_FC_MX),
+                        ("ST", iec61850.IEC61850_FC_ST),
+                    ]
                 elif attr_name in co_attrs or any(attr_name.endswith(a) for a in co_attrs):
-                    fcs_to_try = [("CO", iec61850.IEC61850_FC_CO), ("ST", iec61850.IEC61850_FC_ST)]
+                    fcs_to_try = [
+                        ("CO", iec61850.IEC61850_FC_CO),
+                        ("ST", iec61850.IEC61850_FC_ST),
+                    ]
                 else:
-                    fcs_to_try = [("ST", iec61850.IEC61850_FC_ST), ("MX", iec61850.IEC61850_FC_MX), ("CF", iec61850.IEC61850_FC_CF)]
+                    # Default fallback - try all common FCs
+                    fcs_to_try = [
+                        ("ST", iec61850.IEC61850_FC_ST),
+                        ("MX", iec61850.IEC61850_FC_MX),
+                        ("CF", iec61850.IEC61850_FC_CF),
+                        ("CO", iec61850.IEC61850_FC_CO),
+                        ("SP", iec61850.IEC61850_FC_SP),
+                        ("DC", iec61850.IEC61850_FC_DC),
+                    ]
             
+            # Prioritize FC from SCD description if available (Secondary check for older parsed signals)
+            if not fcs_to_try:
+                 import re
+                 match = re.search(r"FC:([A-Z]{2})", signal.description or "")
+                 if match:
+                    prio_fc_name = match.group(1)
+                    if prio_fc_name in fc_map:
+                        fcs_to_try = [(prio_fc_name, fc_map[prio_fc_name])]
+            
+            # Final fallback
+            if not fcs_to_try:
+                 fcs_to_try = [
+                    ("ST", iec61850.IEC61850_FC_ST),
+                    ("MX", iec61850.IEC61850_FC_MX),
+                    ("DC", iec61850.IEC61850_FC_DC)
+                 ]
+
             value_read = False
             last_error = None
-            successful_fc = None
-
+            successful_fc = None  # Track which FC succeeded
+            
             def extract_val(res, expected_types=None):
                 nonlocal last_error
+                
+                # Debug what we got
+                # if self.event_logger: 
+                #     self.event_logger.debug("IEC61850", f"DEBUG extract_val: {type(res)} {res}")
+
+                # pyiec61850 usually returns [value, error]
                 if isinstance(res, (list, tuple)) and len(res) >= 2:
-                    if res[1] == iec61850.IED_ERROR_OK: return res[0], True
+                    if res[1] == iec61850.IED_ERROR_OK:
+                        return res[0], True
+                    if res[1] != iec61850.IED_ERROR_OK:
+                         # ... error handling ...
+                        error_descriptions = {
+                            1: "NOT_CONNECTED",
+                            2: "ALREADY_CONNECTED",
+                            3: "CONNECTION_LOST",
+                            4: "SERVICE_NOT_SUPPORTED",
+                            5: "PARAMETER_VALUE_INCONSISTENT",
+                            10: "OBJECT_REFERENCE_INVALID",
+                            11: "OBJECT_UNDEFINED",
+                            13: "OBJECT_DOES_NOT_EXIST",
+                            20: "OBJECT_VALUE_INVALID",
+                            21: "OBJECT_ACCESS_UNSUPPORTED",
+                            22: "TYPE_INCONSISTENT",
+                            23: "TEMPORARILY_UNAVAILABLE",
+                            24: "OBJECT_ACCESS_DENIED",
+                            25: "OBJECT_NONE_EXISTENT",
+                        }
+                        error_desc = error_descriptions.get(res[1], f"UNKNOWN({res[1]})")
+                        last_error = f"IED Error {res[1]}: {error_desc}"
+                        if self.event_logger:
+                            self.event_logger.debug("IEC61850", f"    IED Error: {res[1]} ({error_desc}) for {address}")
                     return None, False
-                if res is None: return None, False
-                if expected_types and not isinstance(res, expected_types):
-                    if float in expected_types and isinstance(res, (int, float)): return res, True
+                
+                # If not a list/tuple, it might be the value directly OR an error object
+                if res is None:
                     return None, False
+                
+                # Critical check: If we get an int when expecting something else (like Swig Object or Float)
+                # It indicates a potential raw error code return
+                if expected_types:
+                     if not isinstance(res, expected_types):
+                         # Special case: float vs int/float
+                         if float in expected_types and isinstance(res, (int, float)):
+                             return res, True
+                             
+                         # If we expected MmsValue (Swig object) but got int
+                         # (Swig objects usually aren't ints)
+                         if isinstance(res, int) and int not in expected_types:
+                             # Likely an error code returned directly
+                             last_error = f"Raw Error Code: {res}"
+                             if self.event_logger:
+                                 self.event_logger.debug("IEC61850", f"    Raw Return Mismatch: Expected {expected_types}, got int {res}")
+                             return None, False
+                             
                 return res, True
-
-            with self._lock:
-                if not self.connection:
-                    signal.quality = SignalQuality.NOT_CONNECTED
-                    self._emit_update(signal)
-                    return signal
-
-                for fc_name, fc in fcs_to_try:
-                    try:
-                        # 1. Try reading as Timestamp if it looks like one
-                        if address.endswith(".t") or address.endswith(".T") or "Timestamp" in (signal.description or ""):
+            
+            for fc_name, fc in fcs_to_try:
+                try:
+                    if self.event_logger:
+                        self.event_logger.debug("IEC61850", f"  Try FC={fc_name} for {address}")
+                    
+                    # 1. Try reading as Timestamp if it looks like one
+                    if address.endswith(".t") or address.endswith(".T") or "Timestamp" in (signal.description or ""):
+                        try:
+                            # Use specialized read object for timestamps
                             res = iec61850.IedConnection_readObject(self.connection, address, fc)
                             mms_val, success = extract_val(res)
                             if success:
                                 ts = self._get_timestamp_from_mms(mms_val)
                                 if ts:
-                                    signal.value = ts.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3] + ' UTC'
+                                    # Show full date + time in UTC with millisecond precision
+                                    try:
+                                        signal.value = ts.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3] + ' UTC'
+                                    except Exception:
+                                        signal.value = str(ts)
                                     signal.timestamp = ts
                                     signal.signal_type = SignalType.TIMESTAMP
                                     signal.quality = SignalQuality.GOOD
                                     value_read = True
                                     successful_fc = fc
-                                    self._safe_delete_mms(mms_val)
+                                    iec61850.MmsValue_delete(mms_val)
+                                    if self.event_logger:
+                                        self.event_logger.transaction("IEC61850", f"← OK (TS): {address} = {signal.value}")
                                     break
-                                self._safe_delete_mms(mms_val)
+                                else:
+                                    if self.event_logger:
+                                        self.event_logger.debug("IEC61850", f"  FC={fc_name} {address} read but not a valid UTC_TIME")
+                                iec61850.MmsValue_delete(mms_val)
+                        except Exception as e:
+                            if self.event_logger:
+                                self.event_logger.debug("IEC61850", f"  FC={fc_name} {address} TS read failed: {e}")
+                            pass
 
-                        # 2. Try reading as float
-                        if not self.connection: break
+                    # 2. Try reading as float first (most common for analog)
+                    try:
                         res = iec61850.IedConnection_readFloatValue(self.connection, address, fc)
                         val, success = extract_val(res, expected_types=(float,))
                         if success:
@@ -1154,11 +1204,13 @@ class IEC61850Adapter(BaseProtocol):
                             signal.quality = SignalQuality.GOOD
                             signal.timestamp = datetime.now()
                             value_read = True
-                            successful_fc = fc
+                            if self.event_logger:
+                                self.event_logger.transaction("IEC61850", f"← OK (FC={fc_name}): {address} = {val}")
                             break
-                        
-                        # Try reading as boolean
-                        if not self.connection: break
+                    except: pass
+                    
+                    # Try reading as boolean
+                    try:
                         res = iec61850.IedConnection_readBooleanValue(self.connection, address, fc)
                         val, success = extract_val(res, expected_types=(bool,))
                         if success:
@@ -1168,11 +1220,46 @@ class IEC61850Adapter(BaseProtocol):
                             signal.timestamp = datetime.now()
                             value_read = True
                             successful_fc = fc
+                            if self.event_logger:
+                                self.event_logger.transaction("IEC61850", f"← OK (FC={fc_name}): {address} = {val}")
                             break
-                        
-                        # Try reading as int32
-                        if not self.connection: break
+                    except: pass
+                    
+                    # Try reading as int32
+                    try:
                         res = iec61850.IedConnection_readInt32Value(self.connection, address, fc)
+                        val, success = extract_val(res, expected_types=(int,))
+                        if success:
+                            signal.value = val
+                            signal.signal_type = SignalType.ANALOG
+                            signal.quality = SignalQuality.GOOD
+                            signal.timestamp = datetime.now()
+                            value_read = True
+                            if self.event_logger:
+                                self.event_logger.transaction("IEC61850", f"← OK (FC={fc_name}): {address} = {val}")
+                            break
+                    except: pass
+
+                    # Try reading as BitString (for Dbpos etc)
+                    try:
+                        # readBitStringValue returns [value, error] where value is a BitString object or similar
+                        res = iec61850.IedConnection_readBitStringValue(self.connection, address, fc)
+                        val, success = extract_val(res) # BitString might be special object, skip type check for now
+                        if success:
+                            signal.value = val # This might need further parsing if it's a raw bitstring
+                            signal.signal_type = SignalType.BINARY # Or DOUBLE_BINARY
+                            signal.quality = SignalQuality.GOOD
+                            signal.timestamp = datetime.now()
+                            value_read = True
+                            successful_fc = fc
+                            if self.event_logger:
+                                self.event_logger.transaction("IEC61850", f"← OK (FC={fc_name}): {address} = BITSTRING")
+                            break
+                    except: pass
+
+                    # Try reading as int64
+                    try:
+                        res = iec61850.IedConnection_readInt64Value(self.connection, address, fc)
                         val, success = extract_val(res, expected_types=(int,))
                         if success:
                             signal.value = val
@@ -1182,59 +1269,114 @@ class IEC61850Adapter(BaseProtocol):
                             value_read = True
                             successful_fc = fc
                             break
+                    except: pass
 
-                        # Try generic readObject
-                        if not self.connection: break
-                        res = iec61850.IedConnection_readObject(self.connection, address, fc)
-                        mms_val, success = extract_val(res)
+                    # Try reading as string
+                    try:
+                        res = iec61850.IedConnection_readStringValue(self.connection, address, fc)
+                        val, success = extract_val(res, expected_types=(str,))
                         if success:
+                            signal.value = val
+                            signal.signal_type = SignalType.STATE
+                            signal.quality = SignalQuality.GOOD
+                            signal.timestamp = datetime.now()
+                            value_read = True
+                            successful_fc = fc
+                            break
+                    except: pass
+
+                    # Try generic readObject as fallback (Handles structs, arrays, enums, etc.)
+                    try:
+                         res = iec61850.IedConnection_readObject(self.connection, address, fc)
+                         mms_val, success = extract_val(res)
+                         if success:
+                            # Convert MMS Value to string/value
                             val_str, val_type, error_msg = self._parse_mms_value(mms_val)
-                            if not error_msg:
+                            
+                            if error_msg:
+                                # Data access error at MMS level
+                                signal.error = error_msg
+                                signal.quality = SignalQuality.INVALID
+                                if self.event_logger:
+                                    self.event_logger.warning("IEC61850", f"← MMS ERROR (FC={fc_name}): {address} - {error_msg}")
+                                # Don't break, try next FC
+                            else:
                                 signal.value = val_str
                                 signal.signal_type = val_type
                                 signal.quality = SignalQuality.GOOD
                                 signal.timestamp = datetime.now()
                                 value_read = True
                                 successful_fc = fc
-                                self._safe_delete_mms(mms_val)
+                                signal.error = ""  # Clear any previous error
+                                
+                                if self.event_logger:
+                                    self.event_logger.transaction("IEC61850", f"← OK (FC={fc_name}) [Object]: {address} = {val_str}")
+                                    
+                                iec61850.MmsValue_delete(mms_val)
                                 break
-                            self._safe_delete_mms(mms_val)
-                    except Exception as e:
-                        last_error = str(e)
-
-                if value_read and any(x in address for x in [".stVal", "$stVal", ".mag", "$mag"]):
+                         
+                         if mms_val:
+                             iec61850.MmsValue_delete(mms_val)
+                    except: pass
+                        
+                except Exception as e:
+                    if self.event_logger:
+                        self.event_logger.debug("IEC61850", f"  FC={fc_name} failed: {e}")
+                    last_error = str(e)
+                    continue
+            
+            if value_read:
+                # Success! Now try to get sibling timestamp (.t) if possible
+                if ".stVal" in address or ".mag" in address or ".cVal" in address:
                     try:
-                        last_sep_idx = max(address.rfind('.'), address.rfind('$'))
-                        if last_sep_idx != -1 and self.connection:
-                            base_do = address[:last_sep_idx]
-                            for suffix in [".t", ".T", "$t", "$T"]:
+                        parts = address.split('.')
+                        if len(parts) > 1:
+                            # Usually DO.stVal -> DO.t
+                            # If it's DO.mag.f -> DO.t 
+                            # We'll try to go up until we find the DO
+                            base_do = ".".join(parts[:-1])
+                            if ".mag" in address or ".cVal" in address:
+                                # Go up one more level for nested attributes
+                                base_do = ".".join(parts[:-2])
+                            
+                            # Check both .t and .T
+                            for suffix in [".t", ".T"]:
                                 t_addr = f"{base_do}{suffix}"
+                                # Use the FC that successfully read the main value
                                 res_t = iec61850.IedConnection_readObject(self.connection, t_addr, successful_fc) 
                                 mms_t, ok_t = extract_val(res_t)
                                 if ok_t:
                                     ts = self._get_timestamp_from_mms(mms_t)
-                                    if ts: signal.timestamp = ts
-                                    self._safe_delete_mms(mms_t)
+                                    if ts:
+                                        signal.timestamp = ts
+                                    iec61850.MmsValue_delete(mms_t)
                                     break
                     except: pass
 
             if not value_read:
                 signal.quality = SignalQuality.INVALID
                 signal.value = None
-                signal.error = last_error or "Could not read with any FC"
-
+                error_msg = "Could not read with any FC"
+                if last_error:
+                    error_msg = last_error
+                signal.error = error_msg
+                if self.event_logger:
+                    self.event_logger.error("IEC61850", f"← FAILED: {address} - {error_msg}")
+            
             # ENUM MAPPING
             if value_read and getattr(signal, 'enum_map', None) and isinstance(signal.value, int):
                 if signal.value in signal.enum_map:
+                    # Update value to string representation
+                    # E.g. 1 -> "Open", 2 -> "Closed"
+                    # Keep original value somewhere? Maybe just overwrite for display
                     signal.value = f"{signal.enum_map[signal.value]} ({signal.value})"
                     signal.signal_type = SignalType.STATE
             
-            self._emit_update(signal)
+            self._emit_update(signal) # CRITICAL: Emit the update!
             return signal
             
         except Exception as e:
-            if self.event_logger:
-                self.event_logger.error("IEC61850", f"CRITICAL READ FAILURE for {signal.address}: {e}")
+            logger.debug(f"Read failed for {signal.address}: {e}")
             signal.quality = SignalQuality.INVALID
             
         return signal
@@ -1306,26 +1448,20 @@ class IEC61850Adapter(BaseProtocol):
 
             ctx = self.controls.get(object_ref)
             origin_id, origin_cat = self._compute_originator_info(ctx)
-            
-            with self._lock:
-                if not self.connection: return False
-                iec61850.ControlObjectClient_setOriginator(control_client, origin_id, origin_cat)
-                ctl_model = iec61850.ControlObjectClient_getControlModel(control_client)
+            iec61850.ControlObjectClient_setOriginator(control_client, origin_id, origin_cat)
+
+            ctl_model = iec61850.ControlObjectClient_getControlModel(control_client)
             
             success = False
             if ctl_model == 4 and value is not None: # SBO_ENHANCED
                 mms_val = self._create_mms_value(value, signal)
                 if mms_val:
                     try:
-                        with self._lock:
-                            if not self.connection: return False
-                            success = iec61850.ControlObjectClient_selectWithValue(control_client, mms_val)
+                        success = iec61850.ControlObjectClient_selectWithValue(control_client, mms_val)
                     finally:
-                        self._safe_delete_mms(mms_val)
+                        iec61850.MmsValue_delete(mms_val)
             else:
-                with self._lock:
-                    if not self.connection: return False
-                    success = iec61850.ControlObjectClient_select(control_client)
+                success = iec61850.ControlObjectClient_select(control_client)
 
             if success:
                 if self.event_logger: self.event_logger.transaction("IEC61850", "← SELECT SUCCESS")
@@ -1333,28 +1469,21 @@ class IEC61850Adapter(BaseProtocol):
                     ctx.state = ControlState.SELECTED
                     # Try to capture the updated ctlNum assigned by IED during selection
                     try:
-                         with self._lock:
-                             if not self.connection: return True
-                             val, err = iec61850.IedConnection_readInt32Value(self.connection, f"{object_ref}.ctlNum", iec61850.IEC61850_FC_ST)
+                         # Some IEDs expose the assigned ctlNum in the DO. Use FC=ST.
+                         val, err = iec61850.IedConnection_readInt32Value(self.connection, f"{object_ref}.ctlNum", iec61850.IEC61850_FC_ST)
                          if err == iec61850.IED_ERROR_OK:
                              ctx.ctl_num = val
                              if self.event_logger: self.event_logger.debug("IEC61850", f"Captured ied-assigned ctlNum: {val}")
                     except: pass
                 return True
             else:
-                with self._lock:
-                    if not self.connection: return False
-                    err_code = iec61850.ControlObjectClient_getLastError(control_client)
-                err_msg = IED_CLIENT_ERROR_MAP.get(err_code, f"Unknown IED error ({err_code})")
-                self._last_control_error = f"SELECT FAILED: {err_msg}"
-                
-                if self.event_logger: self.event_logger.error("IEC61850", f"SELECT FAILED (IED Error: {err_code} - {err_msg})")
+                err = iec61850.ControlObjectClient_getLastError(control_client)
+                if self.event_logger: self.event_logger.error("IEC61850", f"SELECT FAILED (IED Error: {err})")
                 return self._fallback_select(signal, value, object_ref)
 
         finally:
             if own_client and control_client:
-                with self._lock: 
-                    self._safe_destroy_control_client(control_client)
+                with self._lock: iec61850.ControlObjectClient_destroy(control_client)
 
     def operate(self, signal: Signal, value: Any, params: dict = None, control_client: Any = None) -> bool:
         """Perform OPERATE phase."""
@@ -1371,21 +1500,17 @@ class IEC61850Adapter(BaseProtocol):
 
             ctx = self.controls.get(object_ref)
             origin_id, origin_cat = self._compute_originator_info(ctx)
-            
-            with self._lock:
-                if not self.connection: return False
-                iec61850.ControlObjectClient_setOriginator(control_client, origin_id, origin_cat)
-                # Sync ctlNum only if we are using a fresh client for this phase
-                if own_client and ctx and ctx.ctl_num is not None:
-                    iec61850.ControlObjectClient_setCtlNum(control_client, ctx.ctl_num)
+            iec61850.ControlObjectClient_setOriginator(control_client, origin_id, origin_cat)
+
+            # Sync ctlNum only if we are using a fresh client for this phase
+            if own_client and ctx and ctx.ctl_num is not None:
+                iec61850.ControlObjectClient_setCtlNum(control_client, ctx.ctl_num)
 
             mms_val = self._create_mms_value(value, signal)
             if not mms_val: return False
 
             try:
-                with self._lock:
-                    if not self.connection: return False
-                    success = iec61850.ControlObjectClient_operate(control_client, mms_val, 0)
+                success = iec61850.ControlObjectClient_operate(control_client, mms_val, 0)
                 if success:
                     if self.event_logger: self.event_logger.transaction("IEC61850", "← OPERATE SUCCESS")
                     if ctx:
@@ -1393,16 +1518,11 @@ class IEC61850Adapter(BaseProtocol):
                         ctx.ctl_num = (ctx.ctl_num + 1) % 256
                     return True
                 else:
-                    with self._lock:
-                        if not self.connection: return False
-                        err_code = iec61850.ControlObjectClient_getLastError(control_client)
-                    err_msg = IED_CLIENT_ERROR_MAP.get(err_code, f"Unknown IED error ({err_code})")
-                    self._last_control_error = f"OPERATE FAILED: {err_msg}"
-                    
-                    if self.event_logger: self.event_logger.error("IEC61850", f"OPERATE FAILED (IED Error: {err_code} - {err_msg})")
+                    err = iec61850.ControlObjectClient_getLastError(control_client)
+                    if self.event_logger: self.event_logger.error("IEC61850", f"OPERATE FAILED (IED Error: {err})")
                     return self._fallback_operate(signal, value, object_ref)
             finally:
-                self._safe_delete_mms(mms_val)
+                iec61850.MmsValue_delete(mms_val)
 
         except Exception as e:
             logger.error(f"Operate failed: {e}")
@@ -1410,14 +1530,14 @@ class IEC61850Adapter(BaseProtocol):
                 self.event_logger.error("IEC61850", f"OPERATE EXCEPTION: {e}")
                 self.event_logger.warning("IEC61850", f"Trying fallback method...")
             
+            # FALLBACK: Try manual Oper write on exception
             object_ref = self._get_control_object_reference(signal.address)
             if object_ref:
                 return self._fallback_operate(signal, value, object_ref)
             return False
         finally:
             if own_client and control_client:
-                with self._lock: 
-                    self._safe_destroy_control_client(control_client)
+                with self._lock: iec61850.ControlObjectClient_destroy(control_client)
 
     def init_control_context(self, signal_address: str) -> Optional[ControlObjectRuntime]:
         """
@@ -1451,48 +1571,36 @@ class IEC61850Adapter(BaseProtocol):
         supports_sbow = False
         
         with self._lock:
-            if not self.connection: return None
             try:
-                 # Try reading .ctlModel or $ctlModel with FC=CF
-                 # Some IEDs use . while others (like the user's) use $
-                 val = 0
-                 err = iec61850.IED_ERROR_OK
-                 
-                 for sep in [".", "$"]:
-                     if not self.connection: break
-                     val, err = iec61850.IedConnection_readInt32Value(
-                         self.connection, f"{object_ref}{sep}ctlModel", iec61850.IEC61850_FC_CF
-                     )
-                     if err == iec61850.IED_ERROR_OK:
-                         ctl_model_val = val
-                         if self.event_logger:
-                             self.event_logger.debug("IEC61850", f"  Read ctlModel using '{sep}': {ctl_model_val}")
-                         break
+                 # Try reading .ctlModel with FC=CF
+                 val, err = iec61850.IedConnection_readInt32Value(
+                     self.connection, f"{object_ref}.ctlModel", iec61850.IEC61850_FC_CF
+                 )
+                 if err == iec61850.IED_ERROR_OK:
+                     ctl_model_val = val
+                     if self.event_logger:
+                         self.event_logger.debug("IEC61850", f"  Read ctlModel: {ctl_model_val}")
                  
                  # Action 3: Read current ctlNum for echoing
-                 for sep in [".", "$"]:
-                     if not self.connection: break
-                     val_num, err_num = iec61850.IedConnection_readInt32Value(
-                         self.connection, f"{object_ref}{sep}ctlNum", iec61850.IEC61850_FC_ST
-                     )
-                     if err_num == iec61850.IED_ERROR_OK:
-                         ctl_num_val = val_num
-                         if self.event_logger:
-                             self.event_logger.debug("IEC61850", f"  Read Current ctlNum using '{sep}': {ctl_num_val}")
-                         break
+                 val_num, err_num = iec61850.IedConnection_readInt32Value(
+                     self.connection, f"{object_ref}.ctlNum", iec61850.IEC61850_FC_ST
+                 )
+                 if err_num == iec61850.IED_ERROR_OK:
+                     ctl_num_val = val_num
+                     if self.event_logger:
+                         self.event_logger.debug("IEC61850", f"  Read Current ctlNum: {ctl_num_val}")
             except Exception as e:
                  if self.event_logger:
                      self.event_logger.warning("IEC61850", f"  Exception reading control attributes: {e}")
             
             # 1.3 Discover Oper/SBO
             try:
-                if not self.connection: return None
                 # Browse the DO to find Oper/SBO
                 ret = iec61850.IedConnection_getDataDirectory(self.connection, object_ref)
                 children = ret[0] if isinstance(ret, (list, tuple)) else ret
                 if children:
                     names = self._extract_string_list(children)
-                    self._safe_destroy_list(children)
+                    iec61850.LinkedList_destroy(children)
                     
                     if "Oper" in names: supports_oper = True
                     if "SBO" in names: supports_sbo = True
@@ -1532,12 +1640,13 @@ class IEC61850Adapter(BaseProtocol):
         object_ref = self._get_control_object_reference(signal.address)
         if not object_ref: return False
         try:
+            # Cancel is usually written to .Cancel attribute or using ControlClient
+            # We'll use a simple write to .Cancel if it exists
             with self._lock:
-                if not self.connection: return False
                 struct = iec61850.MmsValue_newStructure(1)
                 iec61850.MmsValue_setElement(struct, 0, iec61850.MmsValue_newBoolean(True))
                 err = iec61850.IedConnection_writeObject(self.connection, f"{object_ref}.Cancel", iec61850.IEC61850_FC_CO, struct)
-                self._safe_delete_mms(struct)
+                iec61850.MmsValue_delete(struct)
             return err == iec61850.IED_ERROR_OK
         except:
             return False
@@ -1546,21 +1655,9 @@ class IEC61850Adapter(BaseProtocol):
         """Extract the Control Object Reference (DO path)."""
         if not address: return None
         # Order matters: try longer suffixes first to avoid partial matches
-        # Support both . and $ separators
-        suffixes = [
-            ".Oper.ctlVal", "$Oper$ctlVal", 
-            ".SBO.ctlVal", "$SBO$ctlVal", 
-            ".SBOw.ctlVal", "$SBOw$ctlVal", 
-            ".Cancel.ctlVal", "$Cancel$ctlVal",
-            ".Oper", "$Oper", 
-            ".SBO", "$SBO", 
-            ".SBOw", "$SBOw", 
-            ".Cancel", "$Cancel", 
-            ".ctlVal", "$ctlVal", 
-            ".stVal", "$stVal", 
-            ".q", "$q", 
-            ".t", "$t"
-        ]
+        suffixes = [".Oper.ctlVal", ".SBO.ctlVal", ".SBOw.ctlVal", ".Cancel.ctlVal",
+                    ".Oper", ".SBO", ".SBOw", ".Cancel", 
+                    ".ctlVal", ".stVal", ".q", ".t"]
         for suffix in suffixes:
             if address.endswith(suffix):
                 return address[:-len(suffix)]
@@ -1614,6 +1711,24 @@ class IEC61850Adapter(BaseProtocol):
              if struct: iec61850.MmsValue_delete(struct)
              return None
 
+    def _create_mms_value(self, value: Any, signal: Signal):
+        """Create MmsValue from Python value."""
+        try:
+            if isinstance(value, bool):
+                mms = iec61850.MmsValue_newBoolean(value)
+                if not mms:
+                    logger.error(f"Failed to create MMS Boolean for value: {value}")
+                return mms
+            elif isinstance(value, float):
+                return iec61850.MmsValue_newFloat(value)
+            elif isinstance(value, int):
+                return iec61850.MmsValue_newInt32(value)
+            elif isinstance(value, str):
+                return iec61850.MmsValue_newVisibleString(value)
+            return None
+        except Exception as e:
+            logger.error(f"Error in _create_mms_value: {e}")
+            return None
 
     def _compute_originator_info(self, ctx):
         """Return a tuple (origin_id, origin_cat) normalized for ControlAction calls.
@@ -1681,33 +1796,30 @@ class IEC61850Adapter(BaseProtocol):
             sbo = getattr(ctx, 'sbo_reference', None)
             if sbo:
                 try:
-                    with self._lock:
-                        if not self.connection: return None
-                        v, e = iec61850.IedConnection_readInt32Value(self.connection, f"{sbo}.ctlNum", iec61850.IEC61850_FC_ST)
+                    v, e = iec61850.IedConnection_readInt32Value(self.connection, f"{sbo}.ctlNum", iec61850.IEC61850_FC_ST)
                     if e == iec61850.IED_ERROR_OK and v is not None:
                         return int(v) % 256
                 except Exception:
                     pass
                 # try reading full structure
                 try:
-                    with self._lock:
-                        if not self.connection: return None
-                        m = iec61850.IedConnection_readObject(self.connection, f"{sbo}", iec61850.IEC61850_FC_ST)
+                    m = iec61850.IedConnection_readObject(self.connection, f"{sbo}", iec61850.IEC61850_FC_ST)
                     if m:
                         try:
                             elem = iec61850.MmsValue_getElement(m, 3)
                             if elem:
                                 return int(iec61850.MmsValue_toInt32(elem)) % 256
                         finally:
-                            self._safe_delete_mms(m)
+                            try:
+                                iec61850.MmsValue_delete(m)
+                            except Exception:
+                                pass
                 except Exception:
                     pass
 
             # 2) object_ref.ctlNum
             try:
-                with self._lock:
-                    if not self.connection: return None
-                    v, e = iec61850.IedConnection_readInt32Value(self.connection, f"{object_ref}.ctlNum", iec61850.IEC61850_FC_ST)
+                v, e = iec61850.IedConnection_readInt32Value(self.connection, f"{object_ref}.ctlNum", iec61850.IEC61850_FC_ST)
                 if e == iec61850.IED_ERROR_OK and v is not None:
                     return int(v) % 256
             except Exception:
@@ -1754,13 +1866,9 @@ class IEC61850Adapter(BaseProtocol):
                     try:
                         # prefer selectWithValueAsync when available
                         if hasattr(iec61850, 'ControlObjectClient_selectWithValueAsync'):
-                            with self._lock:
-                                if not self.connection: return False
-                                iec61850.ControlObjectClient_selectWithValueAsync(client, None, None, _cb, None)
+                            iec61850.ControlObjectClient_selectWithValueAsync(client, None, None, _cb, None)
                         else:
-                            with self._lock:
-                                if not self.connection: return False
-                                iec61850.ControlObjectClient_selectAsync(client, None, _cb, None)
+                            iec61850.ControlObjectClient_selectAsync(client, None, _cb, None)
 
                         if ev.wait(min(0.5, timeout_ms/1000.0)) and captured['ctl'] is not None:
                             ctx.ctl_num = captured['ctl']
@@ -1768,7 +1876,10 @@ class IEC61850Adapter(BaseProtocol):
                             except Exception: pass
                             return True
                     finally:
-                        self._safe_destroy_control_client(client)
+                        try:
+                            iec61850.ControlObjectClient_destroy(client)
+                        except Exception:
+                            pass
         except Exception:
             pass
 
@@ -1788,12 +1899,8 @@ class IEC61850Adapter(BaseProtocol):
             # Get control context for ctlNum and originator info
             ctx = self.controls.get(object_ref)
             
-            # Try SBOw first (enhanced), then SBO (normal) with both separators
-            attrs_to_try = []
-            for sep in [".", "$"]:
-                attrs_to_try.extend([f"{object_ref}{sep}SBOw", f"{object_ref}{sep}SBO"])
-                
-            for sbo_attr in attrs_to_try:
+            # Try SBOw first (enhanced), then SBO (normal)
+            for sbo_attr in [f"{object_ref}.SBOw", f"{object_ref}.SBO"]:
                 if self.event_logger:
                     self.event_logger.debug("IEC61850", f"Trying write to {sbo_attr}")
                 
@@ -1809,8 +1916,7 @@ class IEC61850Adapter(BaseProtocol):
                     continue
                 
                 try:
-                    with self._lock:
-                        err = iec61850.IedConnection_writeObject(self.connection, sbo_attr, iec61850.IEC61850_FC_CO, mms_val)
+                    err = iec61850.IedConnection_writeObject(self.connection, sbo_attr, iec61850.IEC61850_FC_CO, mms_val)
                     iec61850.MmsValue_delete(mms_val)
                     
                     if err == iec61850.IED_ERROR_OK:
@@ -1853,17 +1959,13 @@ class IEC61850Adapter(BaseProtocol):
             # Get control context for ctlNum and originator info
             ctx = self.controls.get(object_ref)
             
-            # Try direct write to Oper or Oper.ctlVal with both separators
-            attrs_to_try = []
-            for sep in [".", "$"]:
-                attrs_to_try.extend([f"{object_ref}{sep}Oper", f"{object_ref}{sep}Oper{sep}ctlVal"])
-                
-            for oper_attr in attrs_to_try:
+            # Try direct write to .Oper or .Oper.ctlVal
+            for oper_attr in [f"{object_ref}.Oper", f"{object_ref}.Oper.ctlVal"]:
                 if self.event_logger:
                     self.event_logger.debug("IEC61850", f"Writing to {oper_attr}")
                 
                 # For .Oper, use full structure; for .Oper.ctlVal, use simple value
-                if oper_attr.endswith(".Oper") or oper_attr.endswith("$Oper"):
+                if oper_attr.endswith(".Oper"):
                     if ctx:
                         mms_val = self._build_operate_struct(value, ctx, is_select=False)
                     else:
@@ -1879,8 +1981,7 @@ class IEC61850Adapter(BaseProtocol):
                     continue
                 
                 try:
-                    with self._lock:
-                        err = iec61850.IedConnection_writeObject(self.connection, oper_attr, iec61850.IEC61850_FC_CO, mms_val)
+                    err = iec61850.IedConnection_writeObject(self.connection, oper_attr, iec61850.IEC61850_FC_CO, mms_val)
                     iec61850.MmsValue_delete(mms_val)
                     
                     if err == iec61850.IED_ERROR_OK:
@@ -1934,9 +2035,8 @@ class IEC61850Adapter(BaseProtocol):
             
             # Use CF as default for writes (usually settings)
             with self._lock:
-                if not self.connection: return False
                 err = iec61850.IedConnection_writeObject(self.connection, signal.address, iec61850.IEC61850_FC_CF, mms_value)
-                self._safe_delete_mms(mms_value)
+                iec61850.MmsValue_delete(mms_value)
             return err == iec61850.IED_ERROR_OK
         except:
             return False
@@ -1966,10 +2066,11 @@ class IEC61850Adapter(BaseProtocol):
         try:
             # Try to read server identity
             with self._lock:
-                if not self.connection: return info
                 server_identity = iec61850.IedConnection_getServerIdentity(self.connection)
                 if server_identity:
                     info["server_identity"] = server_identity
+                    # Parse vendor, model info from identity string if available
+                    # Format varies by vendor
         except Exception as e:
             logger.debug(f"Could not retrieve server identity: {e}")
         
@@ -1985,7 +2086,6 @@ class IEC61850Adapter(BaseProtocol):
         try:
             # Get logical device list
             with self._lock:
-                if not self.connection: return datasets
                 ret = iec61850.IedConnection_getLogicalDeviceList(self.connection)
             
             ld_list = ret[0] if isinstance(ret, (list, tuple)) else ret
@@ -1997,7 +2097,6 @@ class IEC61850Adapter(BaseProtocol):
             for ld_name in ld_names:
                 # Get logical nodes
                 with self._lock:
-                    if not self.connection: break
                     ret_ln = iec61850.IedConnection_getLogicalDeviceDirectory(self.connection, ld_name)
                 ln_list = ret_ln[0] if isinstance(ret_ln, (list, tuple)) else ret_ln
                 
@@ -2009,7 +2108,6 @@ class IEC61850Adapter(BaseProtocol):
                         
                         # Get datasets for this LN
                         with self._lock:
-                            if not self.connection: break
                             ret_ds = iec61850.IedConnection_getLogicalNodeDirectory(
                                 self.connection,
                                 full_ln_ref,
@@ -2027,7 +2125,6 @@ class IEC61850Adapter(BaseProtocol):
                                 entries = []
                                 try:
                                     with self._lock:
-                                        if not self.connection: break
                                         ret_entries = iec61850.IedConnection_getDataSetDirectory(
                                             self.connection, dataset_ref
                                         )
@@ -2048,11 +2145,20 @@ class IEC61850Adapter(BaseProtocol):
                                     "entry_count": len(entries)
                                 })
                             
-                            self._safe_destroy_list(ds_list)
+                            try:
+                                iec61850.LinkedList_destroy(ds_list)
+                            except Exception:
+                                pass
                     
-                    self._safe_destroy_list(ln_list)
+                    try:
+                        iec61850.LinkedList_destroy(ln_list)
+                    except Exception:
+                        pass
             
-            self._safe_destroy_list(ld_list)
+            try:
+                iec61850.LinkedList_destroy(ld_list)
+            except Exception:
+                pass
         
         except Exception as e:
             logger.error(f"Error retrieving datasets info: {e}")
@@ -2069,7 +2175,6 @@ class IEC61850Adapter(BaseProtocol):
         try:
             # Get logical device list
             with self._lock:
-                if not self.connection: return reports
                 ret = iec61850.IedConnection_getLogicalDeviceList(self.connection)
             
             ld_list = ret[0] if isinstance(ret, (list, tuple)) else ret
@@ -2081,7 +2186,6 @@ class IEC61850Adapter(BaseProtocol):
             for ld_name in ld_names:
                 # Get logical nodes
                 with self._lock:
-                    if not self.connection: break
                     ret_ln = iec61850.IedConnection_getLogicalDeviceDirectory(self.connection, ld_name)
                 ln_list = ret_ln[0] if isinstance(ret_ln, (list, tuple)) else ret_ln
                 
@@ -2094,7 +2198,6 @@ class IEC61850Adapter(BaseProtocol):
                         # Get URCBs
                         try:
                             with self._lock:
-                                if not self.connection: break
                                 ret_urcb = iec61850.IedConnection_getLogicalNodeDirectory(
                                     self.connection,
                                     full_ln_ref,
@@ -2112,14 +2215,16 @@ class IEC61850Adapter(BaseProtocol):
                                     if rcb_info:
                                         reports.append(rcb_info)
                                 
-                                self._safe_destroy_list(urcb_list)
+                                try:
+                                    iec61850.LinkedList_destroy(urcb_list)
+                                except Exception:
+                                    pass
                         except Exception as e:
                             logger.debug(f"Error reading URCBs for {full_ln_ref}: {e}")
                         
                         # Get BRCBs
                         try:
                             with self._lock:
-                                if not self.connection: break
                                 ret_brcb = iec61850.IedConnection_getLogicalNodeDirectory(
                                     self.connection,
                                     full_ln_ref,
@@ -2137,13 +2242,22 @@ class IEC61850Adapter(BaseProtocol):
                                     if rcb_info:
                                         reports.append(rcb_info)
                                 
-                                self._safe_destroy_list(brcb_list)
+                                try:
+                                    iec61850.LinkedList_destroy(brcb_list)
+                                except Exception:
+                                    pass
                         except Exception as e:
                             logger.debug(f"Error reading BRCBs for {full_ln_ref}: {e}")
                     
-                    self._safe_destroy_list(ln_list)
+                    try:
+                        iec61850.LinkedList_destroy(ln_list)
+                    except Exception:
+                        pass
             
-            self._safe_destroy_list(ld_list)
+            try:
+                iec61850.LinkedList_destroy(ld_list)
+            except Exception:
+                pass
         
         except Exception as e:
             logger.error(f"Error retrieving reports info: {e}")
@@ -2174,90 +2288,81 @@ class IEC61850Adapter(BaseProtocol):
             # RptID
             try:
                 with self._lock:
-                    if self.connection:
-                        rpt_id, err = iec61850.IedConnection_readStringValue(self.connection, f"{rcb_ref}.RptID", fc)
-                        if err == iec61850.IED_ERROR_OK:
-                            rcb_info["rpt_id"] = rpt_id
+                    rpt_id, err = iec61850.IedConnection_readStringValue(self.connection, f"{rcb_ref}.RptID", fc)
+                if err == iec61850.IED_ERROR_OK:
+                    rcb_info["rpt_id"] = rpt_id
             except Exception:
                 pass
             
             # DatSet
             try:
                 with self._lock:
-                    if self.connection:
-                        dat_set, err = iec61850.IedConnection_readStringValue(self.connection, f"{rcb_ref}.DatSet", fc)
-                        if err == iec61850.IED_ERROR_OK:
-                            rcb_info["dataset"] = dat_set
+                    dat_set, err = iec61850.IedConnection_readStringValue(self.connection, f"{rcb_ref}.DatSet", fc)
+                if err == iec61850.IED_ERROR_OK:
+                    rcb_info["dataset"] = dat_set
             except Exception:
                 pass
             
             # ConfRev
             try:
                 with self._lock:
-                    if self.connection:
-                        conf_rev, err = iec61850.IedConnection_readUnsigned32Value(self.connection, f"{rcb_ref}.ConfRev", fc)
-                        if err == iec61850.IED_ERROR_OK:
-                            rcb_info["conf_rev"] = conf_rev
+                    conf_rev, err = iec61850.IedConnection_readUnsigned32Value(self.connection, f"{rcb_ref}.ConfRev", fc)
+                if err == iec61850.IED_ERROR_OK:
+                    rcb_info["conf_rev"] = conf_rev
             except Exception:
                 pass
             
             # BufTm
             try:
                 with self._lock:
-                    if self.connection:
-                        buf_tm, err = iec61850.IedConnection_readUnsigned32Value(self.connection, f"{rcb_ref}.BufTm", fc)
-                        if err == iec61850.IED_ERROR_OK:
-                            rcb_info["buf_time"] = buf_tm
+                    buf_tm, err = iec61850.IedConnection_readUnsigned32Value(self.connection, f"{rcb_ref}.BufTm", fc)
+                if err == iec61850.IED_ERROR_OK:
+                    rcb_info["buf_time"] = buf_tm
             except Exception:
                 pass
             
             # IntgPd
             try:
                 with self._lock:
-                    if self.connection:
-                        intg_pd, err = iec61850.IedConnection_readUnsigned32Value(self.connection, f"{rcb_ref}.IntgPd", fc)
-                        if err == iec61850.IED_ERROR_OK:
-                            rcb_info["intg_pd"] = intg_pd
+                    intg_pd, err = iec61850.IedConnection_readUnsigned32Value(self.connection, f"{rcb_ref}.IntgPd", fc)
+                if err == iec61850.IED_ERROR_OK:
+                    rcb_info["intg_pd"] = intg_pd
             except Exception:
                 pass
             
             # TrgOps (bit string)
             try:
                 with self._lock:
-                    if self.connection:
-                        trg_ops, err = iec61850.IedConnection_readBitStringValue(self.connection, f"{rcb_ref}.TrgOps", fc)
-                        if err == iec61850.IED_ERROR_OK:
-                            rcb_info["trg_ops"] = str(trg_ops)
+                    trg_ops, err = iec61850.IedConnection_readBitStringValue(self.connection, f"{rcb_ref}.TrgOps", fc)
+                if err == iec61850.IED_ERROR_OK:
+                    rcb_info["trg_ops"] = str(trg_ops)
             except Exception:
                 pass
             
             # OptFlds (bit string)
             try:
                 with self._lock:
-                    if self.connection:
-                        opt_flds, err = iec61850.IedConnection_readBitStringValue(self.connection, f"{rcb_ref}.OptFlds", fc)
-                        if err == iec61850.IED_ERROR_OK:
-                            rcb_info["opt_flds"] = str(opt_flds)
+                    opt_flds, err = iec61850.IedConnection_readBitStringValue(self.connection, f"{rcb_ref}.OptFlds", fc)
+                if err == iec61850.IED_ERROR_OK:
+                    rcb_info["opt_flds"] = str(opt_flds)
             except Exception:
                 pass
             
             # RptEna (enabled)
             try:
                 with self._lock:
-                    if self.connection:
-                        rpt_ena, err = iec61850.IedConnection_readBooleanValue(self.connection, f"{rcb_ref}.RptEna", fc)
-                        if err == iec61850.IED_ERROR_OK:
-                            rcb_info["enabled"] = rpt_ena
+                    rpt_ena, err = iec61850.IedConnection_readBooleanValue(self.connection, f"{rcb_ref}.RptEna", fc)
+                if err == iec61850.IED_ERROR_OK:
+                    rcb_info["enabled"] = rpt_ena
             except Exception:
                 pass
             
             # GI (General Interrogation)
             try:
                 with self._lock:
-                    if self.connection:
-                        gi, err = iec61850.IedConnection_readBooleanValue(self.connection, f"{rcb_ref}.GI", fc)
-                        if err == iec61850.IED_ERROR_OK:
-                            rcb_info["gi"] = gi
+                    gi, err = iec61850.IedConnection_readBooleanValue(self.connection, f"{rcb_ref}.GI", fc)
+                if err == iec61850.IED_ERROR_OK:
+                    rcb_info["gi"] = gi
             except Exception:
                 pass
         

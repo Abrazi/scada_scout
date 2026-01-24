@@ -320,9 +320,28 @@ class MainWindow(QMainWindow):
         
         # Theme and font are applied from saved settings (or defaults) by MainWindow
         try:
-            from PySide6.QtWidgets import QSizeGrip
+            from PySide6.QtWidgets import QSizeGrip, QProgressBar
             grip = QSizeGrip(self)
             self.status_bar.addPermanentWidget(grip)
+
+            # Small status-bar progress for background SCD parsing
+            self._scd_status_progress = QProgressBar(self)
+            self._scd_status_progress.setMaximumHeight(14)
+            self._scd_status_progress.setFixedWidth(140)
+            self._scd_status_progress.setRange(0, 0)  # indeterminate
+            self._scd_status_progress.setVisible(False)
+            self.status_bar.addPermanentWidget(self._scd_status_progress)
+
+            # Connect to device manager notifications
+            try:
+                self.device_manager.scd_parse_scheduled.connect(
+                    lambda dev, path: (self._scd_status_progress.setVisible(True), self.status_bar.showMessage(f"Parsing SCD for {dev}...") )
+                )
+                self.device_manager.scd_parse_completed.connect(
+                    lambda dev: (self._scd_status_progress.setVisible(False), self.status_bar.showMessage(f"SCD parsed: {dev}", 3000))
+                )
+            except Exception:
+                pass
         except Exception:
             pass
         

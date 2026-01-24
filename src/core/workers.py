@@ -203,7 +203,7 @@ class SCDImportWorker(QThread):
     # Safe signal for Qt actions that must happen on main thread
     device_added = Signal(str)  # device_name
 
-    def __init__(self, device_manager_core, configs, event_logger=None):
+    def __init__(self, device_manager_core, configs, event_logger=None, defer_full_expansion: bool = True):
         super().__init__()
         # Use the CORE manager (not Qt wrapper) to avoid cross-thread Qt calls
         self.device_manager_core = device_manager_core
@@ -211,6 +211,8 @@ class SCDImportWorker(QThread):
         self.event_logger = event_logger
         self._stop_requested = False
         self._scd_parser_cache = {}  # Cache SCD parsers by file path
+        # If True, do not trigger immediate offline discovery during add_device()
+        self.defer_full_expansion = bool(defer_full_expansion)
 
     def stop(self):
         self._stop_requested = True
@@ -246,10 +248,26 @@ class SCDImportWorker(QThread):
                         scd_path = future_to_path[future]
                         try:
                             result = future.result()
-                            if result:
-                                mtime, tree, root, ns = result
-                                SCDParser._cache[scd_path] = (mtime, tree, root, ns)
-                                self.log.emit(f"  ✓ Cached {os.path.basename(scd_path)}")
+                            if not result:
+                                continue
+
+                            mtime, tree, root, ns = result
+
+                            # Build templates via SCDParser helper (centralized, best-effort)
+                            templates = {}
+                            try:
+                                parser = SCDParser.__new__(SCDParser)
+                                parser.tree = tree
+                                parser.root = root
+                                parser.ns = ns
+                                parser._ensure_templates()
+                                templates = parser._templates or {}
+                            except Exception:
+                                templates = {}
+
+                            SCDParser._cache[scd_path] = (mtime, tree, root, ns, templates)
+                            self.log.emit(f"  ✓ Cached {os.path.basename(scd_path)}")
+
                         except Exception as e:
                             self.log.emit(f"  ⚠ Failed to parse {os.path.basename(scd_path)}: {e}")
                             logger.exception(f"Parallel SCD parse error for {scd_path}")
@@ -280,17 +298,35 @@ class SCDImportWorker(QThread):
             try:
                 # Only log every 10th device or first/last to reduce UI overhead
                 should_log_detail = (i % 10 == 0 or i == 0 or i == total - 1)
-                
+
                 if should_log_detail:
                     self.log.emit(f"[{i+1}/{total}] Importing {config.name} ({config.ip_address})...")
-                
+
+                # Respect user's choice about full-structure expansion during import
+                run_discovery = not self.defer_full_expansion
+
                 # Use core manager directly - pass save=False to avoid redundant disk writes
-                self.device_manager_core.add_device(config, save=False)
+                self.device_manager_core.add_device(config, save=False, run_offline_discovery=run_discovery)
 
                 if should_log_detail:
                     self.log.emit(f"  ✓ Successfully imported {config.name}")
 
-                # Keep event log tidy: avoid per-device info entries during bulk import
+                # If caller requested immediate expansion, try to ensure the tree is populated now
+                if run_discovery:
+                    try:
+                        dev = self.device_manager_core.get_device(config.name)
+                        if dev and dev.root_node is None:
+                            # This will use cached parse if available; otherwise it may schedule background parse
+                            self.device_manager_core.load_offline_scd(config.name)
+                    except Exception:
+                        pass
+                else:
+                    # Defer case: schedule a background parse/population so the device
+                    # tree appears eventually without blocking the importer caller.
+                    try:
+                        self.device_manager_core._schedule_scd_parse(config.name, config.scd_file_path)
+                    except Exception:
+                        pass
 
                 count += 1
             except Exception as e:
@@ -303,8 +339,9 @@ class SCDImportWorker(QThread):
                 if self.event_logger:
                     self.event_logger.error("SCDImport", f"Import failed for {config.name}: {e}")
 
+            # Progress update for UI
             self.progress.emit(i + 1)
-            
+
             # Small sleep to allow Qt event loop to process signals
             time.sleep(0.01)
 

@@ -25,6 +25,10 @@ class DeviceManager(QObject):
     batch_load_finished = QtSignal()
     batch_clear_started = QtSignal()
 
+    # SCD parse lifecycle (background): scheduled -> completed
+    scd_parse_scheduled = QtSignal(str, str)  # device_name, scd_path
+    scd_parse_completed = QtSignal(str)       # device_name
+
     def __init__(self, config_path="devices.json"):
         super().__init__()
         self._core = DeviceManagerCore(config_path)
@@ -45,6 +49,12 @@ class DeviceManager(QObject):
         self._core.on("batch_load_started", self.batch_load_started.emit)
         self._core.on("batch_load_finished", self.batch_load_finished.emit)
         self._core.on("batch_clear_started", self.batch_clear_started.emit)
+        # Background SCD parse events
+        try:
+            self._core.on('scd_parse_scheduled', self.scd_parse_scheduled.emit)
+            self._core.on('scd_parse_completed', self.scd_parse_completed.emit)
+        except Exception:
+            pass
 
     @property
     def event_logger(self):
@@ -67,8 +77,8 @@ class DeviceManager(QObject):
         return self._core.subscription_manager
 
     # Delegate methods to Core
-    def add_device(self, config: DeviceConfig):
-        return self._core.add_device(config)
+    def add_device(self, config: DeviceConfig, run_offline_discovery: bool = True):
+        return self._core.add_device(config, run_offline_discovery=run_offline_discovery)
 
     def remove_device(self, device_name: str):
         return self._core.remove_device(device_name)
