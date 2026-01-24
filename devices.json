@@ -1,4 +1,24 @@
 {
-    "devices": [],
+    "devices": [
+        {
+            "name": "GPS01ECB01",
+            "ip_address": "172.16.11.18",
+            "port": 102,
+            "folder": "",
+            "description": "",
+            "device_type": "IEC 61850 IED",
+            "enabled": true,
+            "scd_file_path": "/home/majid/.scada_scout/projects/active/resources/GPS01ECB01_discovered.icd",
+            "use_scd_discovery": true,
+            "protocol_params": {},
+            "polling_enabled": true,
+            "poll_interval": 1.0,
+            "modbus_unit_id": 1,
+            "modbus_timeout": 3.0,
+            "modbus_register_maps": [],
+            "modbus_slave_mappings": [],
+            "modbus_slave_blocks": []
+        }
+    ],
     "folders": {}
 }

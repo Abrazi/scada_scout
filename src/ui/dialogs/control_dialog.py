@@ -45,8 +45,9 @@ class ControlDialog(QDialog):
         
         # Extract Object Reference (DO)
         self.obj_ref = self.signal.address
-        if "." in self.obj_ref:
-            parts = self.obj_ref.split('.')
+        if "." in self.obj_ref or "$" in self.obj_ref:
+            # Handle both . and $ as separators
+            parts = re.split(r'[\.\$]', self.obj_ref)
             if len(parts) > 1:
                 # Basic heuristic to get DO path
                 # Recursively remove last part if it looks like an attribute (stVal, ctlVal, Oper, etc)
@@ -54,7 +55,29 @@ class ControlDialog(QDialog):
                 while parts and parts[-1] in ["ctlVal", "Oper", "SBO", "SBOw", "Cancel", "stVal", "q", "t"]:
                     parts.pop()
                 
-                self.obj_ref = ".".join(parts)
+                # Reconstruct first part (LD/LN) properly if it was split
+                # But wait, re.split replaces all separators. 
+                # Let's try a safer way that preserves original structure as much as possible
+                # Actually, the adapter handles reconstruction from DO path.
+                # Let's just use the adapter's helper if possible or mimic it.
+                suffixes = [
+                    ".Oper.ctlVal", "$Oper$ctlVal", 
+                    ".SBO.ctlVal", "$SBO$ctlVal", 
+                    ".SBOw.ctlVal", "$SBOw$ctlVal", 
+                    ".Cancel.ctlVal", "$Cancel$ctlVal",
+                    ".Oper", "$Oper", 
+                    ".SBO", "$SBO", 
+                    ".SBOw", "$SBOw", 
+                    ".Cancel", "$Cancel", 
+                    ".ctlVal", "$ctlVal", 
+                    ".stVal", "$stVal", 
+                    ".q", "$q", 
+                    ".t", "$t"
+                ]
+                for suffix in suffixes:
+                    if self.obj_ref.endswith(suffix):
+                        self.obj_ref = self.obj_ref[:-len(suffix)]
+                        break
         
         self.lbl_ref = QLabel(self.obj_ref)
         self.lbl_ref.setProperty("class", "subheading")
@@ -114,7 +137,7 @@ class ControlDialog(QDialog):
         # Determine Input Widget
         if "BOOL" in sig_type or "SPC" in self.signal.address or "ctlVal" in self.signal.name: 
             self.input_widget = QComboBox()
-            self.input_widget.addItems(["True (1) (On)", "False (0) (Off)"])
+            self.input_widget.addItems(["On (False / 0)", "Off (True / 1)"])
         elif "FLOAT" in sig_type:
             self.input_widget = QDoubleSpinBox()
             self.input_widget.setRange(-1e9, 1e9)
@@ -176,10 +199,10 @@ class ControlDialog(QDialog):
             "3 - Remote control", "4 - Automatic bay", "5 - Automatic station", 
             "6 - Automatic remote", "7 - Maintenance", "8 - Process"
         ])
-        self.cmb_origin_cat.setCurrentIndex(2) # Default Station Control
+        self.cmb_origin_cat.setCurrentIndex(3) # Default Remote Control
         origin_layout.addRow("Originator Category:", self.cmb_origin_cat)
         
-        self.txt_origin_ident = QLineEdit("Station")
+        self.txt_origin_ident = QLineEdit("SCADA Scout")
         origin_layout.addRow("Originator Identity:", self.txt_origin_ident)
         
         main_layout.addWidget(origin_group)
@@ -376,6 +399,24 @@ class ControlDialog(QDialog):
             self.lbl_status.setText(f"Error initializing context: {e}")
             self._set_label_status(self.lbl_status, "error")
 
+    def _sync_ui_from_context(self):
+        """Sync UI fields from the underlying protocol context."""
+        try:
+            adapter = self._get_adapter()
+            if not adapter: return
+            
+            object_ref = adapter._get_control_object_reference(self.signal.address)
+            ctx = adapter.controls.get(object_ref)
+            if ctx:
+                self.num_ctl_num.setValue(ctx.ctl_num)
+                self.txt_origin_ident.setText(ctx.originator_id)
+                self.cmb_origin_cat.setCurrentIndex(ctx.originator_cat)
+                
+                # Update button states based on new context state
+                self._update_button_states()
+        except Exception as e:
+            logger.warning(f"Failed to sync UI from context: {e}")
+
     def _update_button_states(self):
         model = self.detected_control_model
         is_sbo = model in [2, 4]
@@ -401,18 +442,18 @@ class ControlDialog(QDialog):
             adapter = self._get_adapter()
             if adapter:
                 # Determine stVal path
-                # obj_ref is DO path. stVal is usually DO.stVal
-                # But for some signals it might be different.
-                # Let's try to construct it.
-                st_path = f"{self.obj_ref}.stVal"
+                # Try both . and $ separators
+                st_paths = [f"{self.obj_ref}.stVal", f"{self.obj_ref}$stVal"]
                 
-                # We need to do a manual read.
-                # Using lower level read if possible or create a dummy signal
+                res = None
                 from src.models.device_models import Signal
-                dummy = Signal(name="stVal", address=st_path)
-                res = adapter.read_signal(dummy)
+                for st_path in st_paths:
+                    dummy = Signal(name="stVal", address=st_path)
+                    res = adapter.read_signal(dummy)
+                    if res and res.value is not None:
+                        break
                 
-                if res.value is not None:
+                if res and res.value is not None:
                     formatted = self._format_status_value(res)
                     self.lbl_current_val.setText(formatted)
                     # keep raw value handy on hover
@@ -476,9 +517,10 @@ class ControlDialog(QDialog):
                 self.lbl_status.setText("SELECT Successful (Ready to Operate)")
                 self._set_label_status(self.lbl_status, "success")
                 self.selected = True 
-                self._update_button_states()
+                self._sync_ui_from_context()
             else:
-                self.lbl_status.setText("SELECT FAILED (Check device logs)")
+                err = getattr(adapter, '_last_control_error', "SELECT FAILED (Check device logs)")
+                self.lbl_status.setText(err)
                 self._set_label_status(self.lbl_status, "error")
         except Exception as e:
             self.lbl_status.setText(f"Select Error: {e}")
@@ -512,11 +554,11 @@ class ControlDialog(QDialog):
                     self._set_label_status(self.lbl_status, "success")
                     self.selected = False  # Reset selection state
                     
-                    # Update ctlNum in UI for next time (auto-incremented in adapter)
-                    if ctx:
-                        self.num_ctl_num.setValue(ctx.ctl_num)
-                        
-                    self._update_button_states()
+                    import time
+                    time.sleep(0.5)
+                    QApplication.processEvents()
+                    
+                    self._sync_ui_from_context()
                     self._load_current_value()
                 else:
                     # If adapter provided a specific control error, show it to the user
@@ -537,14 +579,15 @@ class ControlDialog(QDialog):
                     self._set_label_status(self.lbl_status, "success")
                     self.selected = False 
                     
-                    # Update ctlNum in UI for next time (auto-incremented in adapter)
-                    if ctx:
-                        self.num_ctl_num.setValue(ctx.ctl_num)
-                        
-                    self._update_button_states()
+                    import time
+                    time.sleep(0.5)
+                    QApplication.processEvents()
+                    
+                    self._sync_ui_from_context()
                     self._load_current_value()
                 else:
-                    self.lbl_status.setText("OPERATE FAILED")
+                    err = getattr(adapter, '_last_control_error', "OPERATE FAILED")
+                    self.lbl_status.setText(err)
                     self._set_label_status(self.lbl_status, "error")
         except Exception as e:
             self.lbl_status.setText(f"Error: {e}")
@@ -568,7 +611,7 @@ class ControlDialog(QDialog):
                 self.lbl_status.setText("Selection Aborted Successfully")
                 self._set_label_status(self.lbl_status, "success")
                 self.selected = False
-                self._update_button_states()
+                self._sync_ui_from_context()
             else:
                 self.lbl_status.setText("Abort Failed")
                 self._set_label_status(self.lbl_status, "error")

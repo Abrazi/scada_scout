@@ -1119,6 +1119,12 @@ class DeviceTreeWidget(QWidget):
 
                     switchgear_action.triggered.connect(request_add_switchgear_status)
                     menu.addAction(switchgear_action)
+                    
+                    # Control Switchgear (Global search)
+                    control_all_action = QAction("Control Switchgear (Global Discovery)...", self)
+                    control_all_action.triggered.connect(lambda d=device_name, n=device.root_node: self._invoke_switchgear_control_flow(d, n))
+                    menu.addAction(control_all_action)
+                    
                     menu.addSeparator()
 
                 # Discovery mode toggle (existing functionality)
@@ -1418,53 +1424,8 @@ class DeviceTreeWidget(QWidget):
                 if is_logical_device:
                     device = self._resolve_device(device_name, root_item) if device_name else None
                     if device and device.config.device_type in (DeviceType.IEC61850_IED, DeviceType.IEC61850_SERVER):
-                        control_switchgear_action = QAction("Control Switchgear", self)
-
-                        def request_control_switchgear(target_node=node, dev_name=device_name):
-                            from PySide6.QtWidgets import QMessageBox, QInputDialog
-
-                            targets = []
-
-                            def _collect(n):
-                                if hasattr(n, 'signals') and n.signals:
-                                    for sig in n.signals:
-                                        addr = (sig.address or "")
-                                        addr_l = addr.lower()
-                                        has_ctlval = "oper.ctlval" in addr_l or "oper$ctlval" in addr_l
-                                        has_pos = "pos.oper" in addr_l or "pos$oper" in addr_l
-
-                                        # Extract tokens to find LN names like CSWI1, CSWI2, etc.
-                                        tokens = []
-                                        if "/" in addr_l:
-                                            ln_part = addr_l.split("/", 1)[1]
-                                            tokens.append(ln_part.split(".", 1)[0].split("$", 1)[0])
-                                        tokens.extend([t for t in addr_l.replace("/", ".").replace("$", ".").split(".") if t])
-
-                                        is_cswi = any(t.startswith("cswi") for t in tokens)
-                                        if is_cswi and has_ctlval and has_pos:
-                                            targets.append(sig)
-                                if hasattr(n, 'children') and n.children:
-                                    for child in n.children:
-                                        _collect(child)
-
-                            _collect(target_node)
-
-                            if not targets:
-                                QMessageBox.information(self, "Control Switchgear", "No CSWI Pos.Oper.ctlVal signals found in this Logical Device.")
-                                return
-
-                            if len(targets) == 1:
-                                self._invoke_control_dialog(dev_name, targets[0])
-                                return
-
-                            items = [t.address for t in targets]
-                            selected, ok = QInputDialog.getItem(self, "Control Switchgear", "Select CSWI control point:", items, 0, False)
-                            if ok and selected:
-                                chosen = next((t for t in targets if t.address == selected), None)
-                                if chosen:
-                                    self._invoke_control_dialog(dev_name, chosen)
-
-                        control_switchgear_action.triggered.connect(request_control_switchgear)
+                        control_switchgear_action = QAction("Control Switchgear...", self)
+                        control_switchgear_action.triggered.connect(lambda d=device_name, n=node: self._invoke_switchgear_control_flow(d, n))
                         menu.addAction(control_switchgear_action)
                         menu.addSeparator()
                 
@@ -1491,6 +1452,82 @@ class DeviceTreeWidget(QWidget):
         
         if menu.actions():
             menu.exec(self.tree_view.viewport().mapToGlobal(position))
+
+    def _invoke_switchgear_control_flow(self, device_name: str, target_node):
+        """
+        Comprehensive switchgear discovery and control flow.
+        Scans the provided node (Logical Device or entire Device) for control tags.
+        """
+        from PySide6.QtWidgets import QMessageBox, QInputDialog
+        
+        if not target_node:
+            return
+            
+        targets = []
+        all_signals = []
+
+        def _collect(n):
+            if hasattr(n, 'signals') and n.signals:
+                for sig in n.signals:
+                    all_signals.append(sig)
+                    addr = (sig.address or "")
+                    addr_l = addr.lower()
+                    
+                    # Higher-permissivity matching for switchgear control
+                    # Format: LD/LN.Pos.Oper.ctlVal or LD/LN$Pos$Oper$ctlVal
+                    # Key attributes: ctlVal (write point)
+                    has_ctlval = "ctlval" in addr_l
+                    
+                    # Check if it's a switchgear-related logical node
+                    # ln_part is the part after the LD/ prefix
+                    ln_part = ""
+                    if "/" in addr_l:
+                        ln_part = addr_l.split('/', 1)[1].split('.', 1)[0].split('$', 1)[0]
+                    else:
+                        ln_part = addr_l.split('.', 1)[0].split('$', 1)[0]
+                        
+                    is_switchgear_ln = any(cls in ln_part for cls in ["cswi", "xcbr", "xswi"])
+                    
+                    if has_ctlval and (is_switchgear_ln or "pos" in addr_l):
+                        targets.append(sig)
+
+            if hasattr(n, 'children') and n.children:
+                for child in n.children:
+                    _collect(child)
+
+        _collect(target_node)
+        
+        if not targets:
+            msg = f"No switchgear control points (.ctlVal) found in '{target_node.name}'.\n"
+            msg += f"Signals scanned: {len(all_signals)}\n\n"
+            msg += "Suggestions:\n"
+            msg += "- Ensure the IED is connected and discovery is complete.\n"
+            msg += "- Check if Logical Nodes contain CSWI, XCBR, or XSWI."
+            QMessageBox.information(self, "Control Switchgear", msg)
+            return
+
+        # Sort targets by address for cleaner list
+        targets.sort(key=lambda t: (t.address or ""))
+
+        if len(targets) == 1:
+            self._invoke_control_dialog(device_name, targets[0])
+            return
+
+        # Show selection dialog for multiple control points
+        items = [t.address for t in targets]
+        selected, ok = QInputDialog.getItem(
+            self, 
+            "Control Switchgear", 
+            f"Discovered {len(targets)} control points. Select one:", 
+            items, 
+            0, 
+            False
+        )
+        
+        if ok and selected:
+            chosen = next((t for t in targets if t.address == selected), None)
+            if chosen:
+                self._invoke_control_dialog(device_name, chosen)
 
     def _trigger_export_selected_ied(self, device_name: str):
         """Trigger export of a specific IED via main window."""

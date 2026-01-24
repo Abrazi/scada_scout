@@ -34,11 +34,12 @@ class SCDParser:
             
             # Check cache
             if self.file_path in self._cache:
-                cached_mtime, tree, root, ns = self._cache[self.file_path]
+                cached_mtime, tree, root, ns, templates = self._cache[self.file_path]
                 if cached_mtime == mtime:
                     self.tree = tree
                     self.root = root
                     self.ns = ns
+                    self._templates = templates
                     # logger.debug(f"Using cached SCD parse for {self.file_path}")
                     return
 
@@ -57,9 +58,12 @@ class SCDParser:
                 self.ns = {'scl': ns_uri}
             else:
                 self.ns = {}
+                
+            # Pre-parse templates for fast lookup
+            self._templates = self._parse_templates()
             
             # Update cache
-            self._cache[self.file_path] = (mtime, self.tree, self.root, self.ns)
+            self._cache[self.file_path] = (mtime, self.tree, self.root, self.ns, self._templates)
             
             if file_size > 10 * 1024 * 1024:
                 logger.info(f"SCD parsing complete")
@@ -138,7 +142,7 @@ class SCDParser:
                     ln_path = f"{ld_name}/{ln_class_or_inst}"
                     
                     # Expand the LN Type to get DOs and DAs, passing ld_name
-                    self._expand_ln_type_with_path(ln_node, ln_type_id, ln_path, ld_name)
+                    self._expand_ln_type_with_path(ln_node, ln_type_id, ln_path, ld_name, depth=0)
                     
                 # --- Advanced Features: DataSets, Reporting, GOOSE ---
                 
@@ -283,62 +287,50 @@ class SCDParser:
 
         parent_node.children.append(entries_root)
 
-    def _expand_ln_type_with_path(self, ln_node: Node, ln_type_id: str, path_prefix: str, ld_name: str = ""):
-        """
-        Recursively expand an LN Type into DOs and DAs.
-        path_prefix is typically 'LD_NAME/LN_NAME' (e.g., 'GPS01ECB01/XCBR1')
-        """
-        # Find DataTypeTemplates (not DataModelDirectory!)
+    def _parse_templates(self) -> Dict[str, Any]:
+        """Pre-parse DataTypeTemplates for efficient lookup."""
+        templates = {}
         templates_root = self.root.find("scl:DataTypeTemplates", self.ns)
         if not templates_root:
             templates_root = self.root.find("DataTypeTemplates")
         if not templates_root:
-            return
+            return templates
 
-        # Build template dictionaries
-        lnode_types = {}
-        for lnt in templates_root.findall("scl:LNodeType", self.ns) + templates_root.findall("LNodeType"):
-            lid = lnt.get("id")
-            if lid:
-                lnode_types[lid] = lnt
+        # Support recursive lookup for LNodeType, DOType, DAType
+        for tag in ["LNodeType", "DOType", "DAType"]:
+            for element in templates_root.findall(f"scl:{tag}", self.ns) or templates_root.findall(tag):
+                tid = element.get("id")
+                if tid:
+                    templates[tid] = element
 
-        do_types = {}
-        for dot in templates_root.findall("scl:DOType", self.ns) + templates_root.findall("DOType"):
-            did = dot.get("id")
-            if did:
-                do_types[did] = dot
-
-        da_types = {}
-        for dat in templates_root.findall("scl:DAType", self.ns) + templates_root.findall("DAType"):
-            daid = dat.get("id")
-            if daid:
-                da_types[daid] = dat
-                
-        enum_types = {}
-        for et in templates_root.findall("scl:EnumType", self.ns) + templates_root.findall("EnumType"):
+        # Parse EnumType separately (they are dictionaries)
+        for et in templates_root.findall("scl:EnumType", self.ns) or templates_root.findall("EnumType"):
             eid = et.get("id")
             if eid:
                 enums = {}
-                for enum_val in et.findall("scl:EnumVal", self.ns) + et.findall("EnumVal"):
-                     ord_val = enum_val.get("ord")
-                     text_val = enum_val.text
-                     if ord_val is not None:
-                         try:
-                             enums[int(ord_val)] = text_val
-                         except: pass
-                enum_types[eid] = enums
-                logger.debug(f"Parsed EnumType '{eid}' with {len(enums)} values: {enums}")
+                for enum_val in et.findall("scl:EnumVal", self.ns) or et.findall("EnumVal"):
+                    ord_val = enum_val.get("ord")
+                    text_val = enum_val.text
+                    if ord_val is not None:
+                        try:
+                            enums[int(ord_val)] = text_val
+                        except: pass
+                templates[eid] = enums
 
-        logger.debug(f"Total EnumTypes found: {len(enum_types)}")
-        templates = {**lnode_types, **do_types, **da_types, **enum_types} # Include enums in templates for easy lookup if needed (though we separate them mostly)
-        # Store enums separately or mix them? 
-        # _expand_do_type receives `templates`. Let's assume we can lookup enums by ID in `templates`.
-        # Since ids are unique across types usually, this should be fine.
+        return templates
 
-        # Lookup LNType
-        lntype_def = templates.get(ln_type_id)
-        if not lntype_def:
-            logger.warning(f"LNType {ln_type_id} not found in templates")
+    def _expand_ln_type_with_path(self, ln_node: Node, ln_type_id: str, path_prefix: str, ld_name: str = "", depth: int = 0):
+        """
+        Recursively expand an LN Type into DOs and DAs.
+        path_prefix is typically 'LD_NAME/LN_NAME' (e.g., 'GPS01ECB01/XCBR1')
+        """
+        if depth > 10:
+            logger.warning(f"SCD recursion depth reached at {path_prefix}")
+            return
+
+        lntype_def = self._templates.get(ln_type_id)
+        if lntype_def is None or isinstance(lntype_def, dict):
+            # logger.warning(f"LNType {ln_type_id} not found in templates")
             return
 
         # Iterate DOs in LNType
@@ -353,13 +345,13 @@ class SCDParser:
                 # Build path for this DO
                 do_path = f"{path_prefix}.{do_name}"
                 # Expand recursively, passing LD name
-                self._expand_do_type(do_node, do_type_id, templates, do_path, ld_name)
+                self._expand_do_type(do_node, do_type_id, self._templates, do_path, ld_name, depth=depth+1)
 
     def _expand_ln_type(self, ln_node: Node, ln_type_id: str):
         """Legacy wrapper for backward compatibility or direct calls."""
         # This method is now deprecated as it cannot provide the necessary ld_name for full addresses.
         # It will call the new method with an empty ld_name and a simplified path.
-        self._expand_ln_type_with_path(ln_node, ln_type_id, ln_node.name, "")
+        self._expand_ln_type_with_path(ln_node, ln_type_id, ln_node.name, "", depth=0)
 
     def _map_btype_to_signal_type(self, btype: str) -> SignalType:
         """Maps SCL bType to internal SignalType."""
@@ -372,10 +364,12 @@ class SCDParser:
         # Add more mappings as needed
         return SignalType.ANALOG # Default
 
-    def _expand_do_type(self, parent_node: Node, do_type_id: str, templates: dict, path_prefix: str, ld_name: str = ""):
+    def _expand_do_type(self, parent_node: Node, do_type_id: str, templates: dict, path_prefix: str, ld_name: str = "", depth: int = 0):
         """Recursively expand a DO Type into DAs, using path_prefix for full address."""
+        if depth > 10:
+            return
         dotype_def = templates.get(do_type_id)
-        if not dotype_def:
+        if dotype_def is None or isinstance(dotype_def, dict):
             return
         
         for sdo_or_da in list(dotype_def):
@@ -392,7 +386,7 @@ class SCDParser:
 
                 # Control Check
                 access = "RO"
-                if fc == "CO" or elem_name == "ctVal":
+                if fc == "CO" or elem_name == "ctlVal":
                      sig_type = SignalType.COMMAND
                      access = "RW"
 
@@ -449,7 +443,7 @@ class SCDParser:
                 parent_node.children.append(sdo_node)
                 if sdo_type_id:
                     new_path = f"{path_prefix}.{elem_name}"
-                    self._expand_do_type(sdo_node, sdo_type_id, templates, new_path, ld_name)
+                    self._expand_do_type(sdo_node, sdo_type_id, templates, new_path, ld_name, depth=depth+1)
 
     def extract_ieds_info(self) -> List[Dict[str, Any]]:
         """
