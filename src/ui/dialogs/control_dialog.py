@@ -8,6 +8,7 @@ from PySide6.QtCore import Qt, QDateTime
 import logging
 from datetime import datetime
 from typing import Optional
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +92,10 @@ class ControlDialog(QDialog):
         self._set_label_status(self.lbl_current_val, "info")
         val_row.addWidget(self.lbl_current_val)
         
+        # smaller refresh button (consistent with other compact refresh buttons)
         self.btn_refresh = QPushButton("Refresh")
+        self.btn_refresh.setFixedWidth(80)
+        self.btn_refresh.setToolTip("Refresh current status (shows Hex / Decimal / Enum)")
         self.btn_refresh.clicked.connect(self._load_current_value)
         val_row.addWidget(self.btn_refresh)
         model_layout.addRow("Current Status Value:", val_row)
@@ -239,6 +243,73 @@ class ControlDialog(QDialog):
         field.style().unpolish(field)
         field.style().polish(field)
 
+    # --- Value formatting helpers (mirror watch-list behavior) ---
+    def _format_status_value(self, signal) -> str:
+        """Format a Signal.value as: 0xHEX (DEC) [EnumLabel] or fallback to str(value)."""
+        if getattr(signal, "value", None) is None:
+            return "--"
+
+        num, enum_label = self._extract_numeric_and_enum(signal)
+        if num is not None:
+            hex_str = f"0x{num:X}"
+            if enum_label:
+                return f"{hex_str} ({num}) {enum_label}"
+            return f"{hex_str} ({num})"
+
+        return str(signal.value)
+
+    def _is_pos_stval(self, signal) -> bool:
+        addr = (getattr(signal, 'address', '') or "").lower()
+        name = (getattr(signal, 'name', '') or "").lower()
+        return "pos.stval" in addr or "pos$stval" in addr or ("pos" in addr and name == "stval")
+
+    def _extract_numeric_and_enum(self, signal) -> tuple[int | None, str | None]:
+        """Try to extract an integer value and an optional enum label from a Signal-like object."""
+        num = None
+        enum_label = None
+
+        mapping = getattr(signal, "enum_map", None)
+        if not mapping and self._is_pos_stval(signal):
+            mapping = {0: "intermediate", 1: "open", 2: "closed", 3: "bad"}
+
+        val = getattr(signal, 'value', None)
+        # booleans
+        if isinstance(val, bool):
+            num = int(val)
+        elif isinstance(val, int):
+            num = val
+        elif isinstance(val, float) and val.is_integer():
+            num = int(val)
+        elif isinstance(val, str):
+            text = val.strip()
+            try:
+                if text.lower().startswith("0x"):
+                    num = int(text.split()[0], 16)
+                else:
+                    m = re.search(r"\(([-]?\d+)\)", text)
+                    if m:
+                        num = int(m.group(1))
+                    elif re.fullmatch(r"-?\d+", text):
+                        num = int(text)
+            except Exception:
+                num = None
+
+            if num is None and mapping:
+                for k, v in mapping.items():
+                    if str(v).lower() == text.lower():
+                        num = int(k)
+                        break
+
+            if num is not None and not enum_label:
+                m = re.match(r"(.+?)\s*\(\s*[-]?\d+\s*\)", text)
+                if m:
+                    enum_label = m.group(1).strip()
+
+        if num is not None and mapping and num in mapping:
+            enum_label = mapping[num]
+
+        return num, enum_label
+
     def _get_adapter(self):
         """Get the protocol adapter for this device."""
         return self.device_manager.get_protocol(self.device_name)
@@ -342,10 +413,17 @@ class ControlDialog(QDialog):
                 res = adapter.read_signal(dummy)
                 
                 if res.value is not None:
-                    self.lbl_current_val.setText(str(res.value))
+                    formatted = self._format_status_value(res)
+                    self.lbl_current_val.setText(formatted)
+                    # keep raw value handy on hover
+                    try:
+                        self.lbl_current_val.setToolTip(repr(res.value))
+                    except Exception:
+                        self.lbl_current_val.setToolTip(str(res.value))
                     self._set_label_status(self.lbl_current_val, "info")
                 else:
                     self.lbl_current_val.setText("NULL (Read Failed)")
+                    self.lbl_current_val.setToolTip("")
                     self._set_label_status(self.lbl_current_val, "error")
         except Exception as e:
             self.lbl_current_val.setText(str(e))
@@ -441,7 +519,14 @@ class ControlDialog(QDialog):
                     self._update_button_states()
                     self._load_current_value()
                 else:
-                    self.lbl_status.setText("SBO SEQUENCE FAILED")
+                    # If adapter provided a specific control error, show it to the user
+                    err = getattr(adapter, '_last_control_error', None)
+                    if err:
+                        from PySide6.QtWidgets import QMessageBox
+                        QMessageBox.warning(self, "Operate Aborted", f"Operation aborted: {err}")
+                        self.lbl_status.setText(err)
+                    else:
+                        self.lbl_status.setText("SBO SEQUENCE FAILED")
                     self._set_label_status(self.lbl_status, "error")
             else:
                 # Direct operate or already selected SBO

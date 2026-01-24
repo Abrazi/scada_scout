@@ -49,8 +49,8 @@ class ControlObjectRuntime:
     
     # Control Parameters
     ctl_num: int = 0  # Incrementing counter for Operates
-    originator_cat: int = 2 # Station
-    originator_id: str = "ScadaScout"
+    originator_cat: int = 3 # origin_cat must be between 1 and 7 (3=Remote)
+    originator_id: str = "iedexplorer"
     sbo_reference: str = "" # Path to SBO or SBOw attribute
     
     def reset(self):

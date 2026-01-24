@@ -881,6 +881,24 @@ def ControlObjectClient_setOriginator(client, identity, category):
         except AttributeError:
             logger.error("ControlObjectClient_setOriginator/setOrigin not found in library.")
 
+def ControlObjectClient_setCtlNum(client, ctl_num):
+    """
+    Set the control number for the next operation.
+    
+    Args:
+        client: ControlObjectClient handle
+        ctl_num: Integer control number (0-255)
+    """
+    try:
+        _check_lib()
+        func = _lib.ControlObjectClient_setCtlNum
+        func.restype = None
+        func.argtypes = [ControlObjectClient, c_uint8]
+        func(client, int(ctl_num) % 256)
+        return True
+    except AttributeError:
+        return False
+
 def ControlObjectClient_setInterlockCheck(client, value):
     """Set Interlock Check flag."""
     try:
@@ -1132,6 +1150,16 @@ def MmsValue_setElement(complex_value, index, element_value):
     func.argtypes = [MmsValue, c_int, MmsValue]
     func(complex_value, index, element_value)
 
+def MmsValue_getElement(complex_value, index):
+    """Get element from a structure/array."""
+    if not complex_value:
+        return None
+    _check_lib()
+    func = _lib.MmsValue_getElement
+    func.restype = MmsValue
+    func.argtypes = [MmsValue, c_int]
+    return func(complex_value, index)
+
 def MmsValue_newUtcTime(timestamp_s):
     """Create new UTC Time MmsValue from unix timestamp (seconds)."""
     try:
@@ -1185,16 +1213,20 @@ def MmsValue_setUtcTimeMs(mms_val, timestamp_ms):
         # Fallback to second-resolution
         MmsValue_setUtcTime(mms_val, int(timestamp_ms / 1000))
 
-def MmsValue_newInteger(value):
-    """Create new Integer (auto-sized)."""
+def MmsValue_newUnsigned(value):
+    """Create new Unsigned Integer (32-bit)."""
     _check_lib()
-    func = _lib.MmsValue_newInteger
-    func.restype = MmsValue
-    func.argtypes = [c_int] # width in bits? Or value?
-    # libiec61850 C API: MmsValue* MmsValue_newInteger(int size); -> Creates empty integer of size.
-    # MmsValue* MmsValue_newIntegerFromInt32(int32_t value);
-    # User assumes helper.
-    # safe implementation:
+    try:
+        func = _lib.MmsValue_newUnsignedFromUint32
+        func.restype = MmsValue
+        func.argtypes = [c_uint32]
+        return func(int(value))
+    except AttributeError:
+        # Fallback to general integer if unsigned specific not found
+        return MmsValue_newInt32(value)
+
+def MmsValue_newInteger(value):
+    """Create new Integer (32-bit)."""
     return MmsValue_newInt32(value)
 
 # ============================================================================

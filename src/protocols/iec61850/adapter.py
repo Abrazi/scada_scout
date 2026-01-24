@@ -1386,354 +1386,143 @@ class IEC61850Adapter(BaseProtocol):
     def send_command(self, signal: Signal, value: Any, params: dict = None) -> bool:
         """
         High-level command sender that automatically handles SBO workflow.
-        Replicates iedexplorer's DoSendCommandClick logic with detailed logging.
-        
-        For SBO models: SELECT -> wait -> OPERATE
-        For Direct models: OPERATE only
         """
         if self.event_logger:
             self.event_logger.transaction("IEC61850", f"→ SEND_COMMAND {signal.address} = {value}")
-            self.event_logger.info("IEC61850", f"Starting command execution for {signal.address}")
 
         if not self.connected or not self.connection:
-            if self.event_logger:
-                self.event_logger.error("IEC61850", "SEND_COMMAND FAILED: Not connected")
             return False
 
         try:
-            # Initialize control context if needed
             object_ref = self._get_control_object_reference(signal.address)
-            ctx = self.controls.get(object_ref)
-            if not ctx:
-                ctx = self.init_control_context(signal.address)
+            ctx = self.controls.get(object_ref) or self.init_control_context(signal.address)
+            if not ctx: return False
 
-            if not ctx:
-                if self.event_logger:
-                    self.event_logger.error("IEC61850", f"SEND_COMMAND FAILED: Control initialization failed for {signal.address}")
-                return False
-
-            # Check if SBO is required
+            # Use high-level ControlObjectClient for SBO flow
             if ctx.ctl_model.is_sbo:
-                # Check if SBO objects are actually available
-                sbo_available = False
+                if self.event_logger:
+                    self.event_logger.info("IEC61850", f"SBO sequence for {object_ref} (model={ctx.ctl_model.name})")
+
+                # Create ONE client for the entire sequence
+                with self._lock:
+                    client = iec61850.ControlObjectClient_create(ctx.object_reference, self.connection)
+                
+                if not client:
+                    if self.event_logger: self.event_logger.error("IEC61850", "Failed to create ControlObjectClient")
+                    return self._fallback_operate(signal, value, object_ref)
+
                 try:
-                    # Try to read the SBO reference to see if it exists
-                    # Note: SBO/SBOw are structures, so we read the object, not just a boolean
-                    test_val = iec61850.IedConnection_readObject(
-                        self.connection, ctx.sbo_reference, iec61850.IEC61850_FC_CO
-                    )
-                    if test_val:
-                        sbo_available = True
-                        iec61850.MmsValue_delete(test_val)
-                except:
-                    pass
-                
-                if not sbo_available:
-                    if self.event_logger:
-                        self.event_logger.warning("IEC61850", f"SBO objects not available despite ctlModel={ctx.ctl_model.name}. Falling back to direct control.")
-                    # Fall back to direct operate
-                    return self.operate(signal, value=value, params=params)
-                
-                # SBO workflow: SELECT -> wait -> OPERATE
-                if self.event_logger:
-                    self.event_logger.info("IEC61850", f"SBO Mode detected ({ctx.ctl_model.name}). Starting SBO sequence...")
-                    self.event_logger.info("IEC61850", f"Control Model: {ctx.ctl_model.name}, SBO Reference: {ctx.sbo_reference}")
+                    # SELECT phase
+                    if not self.select(signal, value, params, control_client=client):
+                        return False
 
-                # Find SBO and Oper addresses
-                sbo_address = ctx.sbo_reference + ".ctlVal"
-                oper_address = object_ref + ".Oper.ctlVal"
+                    # WAIT phase
+                    sbo_timeout = params.get('sbo_timeout', 100) if params else 100
+                    time.sleep(sbo_timeout / 1000.0)
 
-                # Create dummy signals for SBO and Oper
-                from src.models.device_models import Signal as DummySignal
-                sbo_signal = DummySignal(name="ctlVal", address=sbo_address)
-                oper_signal = DummySignal(name="ctlVal", address=oper_address)
-
-                # Step 1: SELECT
-                if self.event_logger:
-                    self.event_logger.transaction("IEC61850", f"  → SELECT {sbo_address}")
-                    self.event_logger.info("IEC61850", f"  Executing SELECT with value={value}, current ctlNum={ctx.ctl_num}")
-
-                select_success = self.select(sbo_signal, value=value, params=params)
-                if not select_success:
-                    if self.event_logger:
-                        self.event_logger.error("IEC61850", "  ← SELECT FAILED - Aborting SBO sequence")
-                    return False
-
-                if self.event_logger:
-                    self.event_logger.transaction("IEC61850", "  ← SELECT SUCCESS")
-                    self.event_logger.info("IEC61850", f"  SELECT completed. State: {ctx.state.name}")
-
-                # Step 2: Wait for SBO timeout (default 100ms like iedexplorer)
-                sbo_timeout = params.get('sbo_timeout', 100) if params else 100
-                if self.event_logger:
-                    self.event_logger.info("IEC61850", f"  Waiting {sbo_timeout}ms for SBO timeout...")
-
-                time.sleep(sbo_timeout / 1000.0)
-
-                # Step 3: OPERATE
-                if self.event_logger:
-                    self.event_logger.transaction("IEC61850", f"  → OPERATE {oper_address}")
-                    self.event_logger.info("IEC61850", f"  Executing OPERATE with value={value}, incremented ctlNum={ctx.ctl_num + 1}")
-
-                operate_success = self.operate(oper_signal, value=value, params=params)
-                if not operate_success:
-                    if self.event_logger:
-                        self.event_logger.error("IEC61850", "  ← OPERATE FAILED - SBO sequence incomplete")
-                    return False
-
-                if self.event_logger:
-                    self.event_logger.transaction("IEC61850", "  ← OPERATE SUCCESS")
-                    self.event_logger.transaction("IEC61850", "← SBO SEQUENCE COMPLETE")
-                    self.event_logger.info("IEC61850", f"SBO sequence finished successfully. Final ctlNum={ctx.ctl_num}")
-
-                return True
-
+                    # OPERATE phase (sharing same client)
+                    return self.operate(signal, value, params, control_client=client)
+                finally:
+                    with self._lock:
+                        iec61850.ControlObjectClient_destroy(client)
             else:
-                # Direct control: OPERATE only
-                if self.event_logger:
-                    self.event_logger.info("IEC61850", f"Direct Control Mode ({ctx.ctl_model.name}). Sending OPERATE...")
-
-                return self.operate(signal, value=value, params=params)
+                # Direct Control
+                return self.operate(signal, value, params)
 
         except Exception as e:
             logger.error(f"Send command failed: {e}")
-            if self.event_logger:
-                self.event_logger.error("IEC61850", f"SEND_COMMAND EXCEPTION: {e}")
             return False
 
-    def select(self, signal: Signal, value: Any = None, params: dict = None) -> bool:
-        """Perform SELECT phase (SBO) using ControlObjectClient API."""
-        if self.event_logger:
-            self.event_logger.transaction("IEC61850", f"→ SELECT {signal.address} = {value}")
-            self.event_logger.info("IEC61850", f"Starting SBO SELECT phase for {signal.address}")
-
-        if not self.connected or not self.connection:
-            if self.event_logger:
-                self.event_logger.error("IEC61850", "SELECT FAILED: Not connected")
-            return False
-
+    def select(self, signal: Signal, value: Any = None, params: dict = None, control_client: Any = None) -> bool:
+        """Perform SELECT phase."""
+        own_client = False
         try:
             object_ref = self._get_control_object_reference(signal.address)
-            if not object_ref:
-                if self.event_logger:
-                    self.event_logger.error("IEC61850", f"SELECT FAILED: Invalid control reference from {signal.address}")
-                return False
+            if not control_client:
+                with self._lock:
+                    control_client = iec61850.ControlObjectClient_create(object_ref, self.connection)
+                own_client = True
 
-            if self.event_logger:
-                self.event_logger.debug("IEC61850", f"Control object reference: {object_ref}")
-
-            # Try to create ControlObjectClient
-            # NOTE: This does synchronous network reads to discover control model!
-            with self._lock:
-                if self.event_logger:
-                    self.event_logger.debug("IEC61850", f"Creating ControlObjectClient for {object_ref}...")
-                
-                control_client = iec61850.ControlObjectClient_create(object_ref, self.connection)
-                
-                if not control_client:
-                    if self.event_logger:
-                        self.event_logger.error("IEC61850", f"SELECT FAILED: ControlObjectClient_create returned NULL for {object_ref}")
-                        self.event_logger.warning("IEC61850", "This usually means:")
-                        self.event_logger.warning("IEC61850", "  1. Object reference is incorrect or doesn't exist")
-                        self.event_logger.warning("IEC61850", "  2. IED timed out during control model discovery")
-                        self.event_logger.warning("IEC61850", "  3. Control object is not properly configured in IED")
-                        self.event_logger.warning("IEC61850", f"  Trying fallback: manual SBO write to {object_ref}.SBO")
-                    
-                    # FALLBACK: Try manual SBO write (old method) for IEDs that don't work with ControlObjectClient
-                    return self._fallback_select(signal, value, object_ref)
-                
-                if self.event_logger:
-                    self.event_logger.debug("IEC61850", f"✓ ControlObjectClient created successfully")
-                
-                try:
-                    # Get control model
-                    ctl_model_int = iec61850.ControlObjectClient_getControlModel(control_client)
-                    if self.event_logger:
-                        self.event_logger.info("IEC61850", f"Control model: {ctl_model_int} (0=STATUS_ONLY, 1=DIRECT_NORMAL, 2=SBO_NORMAL, 3=DIRECT_ENHANCED, 4=SBO_ENHANCED)")
-                    
-                    # Check if it's SBO model
-                    if ctl_model_int == 0:  # STATUS_ONLY
-                        if self.event_logger:
-                            self.event_logger.error("IEC61850", f"SELECT FAILED: Object has ctlModel=StatusOnly (0)")
-                        return False
-                    
-                    if ctl_model_int not in [2, 4]:  # SBO_NORMAL=2, SBO_ENHANCED=4
-                        if self.event_logger:
-                            self.event_logger.info("IEC61850", f"Object has ctlModel={ctl_model_int}. Skipping SELECT (Direct Control).")
-                        return True
-                    
-                    if self.event_logger:
-                        self.event_logger.info("IEC61850", f"Issuing SELECT (ctlModel={ctl_model_int})")
-                    
-                    # For SBO_ENHANCED (4), use selectWithValue; for SBO_NORMAL (2), use select
-                    success = False
-                    if ctl_model_int == 4 and value is not None:  # SBO_ENHANCED
-                        # Create MmsValue for the value
-                        mms_val = self._create_mms_value(value, signal)
-                        if mms_val:
-                            try:
-                                if self.event_logger:
-                                    self.event_logger.debug("IEC61850", "Calling ControlObjectClient_selectWithValue...")
-                                success = iec61850.ControlObjectClient_selectWithValue(control_client, mms_val)
-                            finally:
-                                iec61850.MmsValue_delete(mms_val)
-                        else:
-                            if self.event_logger:
-                                self.event_logger.error("IEC61850", "SELECT FAILED: Could not create MmsValue")
-                    else:  # SBO_NORMAL
-                        if self.event_logger:
-                            self.event_logger.debug("IEC61850", "Calling ControlObjectClient_select...")
-                        success = iec61850.ControlObjectClient_select(control_client)
-                    
-                    if success:
-                        if self.event_logger:
-                            self.event_logger.transaction("IEC61850", "← SELECT SUCCESS")
-                            self.event_logger.info("IEC61850", f"SELECT completed successfully")
-                        
-                        # Update context if it exists
-                        ctx = self.controls.get(object_ref)
-                        if ctx:
-                            ctx.state = ControlState.SELECTED
-                            ctx.last_select_time = datetime.now()
-                        return True
-                    else:
-                        last_error = iec61850.ControlObjectClient_getLastError(control_client)
-                        if self.event_logger:
-                            self.event_logger.error("IEC61850", f"← SELECT FAILED: IED error code {last_error}")
-                            self.event_logger.warning("IEC61850", f"Trying fallback method...")
-                        
-                        # FALLBACK: Try manual SBO write
-                        return self._fallback_select(signal, value, object_ref)
-                        
-                finally:
-                    # Always destroy the control client
-                    if self.event_logger:
-                        self.event_logger.debug("IEC61850", "Destroying ControlObjectClient")
-                    iec61850.ControlObjectClient_destroy(control_client)
-
-        except Exception as e:
-            logger.error(f"Select failed: {e}")
-            if self.event_logger:
-                self.event_logger.error("IEC61850", f"SELECT EXCEPTION: {e}")
-                self.event_logger.warning("IEC61850", f"Trying fallback method...")
-            
-            # FALLBACK: Try manual SBO write on exception
-            object_ref = self._get_control_object_reference(signal.address)
-            if object_ref:
+            if not control_client:
                 return self._fallback_select(signal, value, object_ref)
-            return False
 
-    def operate(self, signal: Signal, value: Any, params: dict = None) -> bool:
-        """Perform OPERATE phase using ControlObjectClient API."""
-        if self.event_logger:
-            self.event_logger.transaction("IEC61850", f"→ OPERATE {signal.address} = {value}")
-            self.event_logger.info("IEC61850", f"Starting OPERATE phase for {signal.address}")
+            ctx = self.controls.get(object_ref)
+            origin_id, origin_cat = self._compute_originator_info(ctx)
+            iec61850.ControlObjectClient_setOriginator(control_client, origin_id, origin_cat)
 
-        if not self.connected or not self.connection:
-            if self.event_logger:
-                self.event_logger.error("IEC61850", "OPERATE FAILED: Not connected")
-            return False
-
-        try:
-            object_ref = self._get_control_object_reference(signal.address)
-            if not object_ref:
-                if self.event_logger:
-                    self.event_logger.error("IEC61850", f"OPERATE FAILED: Invalid control reference from {signal.address}")
-                return False
-
-            if self.event_logger:
-                self.event_logger.debug("IEC61850", f"Control object reference: {object_ref}")
-
-            # Try to create ControlObjectClient
-            # NOTE: This does synchronous network reads to discover control model!
-            with self._lock:
-                if self.event_logger:
-                    self.event_logger.debug("IEC61850", f"Creating ControlObjectClient for {object_ref}...")
-                
-                control_client = iec61850.ControlObjectClient_create(object_ref, self.connection)
-                
-                if not control_client:
-                    if self.event_logger:
-                        self.event_logger.error("IEC61850", f"OPERATE FAILED: ControlObjectClient_create returned NULL for {object_ref}")
-                        self.event_logger.warning("IEC61850", "This usually means:")
-                        self.event_logger.warning("IEC61850", "  1. Object reference is incorrect or doesn't exist")
-                        self.event_logger.warning("IEC61850", "  2. IED timed out during control model discovery")
-                        self.event_logger.warning("IEC61850", "  3. Control object is not properly configured in IED")
-                        self.event_logger.warning("IEC61850", f"  Trying fallback: manual write to {object_ref}.Oper")
-                    
-                    # FALLBACK: Try manual Oper write (old method) for IEDs that don't work with ControlObjectClient
-                    return self._fallback_operate(signal, value, object_ref)
-                
-                if self.event_logger:
-                    self.event_logger.debug("IEC61850", f"✓ ControlObjectClient created successfully")
-                
-                try:
-                    # Get control model
-                    ctl_model_int = iec61850.ControlObjectClient_getControlModel(control_client)
-                    if self.event_logger:
-                        self.event_logger.info("IEC61850", f"Control model: {ctl_model_int} (0=STATUS_ONLY, 1=DIRECT_NORMAL, 2=SBO_NORMAL, 3=DIRECT_ENHANCED, 4=SBO_ENHANCED)")
-                    
-                    if ctl_model_int == 0:  # STATUS_ONLY
-                        if self.event_logger:
-                            self.event_logger.error("IEC61850", f"OPERATE FAILED: Object has ctlModel=StatusOnly (0)")
-                        return False
-                    
-                    # Set originator information
-                    ctx = self.controls.get(object_ref)
-                    if ctx:
-                        origin_cat = ctx.originator_cat if ctx.originator_cat > 0 else 3  # 3 = Remote
-                        origin_id = ctx.originator_id if ctx.originator_id else "SCADA"
-                    else:
-                        origin_cat = 3  # Remote
-                        origin_id = "SCADA"
-                    
-                    if self.event_logger:
-                        self.event_logger.debug("IEC61850", f"Setting originator: {origin_id}, category: {origin_cat}")
-                    iec61850.ControlObjectClient_setOriginator(control_client, origin_id, origin_cat)
-                    
-                    if self.event_logger:
-                        self.event_logger.debug("IEC61850", f"Issuing OPERATE (ctlModel={ctl_model_int})")
-                    
-                    # Create MmsValue for the control value
-                    mms_val = self._create_mms_value(value, signal)
-                    if not mms_val:
-                        if self.event_logger:
-                            self.event_logger.error("IEC61850", "OPERATE FAILED: Could not create MmsValue")
-                        return False
-                    
+            ctl_model = iec61850.ControlObjectClient_getControlModel(control_client)
+            
+            success = False
+            if ctl_model == 4 and value is not None: # SBO_ENHANCED
+                mms_val = self._create_mms_value(value, signal)
+                if mms_val:
                     try:
-                        if self.event_logger:
-                            self.event_logger.debug("IEC61850", f"Calling ControlObjectClient_operate with value={value}, operTime=0")
-                        
-                        # Call operate with operTime=0 (operate now)
-                        success = iec61850.ControlObjectClient_operate(control_client, mms_val, 0)
-                        
-                        if success:
-                            if self.event_logger:
-                                self.event_logger.transaction("IEC61850", "← OPERATE SUCCESS")
-                                self.event_logger.info("IEC61850", f"OPERATE completed successfully")
-                            
-                            # Update context if it exists
-                            if ctx:
-                                ctx.state = ControlState.OPERATED
-                                ctx.last_operate_time = datetime.now()
-                            return True
-                        else:
-                            last_error = iec61850.ControlObjectClient_getLastError(control_client)
-                            if self.event_logger:
-                                self.event_logger.error("IEC61850", f"← OPERATE FAILED: IED error code {last_error}")
-                                self.event_logger.warning("IEC61850", f"Trying fallback method...")
-                            
-                            # FALLBACK: Try manual Oper write
-                            return self._fallback_operate(signal, value, object_ref)
+                        success = iec61850.ControlObjectClient_selectWithValue(control_client, mms_val)
                     finally:
                         iec61850.MmsValue_delete(mms_val)
-                        
-                finally:
-                    # Always destroy the control client
-                    if self.event_logger:
-                        self.event_logger.debug("IEC61850", "Destroying ControlObjectClient")
-                    iec61850.ControlObjectClient_destroy(control_client)
+            else:
+                success = iec61850.ControlObjectClient_select(control_client)
+
+            if success:
+                if self.event_logger: self.event_logger.transaction("IEC61850", "← SELECT SUCCESS")
+                if ctx:
+                    ctx.state = ControlState.SELECTED
+                    # Try to capture the updated ctlNum assigned by IED during selection
+                    try:
+                         # Some IEDs expose the assigned ctlNum in the DO. Use FC=ST.
+                         val, err = iec61850.IedConnection_readInt32Value(self.connection, f"{object_ref}.ctlNum", iec61850.IEC61850_FC_ST)
+                         if err == iec61850.IED_ERROR_OK:
+                             ctx.ctl_num = val
+                             if self.event_logger: self.event_logger.debug("IEC61850", f"Captured ied-assigned ctlNum: {val}")
+                    except: pass
+                return True
+            else:
+                err = iec61850.ControlObjectClient_getLastError(control_client)
+                if self.event_logger: self.event_logger.error("IEC61850", f"SELECT FAILED (IED Error: {err})")
+                return self._fallback_select(signal, value, object_ref)
+
+        finally:
+            if own_client and control_client:
+                with self._lock: iec61850.ControlObjectClient_destroy(control_client)
+
+    def operate(self, signal: Signal, value: Any, params: dict = None, control_client: Any = None) -> bool:
+        """Perform OPERATE phase."""
+        own_client = False
+        try:
+            object_ref = self._get_control_object_reference(signal.address)
+            if not control_client:
+                with self._lock:
+                    control_client = iec61850.ControlObjectClient_create(object_ref, self.connection)
+                own_client = True
+
+            if not control_client:
+                return self._fallback_operate(signal, value, object_ref)
+
+            ctx = self.controls.get(object_ref)
+            origin_id, origin_cat = self._compute_originator_info(ctx)
+            iec61850.ControlObjectClient_setOriginator(control_client, origin_id, origin_cat)
+
+            # Sync ctlNum only if we are using a fresh client for this phase
+            if own_client and ctx and ctx.ctl_num is not None:
+                iec61850.ControlObjectClient_setCtlNum(control_client, ctx.ctl_num)
+
+            mms_val = self._create_mms_value(value, signal)
+            if not mms_val: return False
+
+            try:
+                success = iec61850.ControlObjectClient_operate(control_client, mms_val, 0)
+                if success:
+                    if self.event_logger: self.event_logger.transaction("IEC61850", "← OPERATE SUCCESS")
+                    if ctx:
+                        ctx.state = ControlState.OPERATED
+                        ctx.ctl_num = (ctx.ctl_num + 1) % 256
+                    return True
+                else:
+                    err = iec61850.ControlObjectClient_getLastError(control_client)
+                    if self.event_logger: self.event_logger.error("IEC61850", f"OPERATE FAILED (IED Error: {err})")
+                    return self._fallback_operate(signal, value, object_ref)
+            finally:
+                iec61850.MmsValue_delete(mms_val)
 
         except Exception as e:
             logger.error(f"Operate failed: {e}")
@@ -1746,6 +1535,9 @@ class IEC61850Adapter(BaseProtocol):
             if object_ref:
                 return self._fallback_operate(signal, value, object_ref)
             return False
+        finally:
+            if own_client and control_client:
+                with self._lock: iec61850.ControlObjectClient_destroy(control_client)
 
     def init_control_context(self, signal_address: str) -> Optional[ControlObjectRuntime]:
         """
@@ -1872,85 +1664,39 @@ class IEC61850Adapter(BaseProtocol):
         return address
 
     def _build_operate_struct(self, value, ctx: ControlObjectRuntime, is_select: bool = False):
-        """Builds the complex Operate structure manually (7 elements) with detailed logging."""
+        """Builds the complex Operate structure by modifying an existing template from the IED."""
         struct = None
         try:
-             # Standard IEC 61850 Operate structure baseline enforcement
-             struct = iec61850.MmsValue_newStructure(7)
-             if not struct: 
-                 logger.error("Failed to allocate MmsValue structure.")
-                 return None
+             # Strategy: Use existing structure as template to ensure all types (origin, T, etc.) match IED expectations
+             path = ctx.sbo_reference if is_select else f"{ctx.object_reference}.Oper"
+             with self._lock:
+                 struct, err = iec61850.IedConnection_readObject(self.connection, path, iec61850.IEC61850_FC_CO)
              
-             now_ms = int(time.time() * 1000)
-             
-             # Extract Baseline Values
-             ctl_val_bool = bool(value)
-             test_bool = False # Safe Baseline
-             check_val = 0     # Safe Baseline
-             cat = ctx.originator_cat if ctx.originator_cat > 0 else 3 # 3 = Remote (Action 2)
-             ident = ctx.originator_id if ctx.originator_id and ctx.originator_id != "ScadaScout" else "SCADA"
+             if not struct:
+                 # Minimal fallback if read fails 
+                 struct = iec61850.MmsValue_newStructure(6 if is_select else 7)
+                 if self.event_logger: self.event_logger.debug("IEC61850", f"Could not read {path}. Building from scratch.")
 
-             # Root Cause Fix #1: Handle ctlNum carefully (Action 3 / Option B)
-             # We must ALWAYS fill the structure element to avoid NULL pointer crashes in the native encoder.
-             # Echo back the last known ctlNum from the IED.
-             ctl_num_to_send = ctx.ctl_num
+             if not struct: return None
+             
+             # Overwrite ONLY critical components
+             # 0: ctlVal (BOOLEAN)
+             iec61850.MmsValue_setElement(struct, 0, iec61850.MmsValue_newBoolean(bool(value)))
+             
+             size = iec61850.MmsValue_getArraySize(struct)
+             # ctlNum index: SBOw=2, Oper=3
+             ctl_num_idx = 2 if size == 6 else 3
+             if size > ctl_num_idx:
+                 iec61850.MmsValue_setElement(struct, ctl_num_idx, iec61850.MmsValue_newUnsigned(ctx.ctl_num))
 
              if self.event_logger:
-                 self.event_logger.debug("IEC61850", f"Constructing {'SELECT' if is_select else 'OPERATE'} Payload (7 elements):")
-                 self.event_logger.debug("IEC61850", f"  [0] ctlVal: {ctl_val_bool}")
-                 self.event_logger.debug("IEC61850", f"  [1] operTm: {datetime.fromtimestamp(now_ms/1000).isoformat()} (Echoing T)")
-                 self.event_logger.debug("IEC61850", f"  [2] origin: cat={cat}, id={ident}")
-                 self.event_logger.debug("IEC61850", f"  [3] ctlNum: {ctl_num_to_send} (Echoed form IED)")
-                 self.event_logger.debug("IEC61850", f"  [4] T: {datetime.fromtimestamp(now_ms/1000).isoformat()}")
-                 self.event_logger.debug("IEC61850", f"  [5] Test: {test_bool}")
-                 self.event_logger.debug("IEC61850", f"  [6] Check: {check_val}")
-
-             # 0: ctlVal
-             mms_val = self._create_mms_value(ctl_val_bool, None)
-             if not mms_val:
-                 logger.error(f"Failed to create ctlVal MmsValue for value: {ctl_val_bool}")
-                 iec61850.MmsValue_delete(struct)
-                 return None
-             iec61850.MmsValue_setElement(struct, 0, mms_val)
-             
-             # 1: operTm (Required to be non-NULL for encoder stability)
-             mms_tm = iec61850.MmsValue_newUtcTimeMs(now_ms)
-             if mms_tm:
-                 iec61850.MmsValue_setElement(struct, 1, mms_tm)
-             else:
-                 # Fallback to prevent NULL element crash
-                 iec61850.MmsValue_setElement(struct, 1, iec61850.MmsValue_newBoolean(False))
-             
-             # 2: origin [cat, ident]
-             origin = iec61850.MmsValue_newStructure(2)
-             if origin:
-                 iec61850.MmsValue_setElement(origin, 0, iec61850.MmsValue_newInteger(cat))
-                 ident_val = iec61850.MmsValue_newVisibleString(ident)
-                 if ident_val:
-                     iec61850.MmsValue_setElement(origin, 1, ident_val)
-                 iec61850.MmsValue_setElement(struct, 2, origin)
-             
-             # 3: ctlNum (MANDATORY non-NULL)
-             iec61850.MmsValue_setElement(struct, 3, iec61850.MmsValue_newInteger(ctl_num_to_send))
-             
-             # 4: T
-             mms_t = iec61850.MmsValue_newUtcTimeMs(now_ms)
-             if mms_t:
-                 iec61850.MmsValue_setElement(struct, 4, mms_t)
-             else:
-                 iec61850.MmsValue_setElement(struct, 4, iec61850.MmsValue_newBoolean(False))
-
-             # 5: Test (BOOLEAN)
-             iec61850.MmsValue_setElement(struct, 5, iec61850.MmsValue_newBoolean(test_bool))
-
-             # 6: Check (CheckConditions - BitString[2])
-             mms_check = iec61850.MmsValue_newBitString(2)
-             if mms_check:
-                 iec61850.MmsValue_setBitStringBit(mms_check, 0, False)
-                 iec61850.MmsValue_setBitStringBit(mms_check, 1, False)
-                 iec61850.MmsValue_setElement(struct, 6, mms_check)
+                 self.event_logger.debug("IEC61850", f"Modified {path} structure (size {size}): ctlVal={bool(value)}, ctlNum={ctx.ctl_num}")
              
              return struct
+        except Exception as e:
+             logger.error(f"Failed to build operate struct: {e}")
+             if struct: iec61850.MmsValue_delete(struct)
+             return None
         except Exception as e:
              logger.error(f"Failed to build operate struct: {e}")
              if struct: iec61850.MmsValue_delete(struct)
@@ -1971,8 +1717,166 @@ class IEC61850Adapter(BaseProtocol):
             elif isinstance(value, str):
                 return iec61850.MmsValue_newVisibleString(value)
             return None
-        except:
+        except Exception as e:
+            logger.error(f"Error in _create_mms_value: {e}")
             return None
+
+    def _compute_originator_info(self, ctx):
+        """Return a tuple (origin_id, origin_cat) normalized for ControlAction calls.
+
+        Rules:
+        - origin_cat must be between 1 and 7; 0 or missing -> default to 3 (Remote)
+        - origin_id default is "SCADA"; treat "ScadaScout" as default placeholder
+        - This is pure-Python and unit-testable.
+        """
+        default_cat = 3
+        default_id = "SCADA"
+        if not ctx:
+            return default_id, default_cat
+        cat = getattr(ctx, 'originator_cat', None)
+        ident = getattr(ctx, 'originator_id', None)
+        try:
+            cat = int(cat) if cat is not None else 0
+        except Exception:
+            cat = 0
+        if not (1 <= cat <= 7):
+            cat = default_cat
+        if not ident or str(ident).strip() == "ScadaScout":
+            ident = default_id
+        return ident, cat
+
+    def _normalize_ctlnum(self, val) -> int:
+        """Normalize a ctlNum-like value to integer in 0..255 (uint8).
+
+        - Accepts int-like or numeric strings (decimal/hex).
+        - On parse failure, raises ValueError.
+        - Ensures result is in 0..255 by modulo 256.
+        """
+        if val is None:
+            raise ValueError("ctlNum is None")
+        # Accept strings like '0x1' as hex
+        if isinstance(val, str):
+            text = val.strip()
+            if text.lower().startswith('0x'):
+                num = int(text, 16)
+            else:
+                num = int(text)
+        else:
+            num = int(val)
+        # Normalize into uint8 range
+        return num % 256
+
+    def _wait_for_ctlnum(self, ctx, object_ref: str, timeout_ms: int = 600) -> bool:
+        """Wait up to timeout_ms for the IED-assigned ctlNum to become available.
+
+        Strategy (in order):
+        - poll `{sbo_ref}.ctlNum` if ctx.sbo_reference available
+        - poll `{object_ref}.ctlNum`
+        - try reading full SBO structure and extract element[3]
+        - if native async select callback is available, invoke it once and wait briefly
+
+        Returns True and updates ctx.ctl_num when a non-None ctlNum is found. Returns False on timeout.
+        """
+        if not ctx:
+            return False
+
+        deadline = time.time() + (timeout_ms / 1000.0)
+        # quick helper to attempt reads
+        def _attempt_reads() -> int | None:
+            # 1) SBOx.ctlNum
+            sbo = getattr(ctx, 'sbo_reference', None)
+            if sbo:
+                try:
+                    v, e = iec61850.IedConnection_readInt32Value(self.connection, f"{sbo}.ctlNum", iec61850.IEC61850_FC_ST)
+                    if e == iec61850.IED_ERROR_OK and v is not None:
+                        return int(v) % 256
+                except Exception:
+                    pass
+                # try reading full structure
+                try:
+                    m = iec61850.IedConnection_readObject(self.connection, f"{sbo}", iec61850.IEC61850_FC_ST)
+                    if m:
+                        try:
+                            elem = iec61850.MmsValue_getElement(m, 3)
+                            if elem:
+                                return int(iec61850.MmsValue_toInt32(elem)) % 256
+                        finally:
+                            try:
+                                iec61850.MmsValue_delete(m)
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+
+            # 2) object_ref.ctlNum
+            try:
+                v, e = iec61850.IedConnection_readInt32Value(self.connection, f"{object_ref}.ctlNum", iec61850.IEC61850_FC_ST)
+                if e == iec61850.IED_ERROR_OK and v is not None:
+                    return int(v) % 256
+            except Exception:
+                pass
+
+            return None
+
+        # fast-poll until deadline
+        while time.time() < deadline:
+            num = _attempt_reads()
+            if num is not None:
+                try:
+                    ctx.ctl_num = self._normalize_ctlnum(num)
+                except Exception:
+                    ctx.ctl_num = int(num) % 256
+                # clear any previous control error
+                try: delattr(self, '_last_control_error')
+                except Exception: pass
+                return True
+            time.sleep(0.08)
+
+        # last-resort: try async ControlObjectClient_selectAsync to capture ControlAction ctlNum
+        try:
+            if hasattr(iec61850, 'ControlObjectClient_selectAsync') and hasattr(self, 'controls'):
+                # create a temporary client and call async select to get callback
+                try:
+                    client = iec61850.ControlObjectClient_create(object_ref, self.connection)
+                except Exception:
+                    client = None
+                if client:
+                    import threading
+                    ev = threading.Event()
+                    captured = {'ctl': None}
+
+                    def _cb(req_id, action_ptr, err_code, action_type, is_select):
+                        try:
+                            num = iec61850.ControlAction_getCtlNum(action_ptr)
+                            captured['ctl'] = int(num) % 256
+                        except Exception:
+                            captured['ctl'] = None
+                        finally:
+                            ev.set()
+
+                    try:
+                        # prefer selectWithValueAsync when available
+                        if hasattr(iec61850, 'ControlObjectClient_selectWithValueAsync'):
+                            iec61850.ControlObjectClient_selectWithValueAsync(client, None, None, _cb, None)
+                        else:
+                            iec61850.ControlObjectClient_selectAsync(client, None, _cb, None)
+
+                        if ev.wait(min(0.5, timeout_ms/1000.0)) and captured['ctl'] is not None:
+                            ctx.ctl_num = captured['ctl']
+                            try: delattr(self, '_last_control_error')
+                            except Exception: pass
+                            return True
+                    finally:
+                        try:
+                            iec61850.ControlObjectClient_destroy(client)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
+        # timed out: set a human-friendly control error for UI/diagnostics
+        self._last_control_error = "Could not determine IED-assigned ctlNum after SELECT"
+        return False
 
     def _fallback_select(self, signal: Signal, value: Any, object_ref: str) -> bool:
         """
@@ -2016,6 +1920,9 @@ class IEC61850Adapter(BaseProtocol):
                             ctx.state = ControlState.SELECTED
                             ctx.last_select_time = datetime.now()
                         return True
+                    else:
+                        if self.event_logger:
+                            self.event_logger.error("IEC61850", f"Fallback SELECT to {sbo_attr} failed with IED error: {err}")
                 except Exception as e:
                     if self.event_logger:
                         self.event_logger.debug("IEC61850", f"Write to {sbo_attr} failed: {e}")
@@ -2077,7 +1984,10 @@ class IEC61850Adapter(BaseProtocol):
                         if ctx:
                             ctx.state = ControlState.OPERATED
                             ctx.last_operate_time = datetime.now()
-                            ctx.ctl_num += 1  # Increment for next operation
+                            try:
+                                ctx.ctl_num = (int(ctx.ctl_num) + 1) % 256
+                            except Exception:
+                                ctx.ctl_num = 0
                         return True
                     else:
                         if self.event_logger:
