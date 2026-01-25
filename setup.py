@@ -76,6 +76,9 @@ setup(
         'iec61850': [
             # Optional: pyiec61850 (requires manual installation)
         ],
+        'opc': [
+            'opcua>=1.0.0'
+        ],
     },
     
     entry_points={

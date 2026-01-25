@@ -1,6 +1,6 @@
 from PySide6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QStatusBar, QMenuBar, QToolBar, QDockWidget, QFileDialog, QMessageBox
-from PySide6.QtGui import QAction, QGuiApplication
-from PySide6.QtCore import Qt, QTimer, QSettings
+from PySide6.QtGui import QAction, QGuiApplication, QDesktopServices
+from PySide6.QtCore import Qt, QTimer, QSettings, QUrl
 from typing import List
 import os
 import platform
@@ -272,7 +272,32 @@ class MainWindow(QMainWindow):
         
         # Help Menu
         help_menu = menu_bar.addMenu("&Help")
+
+        # Open project documentation (README.md). Falls back to docs/*.md if README not present.
+        open_docs_action = QAction("&Documentation (README)...", self)
+        open_docs_action.setShortcut("F1")
+        open_docs_action.setStatusTip("Open project documentation (README.md)")
+        open_docs_action.triggered.connect(self._open_help_file)
+        help_menu.addAction(open_docs_action)
+        scripting_guide_action = QAction("&Scripting Guide...", self)
+        scripting_guide_action.setStatusTip("Open the Scripting Guide (docs/script_user_guide.md)")
+        # Use a distinct shortcut so F1 remains dedicated to the main Documentation action
+        scripting_guide_action.setShortcut("Shift+F1")
+        scripting_guide_action.triggered.connect(self._open_scripting_guide)
+        help_menu.addAction(scripting_guide_action)
         
+    def _open_scripting_guide(self):
+        """Open the local scripting user guide (docs/script_user_guide.md) in the user's default viewer."""
+        try:
+            base = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+            doc_path = os.path.join(base, 'docs', 'script_user_guide.md')
+            if not os.path.exists(doc_path):
+                QMessageBox.information(self, 'Scripting Guide not found', f'Cannot find: {doc_path}')
+                return
+            QDesktopServices.openUrl(QUrl.fromLocalFile(doc_path))
+        except Exception as exc:
+            QMessageBox.critical(self, 'Error opening Scripting Guide', str(exc))
+
     def _on_device_renamed(self, old_name: str, new_name: str):
         """Handler for device rename events to update in-memory caches."""
         try:
@@ -759,7 +784,36 @@ QTabBar::tab {{ padding: {widget_padding + 2}px {button_padding + 8}px; font-siz
             self.event_log_widget.update_font(monospace_font_family, monospace_font_size)
         except Exception:
             pass
-        
+
+        # OPC Mirror runtime toggle (UI-driven). Start/stop mirror here so the
+        # UI can enable exposure of the DeviceManager without requiring the
+        # controller to change. This is opt-in and must never raise for users
+        # who do not have optional OPC dependencies installed.
+        try:
+            opc_enabled = settings.value("opc_mirror_enabled", False, type=bool)
+            opc_endpoint = settings.value("opc_mirror_endpoint", "opc.tcp://0.0.0.0:4843")
+            if opc_enabled:
+                if getattr(self, '_opc_mirror', None) is None:
+                    try:
+                        from src.core.opc_mirror import OPCMirror
+                        self._opc_mirror = OPCMirror(self.device_manager)
+                        self._opc_mirror.start(opc_endpoint, server_name="SCADAScout Mirror (UI)")
+                        if hasattr(self, 'event_log_widget'):
+                            self.event_log_widget.log_event('OPC', f'OPC mirror started on {opc_endpoint}')
+                    except Exception:
+                        import logging as _logging
+                        _logging.getLogger(__name__).exception('Failed to start OPC mirror (opt-in)')
+            else:
+                if getattr(self, '_opc_mirror', None) is not None:
+                    try:
+                        self._opc_mirror.stop()
+                    except Exception:
+                        pass
+                    self._opc_mirror = None
+        except Exception:
+            # must never break UI when optional features fail
+            pass
+
         # Force repaint
         self.repaint()
 
@@ -1053,6 +1107,55 @@ QTabBar::tab {{ padding: {widget_padding + 2}px {button_padding + 8}px; font-siz
             self
         )
         dlg.exec()
+
+    def _open_help_file(self):
+        """Open the project's README or primary docs with the system default application.
+
+        Use QDesktopServices.openUrl for portability; fall back to a subprocess-based opener
+        only if the desktop service fails.
+        """
+        try:
+            project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+            candidates = [
+                os.path.join(project_root, 'README.md'),
+                os.path.join(project_root, 'docs', 'complete_project_structure.md'),
+                os.path.join(project_root, 'docs', 'readme_crossplatform.md'),
+            ]
+            path_to_open = None
+            for p in candidates:
+                if p and os.path.exists(p):
+                    path_to_open = p
+                    break
+
+            if not path_to_open:
+                QMessageBox.information(self, "Documentation not found",
+                    "Documentation files were not found in the project root.\nLook in the 'docs/' directory or open the repository README manually.")
+                return
+
+            url = QUrl.fromLocalFile(path_to_open)
+            opened = QDesktopServices.openUrl(url)
+
+            # Fallback to subprocess if desktop service fails (rare on Linux desktops)
+            if not opened:
+                try:
+                    import subprocess
+                    opener = 'xdg-open' if subprocess.run(['which', 'xdg-open'], capture_output=True).returncode == 0 else 'open'
+                    subprocess.Popen([opener, path_to_open])
+                    opened = True
+                except Exception:
+                    opened = False
+
+            if not opened:
+                QMessageBox.warning(self, "Open Documentation", f"Failed to open documentation: {path_to_open}")
+                return
+
+            try:
+                if self.event_logger:
+                    self.event_logger.info("Help", f"Opened documentation: {os.path.basename(path_to_open)}")
+            except Exception:
+                pass
+        except Exception as e:
+            QMessageBox.warning(self, "Open Documentation", f"Failed to open documentation: {e}")
 
     def _show_modbus_slave(self):
         """Show and activate Modbus slave server dock"""

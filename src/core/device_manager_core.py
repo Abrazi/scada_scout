@@ -9,6 +9,7 @@ from src.models.device_models import Device, DeviceConfig, DeviceType, Node, Sig
 from src.protocols.base_protocol import BaseProtocol
 from src.core.subscription_manager import IECSubscriptionManager
 from src.core.script_tag_manager import ScriptTagManager
+from src.core.variable_manager import VariableManager
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,8 @@ class DeviceManagerCore(EventEmitter):
         self._script_manager = None
         self._script_tag_manager = ScriptTagManager(self)
         self._saved_scripts = {}
+        # Variable manager (script-scoped and global variables bound to device signals)
+        self._variable_manager = VariableManager(self)
         # Executor for background SCD parsing (lazy-created)
         self._scd_executor = None
         # Load persisted user scripts and update token internals
@@ -631,6 +634,20 @@ class DeviceManagerCore(EventEmitter):
         elif config.device_type == DeviceType.MODBUS_SERVER:
             from src.protocols.modbus.server_adapter import ModbusServerAdapter
             return ModbusServerAdapter(config, event_logger=self.event_logger)
+        # OPC (opt-in): adapters are guarded and will raise a clear error if
+        # optional dependencies are missing. This keeps the core non-invasive.
+        elif config.device_type == DeviceType.OPC_UA_CLIENT:
+            try:
+                from src.protocols.opc.adapter import OPCUAClientAdapter
+            except Exception:
+                return None
+            return OPCUAClientAdapter(config, event_logger=self.event_logger)
+        elif config.device_type == DeviceType.OPC_UA_SERVER:
+            try:
+                from src.protocols.opc.adapter import OPCUAServerAdapter
+            except Exception:
+                return None
+            return OPCUAServerAdapter(config, event_logger=self.event_logger)
         return None
 
     def _on_signal_update(self, device_name: str, signal: Signal):
@@ -755,8 +772,40 @@ class DeviceManagerCore(EventEmitter):
 
     def _load_user_scripts(self):
         path = self._scripts_file_path()
+        # If the user's scripts file is missing, try to merge bundled example scripts so
+        # the UI shows useful defaults (non-destructive). If both exist, bundled
+        # defaults are merged but do not overwrite user scripts.
+        # Prefer the repository-level examples/ directory (two levels up from src/)
+        bundled_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'examples', 'default_user_scripts.json'))
+
         if not os.path.exists(path):
+            # No user file — if we have bundled defaults, load them into _saved_scripts
+            if os.path.exists(bundled_path):
+                try:
+                    with open(bundled_path, 'r') as f:
+                        data = json.load(f) or []
+                except Exception:
+                    data = []
+                scripts = {}
+                for entry in data:
+                    name = entry.get('name')
+                    code = entry.get('code', '')
+                    interval = entry.get('interval', 0.5)
+                    try:
+                        if self._script_tag_manager:
+                            code = self._script_tag_manager.update_tokens(code)
+                    except Exception:
+                        pass
+                    scripts[name] = {'code': code, 'interval': interval}
+                self._saved_scripts = scripts
+                # Persist to user's config folder so the UI can edit them normally
+                try:
+                    self._save_user_scripts_file()
+                except Exception:
+                    logger.exception('Failed to persist bundled example scripts to user scripts file')
+            # Nothing to load
             return
+
         try:
             with open(path, 'r') as f:
                 data = json.load(f)
@@ -772,6 +821,18 @@ class DeviceManagerCore(EventEmitter):
                 except Exception:
                     pass
                 scripts[name] = {'code': code, 'interval': interval}
+            # If bundled defaults are present, merge any missing entries (do not overwrite)
+            try:
+                if os.path.exists(bundled_path):
+                    with open(bundled_path, 'r') as bf:
+                        bundled = json.load(bf) or []
+                    for entry in bundled:
+                        nm = entry.get('name')
+                        if nm and nm not in scripts:
+                            scripts[nm] = {'code': entry.get('code', ''), 'interval': entry.get('interval', 0.5)}
+            except Exception:
+                logger.exception('Failed to merge bundled example scripts')
+
             self._saved_scripts = scripts
             # Persist back any updated token internals
             try:
@@ -818,16 +879,44 @@ class DeviceManagerCore(EventEmitter):
 
     def stop_user_script(self, name: str):
         if self._script_manager:
+            # Ensure any script-scoped variables are stopped/cleaned
+            try:
+                if getattr(self, '_variable_manager', None):
+                    self._variable_manager.stop_scope(name)
+            except Exception:
+                pass
             self._script_manager.stop_script(name)
 
     def stop_all_user_scripts(self):
         if self._script_manager:
-            self._script_manager.stop_all()
+            # stop scripts first, then clear any remaining variables
+            try:
+                self._script_manager.stop_all()
+            finally:
+                try:
+                    if getattr(self, '_variable_manager', None):
+                        self._variable_manager.stop_all()
+                except Exception:
+                    pass
 
     def list_user_scripts(self):
         if not self._script_manager:
             return []
         return self._script_manager.list_scripts()
+
+    # VariableManager convenience helpers (preferred: use ctx.bind_variable from scripts)
+    def create_variable(self, owner: Optional[str], name: str, unique_address: str, mode: str = 'on_demand', interval_ms: Optional[int] = None):
+        """Create or update a variable bound to a device signal. Returns a handle."""
+        return self._variable_manager.create(owner, name, unique_address, mode=mode, interval_ms=interval_ms)
+
+    def get_variable_handle(self, owner: Optional[str], name: str):
+        return self._variable_manager.get_handle(owner, name)
+
+    def remove_variable(self, owner: Optional[str], name: str):
+        return self._variable_manager.remove(owner, name)
+
+    def list_variables(self, owner: Optional[str] = None):
+        return self._variable_manager.list_vars(owner)
 
     def _assign_unique_addresses(self, device_name: str, node: Optional[Node]):
         if not node:

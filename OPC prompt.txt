@@ -1,0 +1,56 @@
+You are a senior industrial automation software architect with deep expertise in:
+- SCADA systems
+- OPC (OPC UA and legacy OPC DA)
+- Cross-platform Python development
+- Industrial communication protocols
+
+Context:
+I have an existing, fully functional SCADA Scout application written in Python.
+It already supports:
+- IEC 61850 (client and server)
+- Modbus (client and server)
+
+This existing functionality is stable, tested, and MUST NOT be modified, refactored, or broken in any way.
+
+Objective:
+Design and specify a complete, professional-grade OPC integration for this SCADA software.
+
+The OPC implementation must:
+1. Support OPC UA fully (Client + Server)
+2. Address legacy OPC DA compatibility on Windows
+3. Work across Windows, Linux, and macOS
+4. Allow the software to:
+   - Connect to third-party OPC servers
+   - Expose itself as an OPC server
+   - Simulate OPC data
+   - Perform diagnostics and testing
+5. Be modular and isolated so existing Modbus and IEC 61850 code remains untouched
+
+You must:
+- Propose a clean, extensible architecture
+- Define modules, interfaces, and responsibilities
+- Recommend suitable Python libraries and tooling
+- Explain OS-specific considerations and limitations
+- Describe security (certificates, encryption, authentication)
+- Include scalability, performance, and maintainability considerations
+- Ensure this can be shipped as a professional commercial SCADA product
+- apply the code to the existing project
+
+Deliverables:
+1. High-level system architecture
+2. Detailed module breakdown
+3. OPC Client workflow
+4. OPC Server workflow
+5. Cross-platform strategy
+6. Security and certificate handling
+7. Testing and validation strategy
+8. Deployment and packaging recommendations
+
+Constraints:
+- Do NOT change existing Modbus or IEC 61850 logic
+- No assumptions about GUI unless explicitly stated
+- Prefer clean Python-based solutions
+- Clearly separate OPC UA and legacy OPC DA handling
+
+Respond with clear headings, diagrams (ASCII if useful), and step-by-step explanations.
+

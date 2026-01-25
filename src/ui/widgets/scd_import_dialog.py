@@ -429,22 +429,16 @@ class SCDImportDialog(QDialog):
                         if isinstance(data, dict):
                             ip = data.get('ip', '127.0.0.1')
                             ip_info = data
-
-    def get_user_options(self) -> dict:
-        """Return dialog-level user options (e.g. defer/expand choice)."""
-        return {
-            'defer_full_expansion': bool(getattr(self, 'chk_defer_expansion', None) and self.chk_defer_expansion.isChecked())
-        }
-                else:
-                    ip_item = self.table.item(row, 1)
-                    ip = ip_item.text() if ip_item else "127.0.0.1"
-                    if ip_item:
-                        try:
-                            data = ip_item.data(Qt.UserRole)
-                            if isinstance(data, dict):
-                                ip_info = data
-                        except Exception:
-                            pass
+                    else:
+                        ip_item = self.table.item(row, 1)
+                        ip = ip_item.text() if ip_item else "127.0.0.1"
+                        if ip_item:
+                            try:
+                                data = ip_item.data(Qt.UserRole)
+                                if isinstance(data, dict):
+                                    ip_info = data
+                            except Exception:
+                                pass
 
                 protocol_params = {}
                 if ip_info:
@@ -464,6 +458,24 @@ class SCDImportDialog(QDialog):
                     scd_file_path=self.scd_path,
                     protocol_params=protocol_params
                 ))
+
+        def get_user_options_inner() -> dict:
+            """Dialog-level options helper (kept local to avoid accidental export).
+
+            Kept as a small helper to preserve the original API used elsewhere in
+            the dialog. Returns the same structure as the previous placement.
+            """
+            return {
+                'defer_full_expansion': bool(getattr(self, 'chk_defer_expansion', None) and self.chk_defer_expansion.isChecked())
+            }
+
+        # Backwards-compatible public method
+        def _get_user_options_and_expose():
+            return get_user_options_inner()
+
+        # maintain original public method name
+        self.get_user_options = lambda: get_user_options_inner()
+
         return configs
 
     def _check_and_configure_ips(self):

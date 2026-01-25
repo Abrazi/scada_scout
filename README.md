@@ -19,6 +19,21 @@ pip install -r requirements.txt
 python src/main.py
 ```
 
+### Optional: OPC UA support
+
+OPC UA is provided as an opt-in extension (server + client). To install the
+optional dependency and run OPC UA examples/tests:
+
+```bash
+# install optional OPC UA support
+pip install -e '.[opc]'
+# or install python-opcua directly
+pip install opcua
+```
+
+The OPC integration is guarded — missing the optional package will not affect
+existing Modbus or IEC 61850 features.
+
 ### Native dependency: libiec61850
 
 This project uses the native `libiec61850` library with **pure Python ctypes bindings** (no SWIG or compiled extensions required). 

@@ -1,0 +1,12 @@
+[
+  {
+    "name": "Toggle CB 172.16.11.18",
+    "code": "from scripts.toggle_cb_172_16_1_18 import main as _toggle_main\n\ndef main(ctx):\n    \"\"\"One-shot wrapper: toggles a circuit breaker on 172.16.11.18:102.\n    Delegates to the implementation in `scripts/toggle_cb_172_16_1_18.py`.\n    \"\"\"\n    return _toggle_main(ctx)",
+    "interval": 0.5
+  },
+  {
+    "name": "Add IED + Variables (172.16.11.18)",
+    "code": "from scripts.iec61850_add_device_and_vars_ui import main as _add_ied_main\n\ndef main(ctx):\n    \"\"\"UI-friendly: add an IEC61850 IED (172.16.11.18) to DeviceManager and create variables.\n    Edit HOST/DEVICE_NAME/OBJECT_PATHS at top of the script before running.\n    \"\"\"\n    return _add_ied_main(ctx)",
+    "interval": 0.5
+  }
+]

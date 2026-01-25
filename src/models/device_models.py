@@ -9,6 +9,8 @@ class DeviceType(Enum):
     IEC61850_SERVER = "IEC 61850 Simulator (Server)"
     MODBUS_TCP = "Modbus TCP"
     MODBUS_SERVER = "Modbus Slave Server"
+    OPC_UA_CLIENT = "OPC UA Client"
+    OPC_UA_SERVER = "OPC UA Server (Simulator)"
     UNKNOWN = "Unknown"
 
 class SignalType(Enum):

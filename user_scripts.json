@@ -8,5 +8,20 @@
     "name": "cbOperate",
     "code": "# Example script for SCADA Scout\n# Define a callable named `tick(ctx)` for continuous scripts,\n# or `main(ctx)` / `loop(ctx)` / `tick(ctx)` for one-shot runs.\n# `ctx` exposes helper methods:\n#   - ctx.get(tag_address, default=None)\n#   - ctx.read(tag_address)  # force read (best-effort)\n#   - ctx.set(tag_address, value)  # write value to a tag\n#   - ctx.send_command(tag_address, value, params=None)  # IEC 61850 SBO control\n#   - ctx.list_tags(device_name=None)\n#   - ctx.log(level, message)\n#\n# Unique tag addresses are in the form: DeviceName::SignalAddress\n# Examples: IED1::LLN0$XCBR$Pos.stVal  or  ModbusDevice::1:3:40001\n\n# Completion tips:\n#  - Press Ctrl+Space to open the tag completion popup.\n#  - You can use wildcards '*' and '?' to filter tags, e.g.:\n#      IED*::LLN0*    -> matches devices starting with 'IED' and signals with 'LLN0'\n#      *:4001?        -> matches Modbus registers like 40010, 40011, etc.\n#  - The popup shows a header explaining wildcard usage when present.\n\nimport math\n\ndef tick(ctx):\n    # Example 1: Read and compute\n    src = '{{TAG:GPS01ECB01::GPS01ECB01CB1/CSWI1.Pos.Oper.ctlVal}}'    # replace with an actual tag\n    val = ctx.get(src, 0)\n    new_val = math.floor((val or 0) * 1.1)\n\n    # Example 2: Write to Modbus register\n    dst = 'Simulator::holding:40010'  # replace with your target tag\n    ok = ctx.set(dst, new_val)\n\n    # Example 3: IEC 61850 SBO Control (Select Before Operate)\n    # Control a circuit breaker or switch - automatically handles SBO workflow\n    # Replace with your actual IED name and control point address\n    # control_tag = 'IED1::simpleIOGenericIO/CSWI1.Pos'\n    # success = ctx.send_command(control_tag, True)  # Close breaker\n    # if success:\n    #     ctx.log('info', f'Successfully operated {control_tag}')\n    # else:\n    #     ctx.log('error', f'Failed to operate {control_tag}')\n\n    # Example 4: IEC 61850 control with custom parameters\n    # params = {\n    #     'sbo_timeout': 150,  # Wait 150ms between SELECT and OPERATE\n    #     'originator_id': 'SCADA_AUTO'  # Custom originator\n    # }\n    # ctx.send_command(control_tag, False, params=params)  # Open breaker\n\n    # Log result\n    forced = ctx.read(src)\n    ctx.log('info', f'Computed {new_val} from {src} (forced={forced})')\n\n# For one-off scripts you can also define `main(ctx)` and run once.\n# def main(ctx):\n#     # Example: Operate a simulated IED control point once\n#     ied_control = 'SimulatedIED::CTRL/CSWI1.Pos'\n#     ctx.send_command(ied_control, True)\n#     ctx.log('info', 'One-time control command sent')",
     "interval": 0.5
+  },
+  {
+    "name": "Toggle CB 172.16.1.18",
+    "code": "from scripts.toggle_cb_172_16_1_18 import main as _toggle_main\n\ndef main(ctx):\n    \"\"\"One-shot wrapper: toggles a circuit breaker on 172.16.1.18:102.\n    Delegates to the implementation in `scripts/toggle_cb_172_16_1_18.py`.\n    \"\"\"\n    return _toggle_main(ctx)",
+    "interval": 0.5
+  },
+  {
+    "name": "Toggle CB 172.16.11.18",
+    "code": "from scripts.toggle_cb_172_16_1_18 import main as _toggle_main\n\ndef main(ctx):\n    \"\"\"One-shot wrapper: toggles a circuit breaker on 172.16.11.18:102.\n    Delegates to the implementation in `scripts/toggle_cb_172_16_1_18.py`.\n    \"\"\"\n    return _toggle_main(ctx)",
+    "interval": 0.5
+  },
+  {
+    "name": "Add IED + Variables (172.16.11.18)",
+    "code": "from scripts.iec61850_add_device_and_vars_ui import main as _add_ied_main\n\ndef main(ctx):\n    \"\"\"UI-friendly: add an IEC61850 IED (172.16.11.18) to DeviceManager and create variables.\n    Edit HOST/DEVICE_NAME/OBJECT_PATHS at top of the script before running.\n    \"\"\"\n    return _add_ied_main(ctx)",
+    "interval": 0.5
   }
 ]

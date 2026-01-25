@@ -7,10 +7,17 @@ logger = logging.getLogger(__name__)
 
 
 class ScriptContext:
-    """Context passed to user scripts for tag access."""
-    def __init__(self, device_manager_core, event_logger=None):
+    """Context passed to user scripts for tag access.
+
+    New: supports script-scoped variables bound to device signals via the
+    DeviceManagerCore's VariableManager. Variables may be 'on_demand' or
+    'continuous' with per-variable interval (ms).
+    """
+    def __init__(self, device_manager_core, event_logger=None, owner: Optional[str] = None):
         self._dm = device_manager_core
         self._event_logger = event_logger
+        # owner is the script name or None for top-level one-shot runs
+        self._owner = owner
         self._stop_event = None
 
     def get(self, tag_address: str, default=None):
@@ -34,11 +41,79 @@ class ScriptContext:
             return getattr(sig, 'value', None)
         return getattr(updated, 'value', None)
 
-    def set(self, tag_address: str, value) -> bool:
-        """Write a value to a tag by unique address."""
+    # ----------------- Variable binding API for user scripts -------------
+    def bind_variable(self, name: str, tag_address: str, mode: str = 'on_demand', interval_ms: Optional[int] = None):
+        """Bind a named variable to a device signal.
+
+        - name: user-visible variable name (scoped to this script)
+        - tag_address: unique address (Device::addr...)
+        - mode: 'on_demand' | 'continuous'
+        - interval_ms: required for continuous mode
+
+        Returns: VariableHandle-like object with .get(), .read(), .start(), .stop()
+        """
+        if not hasattr(self._dm, '_variable_manager'):
+            raise RuntimeError('VariableManager not available')
+        # Validate tag exists (best-effort)
         sig = self._dm.get_signal_by_unique_address(tag_address)
         if not sig:
-            return False
+            # still allow binding so user can create variable before device model exists
+            pass
+        return self._dm.create_variable(self._owner, name, tag_address, mode=mode, interval_ms=interval_ms)
+
+    def unbind_variable(self, name: str):
+        if not hasattr(self._dm, '_variable_manager'):
+            return
+        return self._dm.remove_variable(self._owner, name)
+
+    def var(self, name: str):
+        """Return a handle for a previously-created variable (or None)."""
+        if not hasattr(self._dm, '_variable_manager'):
+            return None
+        return self._dm.get_variable_handle(self._owner, name)
+
+    def list_variables(self):
+        if not hasattr(self._dm, '_variable_manager'):
+            return []
+        return self._dm.list_variables(self._owner)
+
+    # ---------------------------------------------------------------------
+
+    def set(self, tag_address: str, value) -> bool:
+        """Write a value to a tag by unique address.
+
+        Convenience: if `tag_address` refers to a control DO (e.g. 'DEV::IED/LD/CSWI1.Pos')
+        resolve to the control leaf (ctlVal/Oper) and perform a proper control
+        (SELECT/OPERATE) via `send_command` so the user only needs to supply the DO
+        and the desired value.
+        """
+        sig = self._dm.get_signal_by_unique_address(tag_address)
+        if not sig:
+            # Try to resolve DO -> control leaf and use send_command for controls
+            device_name, addr = self._dm.parse_unique_address(tag_address)
+            if not device_name or not addr:
+                return False
+
+            # Try the same candidate resolution as send_command
+            candidates = [
+                f"{addr}.Oper.ctlVal",
+                f"{addr}.Oper",
+                f"{addr}.ctlVal",
+                f"{addr}.SBOw.ctlVal",
+                f"{addr}.SBO.ctlVal",
+            ]
+            for c in candidates:
+                sig = self._dm.get_signal_by_unique_address(f"{device_name}::{c}")
+                if sig:
+                    break
+
+            if not sig:
+                # not a control DO we can resolve
+                return False
+
+            # resolved a control leaf — use send_command to perform safe control
+            return self.send_command(f"{device_name}::{addr}", value)
+
         device_name, _ = self._dm.parse_unique_address(tag_address)
         if not device_name:
             return False
@@ -47,46 +122,76 @@ class ScriptContext:
     def send_command(self, tag_address: str, value, params: dict = None) -> bool:
         """
         Send an IEC 61850 control command (supports SBO workflow automatically).
-        
-        For IEC 61850 controls with SBO (Select Before Operate), this automatically
-        handles the SELECT -> wait -> OPERATE sequence.
-        
-        Args:
-            tag_address: Unique tag address (Device::Address)
-            value: Control value (typically boolean for switch controls)
-            params: Optional parameters dict with keys like:
-                - sbo_timeout: Timeout in ms between SELECT and OPERATE (default 100)
-                - originator_cat: Originator category (default 3 = Remote)
-                - originator_id: Originator identifier string (default "SCADA")
-        
+
+        Convenience improvements:
+        - Accepts either a DA leaf address (e.g. "...Pos.ctlVal") *or* the DO address
+          (e.g. "...Pos"). When given a DO the runtime will resolve the best writable
+          control DA (Oper.ctlVal, ctlVal, SBOw/SBO) so the user doesn't need to know
+          the ctlMode/attribute names.
+        - Minimal call: ctx.send_command('DEV::IED/LD/CSWI1.Pos', True)
+        - Advanced: pass `params` to override behavior. Supported keys:
+            - sbo_timeout (int ms)
+            - originator_id (str)
+            - originator_cat (int)
+            - force_direct (bool)  -- skip SELECT and call OPERATE
+            - force_sbo (bool)     -- force SELECT+OPERATE even if ctlModel suggests direct
+            - ctl_num (int)        -- override ctlNum used for Operate
+            - ctl_attr (str)       -- explicit attribute to target (e.g. 'Oper.ctlVal')
+
+        Backwards-compatible: existing behavior and the UI control window are NOT changed.
+
         Returns:
-            bool: True if command succeeded, False otherwise
-            
-        Example:
-            # Control a circuit breaker with SBO
-            ctx.send_command('IED1::simpleIOGenericIO/CSWI1.Pos', True)
-            
-            # With custom parameters
-            ctx.send_command('IED1::simpleIOGenericIO/CSWI1.Pos', False, 
-                           params={'sbo_timeout': 200, 'originator_id': 'SCADA_MASTER'})
+            bool
         """
+        # Fast-path: exact match
         sig = self._dm.get_signal_by_unique_address(tag_address)
+
+        # If not exact, try to resolve a control leaf from a DO-style address
+        if not sig:
+            device_name, addr = self._dm.parse_unique_address(tag_address)
+            if not device_name or not addr:
+                return False
+
+            # Candidate suffixes in preferred order
+            candidates = [
+                f"{addr}.Oper.ctlVal",
+                f"{addr}.Oper",
+                f"{addr}.ctlVal",
+                f"{addr}.SBOw.ctlVal",
+                f"{addr}.SBO.ctlVal",
+            ]
+
+            # If user passed a leaf that was missing a device prefix, try a fuzzy search
+            for c in candidates:
+                sig = self._dm.get_signal_by_unique_address(f"{device_name}::{c}")
+                if sig:
+                    break
+
+            # Last-resort: scan device addresses for the first match that looks like a control
+            if not sig:
+                for u in self._dm.list_unique_addresses(device_name):
+                    # match DO prefix and prefer ctlVal/Oper
+                    if u.startswith(f"{device_name}::{addr}") and ("ctlVal" in u or ".Oper" in u or "SBO" in u):
+                        sig = self._dm.get_signal_by_unique_address(u)
+                        if sig:
+                            break
+
         if not sig:
             return False
-        device_name, _ = self._dm.parse_unique_address(tag_address)
+
+        device_name, _ = self._dm.parse_unique_address(sig.unique_address if hasattr(sig, 'unique_address') else tag_address)
         if not device_name:
             return False
-        
-        # Get the protocol adapter
+
         adapter = self._dm.get_protocol(device_name)
         if not adapter:
             return False
-        
-        # Check if adapter supports send_command
+
+        # If adapter doesn't support send_command, fall back to write_signal
         if not hasattr(adapter, 'send_command'):
-            # Fallback to regular write
             return self._dm.write_signal(device_name, sig, value)
-        
+
+        # Pass through params (advanced) — runtime already resolves DO -> ctl leaf
         return adapter.send_command(sig, value, params)
 
     def list_tags(self, device_name: Optional[str] = None):
@@ -135,7 +240,9 @@ class UserScriptManager:
                 raise ValueError(f"Script '{name}' already running")
 
             stop_event = threading.Event()
-            ctx = ScriptContext(self._dm, self._event_logger)
+            # Pass the script name as owner so any variables created are scoped and
+            # can be cleaned up automatically when the script stops.
+            ctx = ScriptContext(self._dm, self._event_logger, owner=name)
             # Give the context a handle to the stop event so user code can poll
             ctx._stop_event = stop_event
             # Resolve any token placeholders before compiling
@@ -230,12 +337,23 @@ class UserScriptManager:
                 return
             entry["stop"].set()
             self._scripts.pop(name, None)
+        # Best-effort: remove any variables created by this script
+        try:
+            if getattr(self._dm, '_variable_manager', None):
+                self._dm._variable_manager.stop_scope(name)
+        except Exception:
+            pass
 
     def stop_all(self):
         with self._lock:
             for entry in self._scripts.values():
                 entry["stop"].set()
             self._scripts.clear()
+        try:
+            if getattr(self._dm, '_variable_manager', None):
+                self._dm._variable_manager.stop_all()
+        except Exception:
+            pass
 
     def list_scripts(self):
         with self._lock:

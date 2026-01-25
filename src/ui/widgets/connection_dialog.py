@@ -85,7 +85,15 @@ class ConnectionDialog(QDialog):
         self.type_input.addItem(DeviceType.IEC104_RTU.value, DeviceType.IEC104_RTU)
         self.type_input.addItem(DeviceType.MODBUS_TCP.value, DeviceType.MODBUS_TCP)
         self.type_input.addItem(DeviceType.MODBUS_SERVER.value, DeviceType.MODBUS_SERVER)
-        
+        # OPC (opt-in) — appears in the Connect dialog so users can add OPC UA devices
+        from src.models.device_models import DeviceType as _DT
+        try:
+            self.type_input.addItem(DeviceType.OPC_UA_CLIENT.value, DeviceType.OPC_UA_CLIENT)
+            self.type_input.addItem(DeviceType.OPC_UA_SERVER.value, DeviceType.OPC_UA_SERVER)
+        except Exception:
+            # If DeviceType wasn't updated for some reason, ignore silently
+            pass
+
         # Update default port based on selection
         self.type_input.currentTextChanged.connect(self._on_type_changed)
         self.type_input.currentTextChanged.connect(self._update_form_labels)
@@ -99,6 +107,14 @@ class ConnectionDialog(QDialog):
         
         self.scd_layout.addWidget(self.scd_input)
         self.scd_layout.addWidget(self.browse_btn)
+
+        # OPC UA Endpoint (optional) — visible when OPC is selected
+        self.opc_endpoint_input = QLineEdit()
+        self.opc_endpoint_input.setPlaceholderText("opc.tcp://hostname:4840 or opc.tcp://host:port/path")
+        self.opc_endpoint_label = QLabel("OPC Endpoint:")
+        # hidden by default until OPC is selected
+        self.opc_endpoint_input.setVisible(False)
+        self.opc_endpoint_label.setVisible(False)
         
         # Modbus Configuration File Selection (matching SCD layout style)
         self.modbus_config_layout = QHBoxLayout()
@@ -148,6 +164,8 @@ class ConnectionDialog(QDialog):
         self.form.addRow(self.modbus_config_row_label, self.modbus_config_layout)
         
         self.form.addRow("SCD File (Optional):", self.scd_layout)
+        # OPC endpoint row (inserted near SCD since it's protocol-specific)
+        self.form.addRow(self.opc_endpoint_label, self.opc_endpoint_input)
         self.form.addRow("Polling:", self.poll_layout)
         
         self.layout.addLayout(self.form)
@@ -397,7 +415,13 @@ class ConnectionDialog(QDialog):
         self.port_input.setText(str(config.port))
         if config.scd_file_path:
             self.scd_input.setText(config.scd_file_path)
-            
+        # Prefill OPC endpoint if present
+        try:
+            ep = config.protocol_params.get('endpoint')
+            if ep:
+                self.opc_endpoint_input.setText(ep)
+        except Exception:
+            pass            
         self.chk_polling.setChecked(config.polling_enabled)
         self.spin_interval.setValue(config.poll_interval)
         self.unit_id_input.setValue(config.modbus_unit_id)
@@ -472,7 +496,15 @@ class ConnectionDialog(QDialog):
         is_iec61850 = device_type == DeviceType.IEC61850_IED
         self.scd_input.setVisible(is_iec61850)
         self.browse_btn.setVisible(is_iec61850)
-        
+
+        # OPC specific: show endpoint input for client/server modes
+        is_opc = device_type in [DeviceType.OPC_UA_CLIENT, DeviceType.OPC_UA_SERVER]
+        self.opc_endpoint_input.setVisible(is_opc)
+        self.opc_endpoint_label.setVisible(is_opc)
+
+        # When OPC selected, allow endpoint to be primary; keep IP/port editable for convenience
+        if is_opc:
+            label_ip = "(Optional) IP Address:"
         self.ip_label.setText(label_ip)
 
     def _load_modbus_config(self):
@@ -627,6 +659,12 @@ class ConnectionDialog(QDialog):
             modbus_unit_id=self.unit_id_input.value()
         )
         
+        # OPC: include endpoint in protocol_params if provided
+        if config.device_type in [DeviceType.OPC_UA_CLIENT, DeviceType.OPC_UA_SERVER]:
+            endpoint_text = self.opc_endpoint_input.text().strip()
+            if endpoint_text:
+                config.protocol_params['endpoint'] = endpoint_text
+
         # Attach register maps if available and Modbus
         if config.device_type in [DeviceType.MODBUS_TCP, DeviceType.MODBUS_SERVER] and self.modbus_register_maps:
             config.modbus_register_maps = self.modbus_register_maps

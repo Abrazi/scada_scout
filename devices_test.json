@@ -1,0 +1,24 @@
+{
+    "devices": [
+        {
+            "name": "IED_172_16_11_18",
+            "ip_address": "172.16.11.18",
+            "port": 102,
+            "folder": "",
+            "description": "",
+            "device_type": "IEC 61850 IED",
+            "enabled": true,
+            "scd_file_path": null,
+            "use_scd_discovery": true,
+            "protocol_params": {},
+            "polling_enabled": false,
+            "poll_interval": 1.0,
+            "modbus_unit_id": 1,
+            "modbus_timeout": 3.0,
+            "modbus_register_maps": [],
+            "modbus_slave_mappings": [],
+            "modbus_slave_blocks": []
+        }
+    ],
+    "folders": {}
+}

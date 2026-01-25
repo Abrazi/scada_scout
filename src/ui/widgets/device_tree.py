@@ -932,6 +932,14 @@ class DeviceTreeWidget(QWidget):
             add_dev_action = QAction("Add New Device...", self)
             add_dev_action.triggered.connect(self._add_new_device)
             menu.addAction(add_dev_action)
+
+            # Quick add OPC UA shortcuts (convenience)
+            add_opc_client = QAction("Add OPC UA Client...", self)
+            add_opc_client.triggered.connect(lambda: self._add_new_device_preselected('opc_client'))
+            menu.addAction(add_opc_client)
+            add_opc_server = QAction("Add OPC UA Server...", self)
+            add_opc_server.triggered.connect(lambda: self._add_new_device_preselected('opc_server'))
+            menu.addAction(add_opc_server)
             
             add_folder_action = QAction("Add New Folder...", self)
             add_folder_action.triggered.connect(self._show_add_folder_dialog)
@@ -959,6 +967,14 @@ class DeviceTreeWidget(QWidget):
             add_dev_action = QAction("Add Device to this Folder...", self)
             add_dev_action.triggered.connect(lambda: self._add_new_device(folder=root_item.text()))
             menu.addAction(add_dev_action)
+
+            # Folder-scoped quick OPC actions
+            add_opc_client = QAction("Add OPC UA Client to Folder...", self)
+            add_opc_client.triggered.connect(lambda: self._add_new_device_preselected('opc_client', folder=root_item.text()))
+            menu.addAction(add_opc_client)
+            add_opc_server = QAction("Add OPC UA Server to Folder...", self)
+            add_opc_server.triggered.connect(lambda: self._add_new_device_preselected('opc_server', folder=root_item.text()))
+            menu.addAction(add_opc_server)
             
             remove_folder_action = QAction("Remove Folder", self)
             remove_folder_action.triggered.connect(lambda: self._remove_folder(root_item.text()))
@@ -1990,6 +2006,38 @@ class DeviceTreeWidget(QWidget):
             config = dialog.get_config()
             try:
                 self.device_manager.add_device(config)
+            except Exception as e:
+                from PySide6.QtWidgets import QMessageBox
+                QMessageBox.critical(self, "Error", f"Could not add device: {e}")
+
+    def _add_new_device_preselected(self, preset: str, folder: str = ""):
+        """Open ConnectionDialog with a preset selection (used by quick-actions).
+
+        preset: 'opc_client' | 'opc_server' currently supported.
+        """
+        from src.ui.widgets.connection_dialog import ConnectionDialog
+        dlg = ConnectionDialog(self)
+        if folder:
+            dlg.folder_input.setText(folder)
+        # Preselect a protocol type safely (ignore if not present)
+        if preset == 'opc_client':
+            for i in range(dlg.type_input.count()):
+                if dlg.type_input.itemData(i) == getattr(__import__('src.models.device_models', fromlist=['DeviceType']).DeviceType, 'OPC_UA_CLIENT'):
+                    dlg.type_input.setCurrentIndex(i)
+                    break
+            # sensible default endpoint
+            dlg.opc_endpoint_input.setText('opc.tcp://127.0.0.1:4840')
+        elif preset == 'opc_server':
+            for i in range(dlg.type_input.count()):
+                if dlg.type_input.itemData(i) == getattr(__import__('src.models.device_models', fromlist=['DeviceType']).DeviceType, 'OPC_UA_SERVER'):
+                    dlg.type_input.setCurrentIndex(i)
+                    break
+            dlg.opc_endpoint_input.setText('opc.tcp://0.0.0.0:4840')
+
+        if dlg.exec():
+            cfg = dlg.get_config()
+            try:
+                self.device_manager.add_device(cfg)
             except Exception as e:
                 from PySide6.QtWidgets import QMessageBox
                 QMessageBox.critical(self, "Error", f"Could not add device: {e}")

@@ -4,13 +4,23 @@ import os
 # Ensure src is in python path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from PySide6.QtWidgets import QApplication
-from PySide6.QtGui import QFont
-from src.ui.main_window import MainWindow
-from src.core.device_manager import DeviceManager
-from src.core.app_controller import AppController
 import logging
 import ctypes
+
+# Early environment sanity checks to avoid loading incompatible system libs (snap/core20)
+def _detect_incompatible_system_libs() -> list:
+    """Return list of (envvar, value) entries that reference snap/core20 libs."""
+    bad = []
+    for var in ("LD_LIBRARY_PATH", "LD_PRELOAD"):
+        val = os.environ.get(var, "")
+        if "/snap/core20" in val or ("/snap" in val and "core" in val):
+            bad.append((var, val))
+    return bad
+
+# NOTE: GUI and other C-extension imports are intentionally deferred until runtime
+# after the environment check — this prevents the dynamic loader from pulling
+# in incompatible libraries and producing obscure symbol lookup errors.
+
 
 logging.basicConfig(level=logging.INFO)
 
@@ -64,6 +74,30 @@ def main():
         
         # Performance: Use hardware acceleration for graphics if possible
         os.environ.setdefault("QT_QUICK_BACKEND", "software") # Fallback to stable software rendering if needed
+
+        # --- Environment validation (prevent snap/core20 from breaking the native loader) ---
+        bad_lib_env = _detect_incompatible_system_libs()
+        if bad_lib_env:
+            sys.stderr.write("ERROR: Incompatible Snap-provided system libraries detected in your environment.\n")
+            sys.stderr.write("This commonly causes: 'undefined symbol: __libc_pthread_init, version GLIBC_PRIVATE'\n\n")
+            sys.stderr.write("Detected entries:\n")
+            for k, v in bad_lib_env:
+                sys.stderr.write(f"  {k}={v}\n")
+            sys.stderr.write("\nQuick fixes:\n")
+            sys.stderr.write("  1) Run temporarily with cleared env vars:\n")
+            sys.stderr.write("       LD_LIBRARY_PATH= LD_PRELOAD= venv/bin/python src/main.py\n")
+            sys.stderr.write("  2) Unset the variables in your shell and re-run:\n")
+            sys.stderr.write("       unset LD_LIBRARY_PATH; unset LD_PRELOAD; source venv/bin/activate; python src/main.py\n")
+            sys.stderr.write("  3) If launched from a .desktop/systemd/IDE, remove the export from that launcher.\n")
+            sys.stderr.write("\nIf you want the application to attempt to sanitize these variables automatically, reply and I can add an opt-in flag.\n")
+            return 2
+
+        # Defer heavy GUI imports until after env validation to avoid crashing the process
+        from PySide6.QtWidgets import QApplication
+        from PySide6.QtGui import QFont
+        from src.ui.main_window import MainWindow
+        from src.core.device_manager import DeviceManager
+        from src.core.app_controller import AppController
 
         print("Initializing QApplication...")
         app = QApplication(sys.argv)

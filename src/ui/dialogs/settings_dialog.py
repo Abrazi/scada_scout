@@ -579,6 +579,13 @@ For more details, see README.md and docs/ folder.
         except Exception:
             pass
 
+        # OPC Mirror settings
+        try:
+            self.opc_mirror_enable.setChecked(self.settings.value("opc_mirror_enabled", False, type=bool))
+            self.opc_mirror_endpoint.setText(self.settings.value("opc_mirror_endpoint", "opc.tcp://0.0.0.0:4843"))
+        except Exception:
+            pass
+
         # update setcap commands display
         try:
             self._update_setcap_text()
@@ -670,6 +677,13 @@ For more details, see README.md and docs/ folder.
             self.settings.setValue("capture_default_json", self.default_json.isChecked())
             self.settings.setValue("capture_default_max_mb", self.default_max_mb.value())
             self.settings.setValue("capture_default_max_files", self.default_max_files.value())
+        except Exception:
+            pass
+
+        # OPC Mirror settings
+        try:
+            self.settings.setValue("opc_mirror_enabled", self.opc_mirror_enable.isChecked())
+            self.settings.setValue("opc_mirror_endpoint", self.opc_mirror_endpoint.text())
         except Exception:
             pass
         

@@ -82,4 +82,14 @@ class NetworkSettingsPanel(QWidget):
 
         layout.addWidget(defaults_group)
 
+        # OPC Mirror integration (UI toggle + optional endpoint)
+        opc_group = QGroupBox("OPC UA Mirror")
+        opc_layout = QFormLayout(opc_group)
+        self.opc_mirror_enable = QCheckBox("Expose DeviceManager as OPC UA server (mirror)")
+        opc_layout.addRow("Enable Mirror:", self.opc_mirror_enable)
+        self.opc_mirror_endpoint = QLineEdit()
+        self.opc_mirror_endpoint.setPlaceholderText("opc.tcp://0.0.0.0:4843")
+        opc_layout.addRow("Endpoint:", self.opc_mirror_endpoint)
+        layout.addWidget(opc_group)
+
         layout.addStretch()

@@ -20,6 +20,10 @@ class DeviceManager(QObject):
     device_renamed = QtSignal(str, str)
     connection_progress = QtSignal(str, str, int) 
     signal_updated = QtSignal(str, Signal) 
+    # Variable lifecycle & updates: (owner, name, ...) — owner may be None
+    variable_added = QtSignal(object, str, str)        # owner, var_name, unique_address
+    variable_removed = QtSignal(object, str)          # owner, var_name
+    variable_updated = QtSignal(object, str, object, float)  # owner, var_name, value, timestamp
     project_cleared = QtSignal()
     batch_load_started = QtSignal()
     batch_load_finished = QtSignal()
@@ -45,6 +49,13 @@ class DeviceManager(QObject):
             pass
         self._core.on("connection_progress", self.connection_progress.emit)
         self._core.on("signal_updated", self.signal_updated.emit)
+        # Variable lifecycle/events (optional)
+        try:
+            self._core.on('variable_added', self.variable_added.emit)
+            self._core.on('variable_removed', self.variable_removed.emit)
+            self._core.on('variable_updated', self.variable_updated.emit)
+        except Exception:
+            pass
         self._core.on("project_cleared", self.project_cleared.emit)
         self._core.on("batch_load_started", self.batch_load_started.emit)
         self._core.on("batch_load_finished", self.batch_load_finished.emit)
@@ -197,6 +208,19 @@ class DeviceManager(QObject):
 
     def list_unique_addresses(self, device_name: Optional[str] = None):
         return self._core.list_unique_addresses(device_name)
+
+    # Variable convenience delegations (core implements VariableManager integration)
+    def create_variable(self, owner: Optional[str], name: str, unique_address: str, mode: str = 'on_demand', interval_ms: Optional[int] = None):
+        return self._core.create_variable(owner, name, unique_address, mode=mode, interval_ms=interval_ms)
+
+    def get_variable_handle(self, owner: Optional[str], name: str):
+        return self._core.get_variable_handle(owner, name)
+
+    def remove_variable(self, owner: Optional[str], name: str):
+        return self._core.remove_variable(owner, name)
+
+    def list_variables(self, owner: Optional[str] = None):
+        return self._core.list_variables(owner)
 
     # For existing UI compatibility - in case any code accessed _devices directly
     # (Though they shouldn't have)

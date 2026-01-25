@@ -172,6 +172,17 @@ class WatchListWidget(QWidget):
         """Connect watch manager signals."""
         self.watch_manager.signal_updated.connect(self._on_signal_updated)
         self.watch_manager.watch_list_changed.connect(self._refresh_table)
+        # Listen for variables (DeviceManager bridges core variable events to Qt signals)
+        try:
+            if hasattr(self, 'device_manager') and getattr(self.device_manager, 'variable_added', None):
+                self.device_manager.variable_added.connect(self._on_variable_added)
+            if hasattr(self, 'device_manager') and getattr(self.device_manager, 'variable_removed', None):
+                self.device_manager.variable_removed.connect(self._on_variable_removed)
+            if hasattr(self, 'device_manager') and getattr(self.device_manager, 'variable_updated', None):
+                self.device_manager.variable_updated.connect(self._on_variable_updated)
+        except Exception:
+            # Non-fatal if DeviceManager doesn't expose variable signals
+            pass
         
     def _refresh_table(self):
         """Rebuild the table from watch list."""
@@ -465,7 +476,15 @@ class WatchListWidget(QWidget):
                 menu.addAction(inspect_action)
                 
                 menu.addSeparator()
-            
+
+                # Create variable from this signal (global scope)
+                try:
+                    create_var_action = QAction("Create variable from signal...", self)
+                    create_var_action.triggered.connect(lambda: self._create_variable_from_row(row))
+                    menu.addAction(create_var_action)
+                except Exception:
+                    pass
+
             # Copy Address (raw) and Tokenized for scripts
             copy_action = QAction("Copy Signal Address", self)
             copy_action.triggered.connect(lambda: self._copy_to_clipboard(signal.address))
@@ -524,24 +543,145 @@ class WatchListWidget(QWidget):
         menu.exec(self.table.viewport().mapToGlobal(position))
     
     def _remove_selected_signals(self):
-        """Remove all selected signals from watch list."""
+        """Remove all selected signals or variables from watch list/UI."""
         selected_rows = list(set(idx.row() for idx in self.table.selectedIndexes()))
         
         if not selected_rows:
             return
         
-        # Collect watch_ids from selected rows
-        watch_ids = []
+        # Collect identifiers from selected rows
+        ids = []
         for row in selected_rows:
             item = self.table.item(row, 0)
             if item:
-                watch_id = item.data(Qt.UserRole)
-                if watch_id:
-                    watch_ids.append(watch_id)
+                ident = item.data(Qt.UserRole)
+                if ident:
+                    ids.append(ident)
         
-        # Remove all selected signals
-        for watch_id in watch_ids:
-            self.watch_manager.remove_signal(watch_id)
+        # Remove items — support both watched-signals and variables
+        for ident in ids:
+            try:
+                if isinstance(ident, str) and ident.startswith('var:'):
+                    # ident format: var:{owner}:{name}
+                    parts = ident.split(':', 2)
+                    if len(parts) == 3:
+                        owner = parts[1] or None
+                        name = parts[2]
+                        if self.device_manager:
+                            try:
+                                self.device_manager.remove_variable(owner, name)
+                            except Exception:
+                                logger.exception(f"Failed to remove variable {name}")
+                else:
+                    # treat as watch_id for watch_manager
+                    self.watch_manager.remove_signal(ident)
+            except Exception:
+                logger.exception(f"Error removing item {ident}")
+
+    # ---------------- Variable UI integration ----------------
+    def _create_variable_from_row(self, row: int):
+        """Prompt user and create a global variable bound to the selected signal."""
+        try:
+            item = self.table.item(row, 0)
+            if not item:
+                return
+            # Extract address from Address column
+            addr_item = self.table.item(row, 1)
+            if not addr_item:
+                return
+            unique_address = addr_item.text().strip()
+            if not unique_address:
+                return
+
+            # Ask for variable name
+            from PySide6.QtWidgets import QInputDialog, QMessageBox
+            default_name = unique_address.split('::')[-1].replace('.', '_').replace('/', '_')
+            name, ok = QInputDialog.getText(self, 'Create Variable', 'Variable name:', text=default_name)
+            if not ok or not name:
+                return
+
+            # Ask whether continuous
+            resp = QMessageBox.question(self, 'Update mode', 'Start in continuous update mode?', QMessageBox.Yes | QMessageBox.No)
+            mode = 'continuous' if resp == QMessageBox.Yes else 'on_demand'
+            interval_ms = None
+            if mode == 'continuous':
+                interval_ms, ok2 = QInputDialog.getInt(self, 'Interval (ms)', 'Update interval (ms):', 250, 10, 60000)
+                if not ok2:
+                    return
+
+            # Create variable via DeviceManager (global owner=None)
+            if not self.device_manager:
+                QMessageBox.warning(self, 'Create Variable', 'Device manager not available')
+                return
+
+            try:
+                self.device_manager.create_variable(None, name, unique_address, mode=mode, interval_ms=interval_ms)
+                evt = getattr(self.device_manager, 'event_logger', None)
+                if evt:
+                    evt.info('Variable', f"Created variable '{name}' -> {unique_address} ({mode}{'' if not interval_ms else f', {interval_ms}ms'})")
+            except Exception as e:
+                QMessageBox.critical(self, 'Create Variable', f'Failed to create variable: {e}')
+        except Exception:
+            logger.exception('Failed to create variable from row')
+
+    def _add_variable_row(self, owner, name, unique_address, value=None, ts=None):
+        """Add a variable row to the watch table (visual-only)."""
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+        # Column 0: Name
+        it = QTableWidgetItem(name)
+        it.setData(Qt.UserRole, f"var:{owner or ''}:{name}")
+        self.table.setItem(row, 0, it)
+        # Column 1: Address
+        self.table.setItem(row, 1, QTableWidgetItem(unique_address))
+        # Columns 2-7: metadata not applicable
+        for c in range(2, 8):
+            self.table.setItem(row, c, QTableWidgetItem("--"))
+        # Column 8: Value
+        val_text = str(value) if value is not None else "--"
+        self.table.setItem(row, 8, QTableWidgetItem(val_text))
+        # RTT/Max RTT
+        self.table.setItem(row, 9, QTableWidgetItem("--"))
+        self.table.setItem(row, 10, QTableWidgetItem("--"))
+        # Quality
+        qit = QTableWidgetItem("VAR")
+        qit.setBackground(QBrush(QColor('#DDEEFF')))
+        self.table.setItem(row, 11, qit)
+        # Timestamp
+        ts_text = str(ts) if ts else "--"
+        self.table.setItem(row, 12, QTableWidgetItem(ts_text))
+        # Last changed / Error
+        self.table.setItem(row, 13, QTableWidgetItem("--"))
+        self.table.setItem(row, 14, QTableWidgetItem("--"))
+
+    def _on_variable_added(self, owner, name, unique_address):
+        try:
+            # Add a lightweight row for the variable
+            self._add_variable_row(owner, name, unique_address)
+            self.table.resizeColumnsToContents()
+        except Exception:
+            logger.exception('Failed to add variable row')
+
+    def _on_variable_removed(self, owner, name):
+        # Find and remove matching variable row
+        ident = f"var:{owner or ''}:{name}"
+        for row in range(self.table.rowCount() - 1, -1, -1):
+            item = self.table.item(row, 0)
+            if item and item.data(Qt.UserRole) == ident:
+                self.table.removeRow(row)
+                break
+
+    def _on_variable_updated(self, owner, name, value, ts):
+        ident = f"var:{owner or ''}:{name}"
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
+            if item and item.data(Qt.UserRole) == ident:
+                try:
+                    self._ensure_item(row, 8).setText(str(value) if value is not None else "--")
+                    self._ensure_item(row, 12).setText(str(ts) if ts else "--")
+                except Exception:
+                    logger.exception('Failed to update variable row')
+                break
     
     def _invoke_control_dialog(self, device_name, signal):
         """Open control dialog for a signal."""
