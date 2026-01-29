@@ -307,6 +307,36 @@ def IedConnection_close(connection):
     func.argtypes = [IedConnection]
     func(connection)
 
+def IedConnection_setRequestTimeout(connection, timeout_ms):
+    """
+    Set the request timeout for MMS operations.
+    
+    Args:
+        connection: IedConnection handle
+        timeout_ms: Timeout in milliseconds (uint32)
+    """
+    _check_lib()
+    func = _lib.IedConnection_setRequestTimeout
+    func.restype = None
+    func.argtypes = [IedConnection, c_uint32]
+    func(connection, timeout_ms)
+
+def IedConnection_getRequestTimeout(connection):
+    """
+    Get the current request timeout for MMS operations.
+    
+    Args:
+        connection: IedConnection handle
+    
+    Returns:
+        int: Timeout in milliseconds
+    """
+    _check_lib()
+    func = _lib.IedConnection_getRequestTimeout
+    func.restype = c_uint32
+    func.argtypes = [IedConnection]
+    return func(connection)
+
 def IedConnection_getState(connection):
     """
     Get the current connection state.
@@ -717,6 +747,28 @@ def IedConnection_writeInt32Value(connection, object_reference, fc, value):
     
     error = c_int()
     func(connection, ctypes.byref(error), _encode_str(object_reference), fc, int(value))
+    return error.value
+
+def IedConnection_writeVisibleStringValue(connection, object_reference, fc, value):
+    """
+    Write a visible string value.
+    
+    Args:
+        connection: IedConnection handle
+        object_reference: Full object reference
+        fc: Functional constraint
+        value: String value
+    
+    Returns:
+        int: Error code
+    """
+    _check_lib()
+    func = _lib.IedConnection_writeVisibleStringValue
+    func.restype = None
+    func.argtypes = [IedConnection, POINTER(c_int), c_char_p, c_int, c_char_p]
+    
+    error = c_int()
+    func(connection, ctypes.byref(error), _encode_str(object_reference), fc, _encode_str(value))
     return error.value
 
 # ============================================================================
@@ -1139,6 +1191,24 @@ def MmsValue_newStructure(size):
         # If this doesn't exist, we cannot safely create an empty structure by size alone
         logger.error("MmsValue_createEmptyStructure not found in library.")
         return None
+
+def MmsValue_clone(value):
+    """
+    Create a deep copy/clone of an MmsValue.
+    
+    Args:
+        value: MmsValue to clone
+    
+    Returns:
+        MmsValue: Cloned value (caller must delete)
+    """
+    if not value:
+        return None
+    _check_lib()
+    func = _lib.MmsValue_clone
+    func.restype = MmsValue
+    func.argtypes = [MmsValue]
+    return func(value)
 
 def MmsValue_setElement(complex_value, index, element_value):
     """Set element in a structure/array."""

@@ -23,5 +23,20 @@
     "name": "Add IED + Variables (172.16.11.18)",
     "code": "from scripts.iec61850_add_device_and_vars_ui import main as _add_ied_main\n\ndef main(ctx):\n    \"\"\"UI-friendly: add an IEC61850 IED (172.16.11.18) to DeviceManager and create variables.\n    Edit HOST/DEVICE_NAME/OBJECT_PATHS at top of the script before running.\n    \"\"\"\n    return _add_ied_main(ctx)",
     "interval": 0.5
+  },
+  {
+    "name": "Setup Generators (G1-G22)",
+    "code": "from scripts.gen_devices_setup import main as _gen_setup\n\ndef main(ctx):\n    \"\"\"One-shot setup: Add generator devices G1-G22 to DeviceManager.\n    Converted from GenDevices.js (Triangle MicroWorks).\n    Edit IP_MAP in scripts/gen_devices_setup.py before running if needed.\n    \"\"\"\n    return _gen_setup(ctx)",
+    "interval": 0.5
+  },
+  {
+    "name": "Setup Switchgear (GPS1-GPS4)",
+    "code": "from scripts.swg_devices_setup import main as _swg_setup\n\ndef main(ctx):\n    \"\"\"One-shot setup: Add switchgear devices GPS1-GPS4 to DeviceManager.\n    Converted from swgDevices.js (Triangle MicroWorks).\n    Edit IP_MAP in scripts/swg_devices_setup.py before running if needed.\n    \"\"\"\n    return _swg_setup(ctx)",
+    "interval": 0.5
+  },
+  {
+    "name": "Generator Simulation (Template)",
+    "code": "from scripts.gen_simulation_template import tick as _gen_sim_tick\n\ndef tick(ctx):\n    \"\"\"Continuous simulation of generator behavior with state machines.\n    This is a TEMPLATE - edit scripts/gen_simulation_template.py to complete.\n    Original: GenRun_Edited.js (1367 lines) - simplified version provided.\n    Configure GENERATOR_IDS and register mappings before enabling.\n    \"\"\"\n    return _gen_sim_tick(ctx)",
+    "interval": 0.1
   }
 ]

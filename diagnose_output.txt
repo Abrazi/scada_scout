@@ -1,0 +1,54 @@
+2026-01-29 06:23:07,422 [DEBUG] src.protocols.iec61850.adapter: iec61850_wrapper has MmsValue_newUtcTimeMs.
+2026-01-29 06:23:08,470 [INFO] src.protocols.iec61850.adapter: Connecting to 172.16.11.18 using libiec61850...
+2026-01-29 06:23:08,482 [INFO] src.protocols.iec61850.adapter: Connected successfully!
+2026-01-29 06:23:13,538 [INFO] src.protocols.iec61850.adapter: Disconnected.
+================================================================================
+SBO FLOW DIAGNOSTIC TOOL
+================================================================================
+
+1. CONFIGURATION
+   IED Address: 172.16.11.18:102
+   Control Object: GPS01ECB01CB1/CSWI1.Pos
+
+2. CREATING ADAPTER
+   ✓ Adapter created
+
+3. CONNECTING TO IED
+   ✓ Connection successful
+   - adapter.connected = True
+   - adapter.connection = 881712912
+
+4. INITIALIZING CONTROL CONTEXT
+   - Object reference: GPS01ECB01CB1/CSWI1.Pos
+   ✓ Control context initialized
+   - object_reference: GPS01ECB01CB1/CSWI1.Pos
+   - ctl_model: SBO_ENHANCED (value=4)
+   - is_sbo: True
+   - ctl_num: 0
+   - sbo_reference: GPS01ECB01CB1/CSWI1.Pos.SBOw
+   - originator_id: iedexplorer
+   - originator_cat: 3
+
+5. TESTING SEND_COMMAND
+   Calling send_command(GPS01ECB01CB1/CSWI1.Pos, True)...
+   NOTE: Check packets.log for network traffic
+   ✗ send_command returned FAILURE
+   Error message: IED rejected SELECT: Error 20 (UNKNOWN_20)
+
+   Checking if packets were sent...
+   - Review packets.log for SELECT/OPERATE MMS messages
+   - Look for MMS service tags: 0xa6 (SELECT) or 0xa5 (OPERATE)
+
+6. DISCONNECTING
+   ✓ Disconnected
+
+================================================================================
+DIAGNOSTIC COMPLETE
+================================================================================
+
+SUMMARY:
+- If connection failed: Check IED IP/port and network connectivity
+- If context init failed: Check object reference format
+- If send_command failed: Check event_logger messages and packets.log
+- Expected packets: SELECT (0xa6) followed by OPERATE (0xa5)
+- To capture packets: Use Wireshark on port 102 or check packets.log

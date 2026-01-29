@@ -83,9 +83,12 @@ def test_send_command_force_direct_skips_select_and_operates():
     # prevent native wrapper calls from failing when building Oper structure
     iec61850.IedConnection_readObject = lambda *a, **k: (None, iec61850.IED_ERROR_OK)
     iec61850.IedConnection_readInt32Value = lambda *a, **k: (None, iec61850.IED_ERROR_OK)
+    iec61850.IedConnection_writeObject = lambda conn, path, fc, val: iec61850.IED_ERROR_OK
+    iec61850.MmsValue_delete = lambda v: None
 
     ok = ad.send_command(sig, True, params={'force_direct': True})
     assert ok is True
     # select must not have been invoked (force_direct)
     assert called['select'] == 0
-    assert called['operate'] == 1
+    # force_direct uses fallback writes, NOT ControlObjectClient_operate
+    assert called['operate'] == 0

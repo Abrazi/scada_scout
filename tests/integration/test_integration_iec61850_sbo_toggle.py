@@ -37,7 +37,15 @@ def test_sbo_toggle_roundtrip():
     err = iec61850.IedConnection_connect(conn, HOST, PORT)
     assert err == iec61850.IED_ERROR_OK, f"Could not connect to {HOST}:{PORT} (err={err})"
 
-    obj = OBJECT.rstrip('/')
+    raw_obj = OBJECT.rstrip('/')
+    # Normalize object reference for ControlObjectClient_create and stVal reads
+    # Accept full control attribute paths like ...Oper.ctlVal or ...ctlVal
+    if raw_obj.endswith(".Oper.ctlVal"):
+        obj = raw_obj[: -len(".Oper.ctlVal")]
+    elif raw_obj.endswith(".ctlVal"):
+        obj = raw_obj[: -len(".ctlVal")]
+    else:
+        obj = raw_obj
 
     # read current stVal
     try:
@@ -73,8 +81,19 @@ def test_sbo_toggle_roundtrip():
         print(f"Control model: {ctl_model}")
 
         # SELECT
-        # Always use select, not selectWithValue
-        ok = iec61850.ControlObjectClient_select(client)
+        # For SBO enhanced (model 4), prefer selectWithValue
+        ok = False
+        if ctl_model == 4:
+            mms_sel = iec61850.MmsValue_newBoolean(target) if isinstance(target, bool) else iec61850.MmsValue_newInt32(int(target))
+            try:
+                ok = iec61850.ControlObjectClient_selectWithValue(client, mms_sel)
+            finally:
+                try:
+                    iec61850.MmsValue_delete(mms_sel)
+                except Exception:
+                    pass
+        if not ok:
+            ok = iec61850.ControlObjectClient_select(client)
         assert ok, "SELECT failed"
 
         # allow IED to publish ctlNum

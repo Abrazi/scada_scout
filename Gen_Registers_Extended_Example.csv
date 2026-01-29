@@ -1,0 +1,46 @@
+# Extended Gen_Registers.csv Format Example
+# This example shows the extended format with data types, endianness, scale, and offset
+# 
+# Columns:
+# - IsEnabled: true/false (whether this register is active)
+# - Index: Register index (0-based)
+# - PointType: 1=Coil, 2=Discrete, 3=Input Register, 4=Holding Register
+# - Name: Register name/identifier
+# - Description: Human-readable description
+# - Direction: Input/Output/None (for documentation)
+# - Value: Default value
+# - Quality: Default quality (0=good)
+# - DataType: Optional - UINT16, INT16, FLOAT32, etc. (defaults to UINT16)
+# - Endianness: Optional - BIG_ENDIAN, LITTLE_ENDIAN, etc. (defaults to BIG_ENDIAN)
+# - Scale: Optional - Multiply factor for value conversion (defaults to 1.0)
+# - Offset: Optional - Offset for value conversion (defaults to 0.0)
+#
+# Example: For a temperature sensor reading in 0.1°C increments stored as UINT16
+#          - Raw value: 235 (register value)
+#          - Scale: 0.1
+#          - Offset: 0
+#          - Actual value: 235 * 0.1 + 0 = 23.5°C
+
+IsEnabled,Index,PointType,Name,Description,Direction,Value,Quality,DataType,Endianness,Scale,Offset
+True,0,4,R000,Generator State,None,0,0,UINT16,BIG_ENDIAN,1.0,0.0
+True,1,4,R001,Control Mode,None,0,0,UINT16,BIG_ENDIAN,1.0,0.0
+True,2,4,R002,Fault Code,None,0,0,UINT16,BIG_ENDIAN,1.0,0.0
+True,3,4,R003,Status Flags,None,0,0,UINT16,BIG_ENDIAN,1.0,0.0
+True,10,4,R010,Voltage (V),Output,0,0,UINT16,BIG_ENDIAN,1.0,0.0
+True,11,4,R011,Frequency (0.1 Hz),Output,500,0,UINT16,BIG_ENDIAN,0.1,0.0
+True,12,4,R012,Active Power (kW),Output,0,0,INT16,BIG_ENDIAN,1.0,0.0
+True,13,4,R013,Reactive Power (kVAr),Output,0,0,INT16,BIG_ENDIAN,1.0,0.0
+True,14,4,R014,Current (A),Output,0,0,UINT16,BIG_ENDIAN,0.1,0.0
+True,15,4,R015,Power Factor,Output,0,0,UINT16,BIG_ENDIAN,0.01,0.0
+True,20,4,R020,Voltage Setpoint (V),Input,10500,0,UINT16,BIG_ENDIAN,1.0,0.0
+True,21,4,R021,Frequency Setpoint (Hz),Input,50,0,UINT16,BIG_ENDIAN,0.1,0.0
+True,22,4,R022,Power Setpoint (kW),Input,0,0,UINT16,BIG_ENDIAN,1.0,0.0
+True,23,4,R023,Reactive Power Setpoint (kVAr),Input,0,0,INT16,BIG_ENDIAN,1.0,0.0
+True,100,1,C100,Start Command,Input,0,0
+True,101,1,C101,Stop Command,Input,0,0
+True,102,1,C102,Emergency Stop,Input,0,0
+True,103,1,C103,Reset Fault,Input,0,0
+True,200,2,DI200,Breaker Closed,Output,0,0
+True,201,2,DI201,Breaker Open,Output,1,0
+True,202,2,DI202,Fault Detected,Output,0,0
+True,203,2,DI203,Ready to Start,Output,1,0
