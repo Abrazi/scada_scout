@@ -1273,7 +1273,7 @@ Direct Operate with Enhanced Security:
                 ctrl_info = {
                     "name": ctrl_ref,
                     "model": str(ctrl_obj.control_model.name) if hasattr(ctrl_obj, 'control_model') else "Unknown",
-                    "activation": "SBO" if "SBO" in str(ctrl_obj.control_model) else "Direct",
+                    "activation": "SBO" if "SBO" in str(ctrl_obj.ctl_model) else "Direct",
                     "status": str(ctrl_obj.state.name) if hasattr(ctrl_obj, 'state') else "Unknown"
                 }
                 controls.append(ctrl_info)

@@ -1,4 +1,9 @@
-from PySide6.QtWidgets import QDialog, QVBoxLayout, QPushButton, QHBoxLayout, QFileDialog, QTableWidget, QTableWidgetItem, QHeaderView, QDialogButtonBox, QLabel, QMessageBox, QLineEdit, QComboBox, QInputDialog, QListWidget
+from PySide6.QtWidgets import (
+    QDialog, QVBoxLayout, QPushButton, QHBoxLayout, QFileDialog, 
+    QTableWidget, QTableWidgetItem, QHeaderView, QDialogButtonBox, 
+    QLabel, QMessageBox, QLineEdit, QComboBox, QInputDialog, 
+    QListWidget, QCheckBox, QProgressDialog, QApplication
+)
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QGuiApplication
 from typing import List
@@ -60,7 +65,6 @@ class SCDImportDialog(QDialog):
         sel_layout.addWidget(btn_check_ips)
 
         # Defer expansion toggle (default: defer for fastest import)
-        from PySide6.QtWidgets import QCheckBox, QLabel
         self.chk_defer_expansion = QCheckBox("Defer full structure expansion (faster import)")
         self.chk_defer_expansion.setChecked(True)
         self.chk_defer_expansion.setToolTip(
@@ -118,7 +122,6 @@ class SCDImportDialog(QDialog):
                         selected_file = scd_files[0]
                     
                     # Extract in background to avoid UI freeze
-                    from PySide6.QtWidgets import QProgressDialog, QApplication
                     from src.core.workers import ExtractWorker
 
                     temp_dir = tempfile.mkdtemp(prefix="scada_scout_scd_")
@@ -237,7 +240,6 @@ class SCDImportDialog(QDialog):
     
     def _parse_and_list_with_progress(self, path):
         """Parse SCD file with progress feedback using background thread."""
-        from PySide6.QtWidgets import QProgressDialog, QApplication
         from src.core.workers import SCDParseWorker
         
         # Setup Progress Dialog
@@ -283,7 +285,6 @@ class SCDImportDialog(QDialog):
         self._populate_table()
 
     def _populate_table(self):
-        from PySide6.QtWidgets import QComboBox, QApplication
         
         # Disable updates during bulk population for better performance
         self.table.setUpdatesEnabled(False)
@@ -423,22 +424,24 @@ class SCDImportDialog(QDialog):
                         ip = text.split(' - ')[0].split('(')[0].strip()
                     else:
                         ip = text
-                    # Fallback to data if text parsing didn't work
-                    if not ip:
-                        data = widget.currentData()
-                        if isinstance(data, dict):
+                    # Get ip_info from currentData()
+                    data = widget.currentData()
+                    if isinstance(data, dict):
+                        ip_info = data
+                        # Fallback to data's IP if text parsing didn't work or is empty
+                        if not ip or ip == "127.0.0.1":
                             ip = data.get('ip', '127.0.0.1')
-                            ip_info = data
-                    else:
-                        ip_item = self.table.item(row, 1)
-                        ip = ip_item.text() if ip_item else "127.0.0.1"
-                        if ip_item:
-                            try:
-                                data = ip_item.data(Qt.UserRole)
-                                if isinstance(data, dict):
-                                    ip_info = data
-                            except Exception:
-                                pass
+                else:
+                    # No ComboBox - single IP case
+                    ip_item = self.table.item(row, 1)
+                    ip = ip_item.text() if ip_item else "127.0.0.1"
+                    if ip_item:
+                        try:
+                            data = ip_item.data(Qt.UserRole)
+                            if isinstance(data, dict):
+                                ip_info = data
+                        except Exception:
+                            pass
 
                 protocol_params = {}
                 if ip_info:

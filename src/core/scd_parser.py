@@ -417,6 +417,35 @@ class SCDParser:
         # Add more mappings as needed
         return SignalType.ANALOG # Default
 
+    def _parse_val_to_python(self, val_text: str, btype: str = None, type_id: str = None):
+        """Parse a Val element text to appropriate Python type based on bType.
+        
+        This extracts default values from SCD files for signals like ctrlModel, stVal, etc.
+        """
+        if not val_text:
+            return None
+        
+        val_text = val_text.strip()
+        if not val_text:
+            return None
+        
+        # Type-specific parsing
+        if btype == "BOOLEAN":
+            return val_text.lower() in ('true', '1', 'yes')
+        elif btype in ["INT8", "INT16", "INT32", "INT64", "INT8U", "INT16U", "INT32U", "INT64U", "Enum", "Dbpos"]:
+            try:
+                return int(val_text)
+            except ValueError:
+                return val_text
+        elif btype in ["FLOAT32", "FLOAT64"]:
+            try:
+                return float(val_text)
+            except ValueError:
+                return val_text
+        else:
+            # Default: return as string
+            return val_text
+
     def _expand_do_type(self, parent_node: Node, do_type_id: str, templates: dict, path_prefix: str, ld_name: str = "", depth: int = 0):
         """Recursively expand a DO Type into DAs, using path_prefix for full address."""
         if depth > 10:
@@ -429,9 +458,25 @@ class SCDParser:
             tag = sdo_or_da.tag.split('}')[-1]  # Strip namespace
             elem_name = sdo_or_da.get("name")
             
-            if tag == "DA":  # Data Attribute - this is a signal
+            if tag == "DA":  # Data Attribute - this could be a signal or a structured type
                 fc = sdo_or_da.get("fc")
                 btype = sdo_or_da.get("bType")
+                type_id = sdo_or_da.get("type")
+                
+                # Check if this DA has a complex type (DAType) that should be expanded as a sub-node
+                # This is common for control structures like Oper, SBOw, Cancel
+                if type_id and type_id in templates:
+                    template_entry = templates[type_id]
+                    # If it's a DAType (XML element, not an enum dict), expand as sub-node
+                    if not isinstance(template_entry, dict):
+                        # This is a structured DA (like Oper) - create a sub-node
+                        da_node = Node(name=elem_name, description=f"Structured DA (FC:{fc})")
+                        parent_node.children.append(da_node)
+                        new_path = f"{path_prefix}.{elem_name}"
+                        self._expand_da_type(da_node, type_id, templates, new_path, ld_name, depth=depth+1)
+                        continue  # Don't create a simple signal for structured DAs
+                
+                # Otherwise, create a simple signal (existing logic)
                 sig_type = self._map_btype_to_signal_type(btype)
                 
                 if elem_name.lower().endswith(".t") or elem_name == "T":
@@ -444,49 +489,37 @@ class SCDParser:
                      access = "RW"
 
                 # Build full address with LD prefix
-                # Fix: Check if path_prefix already starts with ld_name to avoid duplication
-                # Although path_prefix usually is LN.DO...
-                # The user reported "GPS...CB1/GPS...CB1/XCBR1.Beh.stVal"
-                # This suggests ld_name was added, and maybe path_prefix also contained it?
-                # Or maybe ld_name itself contained the slash?
-                
-                # Standard check:
                 if ld_name and not path_prefix.startswith(ld_name + "/"):
                     full_address = f"{ld_name}/{path_prefix}.{elem_name}"
                 else:
-                    # If path_prefix already has the LD (unlikely but safe)
                     full_address = f"{path_prefix}.{elem_name}"
                 
                 signal = Signal(
                     name=elem_name,
                     address=full_address,
                     signal_type=sig_type,
-                    description=f"FC:{fc} Type:{btype}",
+                    description=f"FC:{fc} Type:{btype or type_id}",
                     access=access,
                     fc=fc
                 )
                 
                 # Check for Enum Mapping
-                type_id = sdo_or_da.get("type")
                 logger.debug(f"DA '{elem_name}': bType={btype}, fc={fc}, type={type_id}")
                 
-                if type_id:
-                     # Check if it's an EnumType (dict)
-                     # In our parsing above, enum_types entries are Dicts, while others are xml Elements.
-                     # We stored enums in templates, but they're dicts while LNodeTypes/DOTypes/DATypes are Elements
-                     if type_id in templates:
-                         possible_enum = templates[type_id]
-                         if isinstance(possible_enum, dict):
-                             logger.debug(f"✓ Enum mapping for {full_address} ({elem_name}): {possible_enum}")
-                             signal.enum_map = possible_enum
-                             if sig_type == SignalType.ANALOG:
-                                 # Optionally convert to State type for enum values
-                                 pass
-                         else:
-                             # It's a DAType or other complex type, not an enum
-                             logger.debug(f"  Type '{type_id}' is not an EnumType (it's {type(possible_enum).__name__})")
-                     else:
-                         logger.warning(f"  Type '{type_id}' not found in templates for DA '{elem_name}'")
+                if type_id and type_id in templates:
+                    possible_enum = templates[type_id]
+                    if isinstance(possible_enum, dict):
+                        logger.debug(f"✓ Enum mapping for {full_address} ({elem_name}): {possible_enum}")
+                        signal.enum_map = possible_enum
+                
+                # Extract default value from <Val> element if present
+                val_element = sdo_or_da.find("scl:Val", self.ns) or sdo_or_da.find("Val")
+                if val_element is not None and val_element.text:
+                    try:
+                        signal.value = self._parse_val_to_python(val_element.text, btype, type_id)
+                        logger.debug(f"  Default value for {full_address}: {signal.value}")
+                    except Exception as e:
+                        logger.warning(f"  Failed to parse default value for {full_address}: {e}")
                 
                 parent_node.signals.append(signal)
                 
@@ -497,6 +530,81 @@ class SCDParser:
                 if sdo_type_id:
                     new_path = f"{path_prefix}.{elem_name}"
                     self._expand_do_type(sdo_node, sdo_type_id, templates, new_path, ld_name, depth=depth+1)
+
+    def _expand_da_type(self, parent_node: Node, da_type_id: str, templates: dict, path_prefix: str, ld_name: str = "", depth: int = 0):
+        """Recursively expand a DA Type (structured data attribute) into its component DAs.
+        
+        This is used for complex data attributes like control operations (Oper, SBOw, Cancel)
+        which contain multiple child attributes (ctlVal, origin, ctlNum, T, Test, Check).
+        """
+        if depth > 10:
+            return
+        
+        datype_def = templates.get(da_type_id)
+        if datype_def is None or isinstance(datype_def, dict):
+            return
+        
+        # DAType contains BDA (Basic Data Attribute) elements
+        for bda in datype_def.findall("scl:BDA", self.ns) + datype_def.findall("BDA"):
+            bda_name = bda.get("name")
+            fc = bda.get("fc")
+            btype = bda.get("bType")
+            bda_type = bda.get("type")
+            
+            # Check if this BDA itself has a complex type (nested DAType)
+            if bda_type and bda_type in templates:
+                template_entry = templates[bda_type]
+                if not isinstance(template_entry, dict):  # Not an enum, it's a DAType
+                    # Nested structured BDA - create sub-node and recurse
+                    bda_node = Node(name=bda_name, description=f"Nested Structured BDA (FC:{fc})")
+                    parent_node.children.append(bda_node)
+                    new_path = f"{path_prefix}.{bda_name}"
+                    self._expand_da_type(bda_node, bda_type, templates, new_path, ld_name, depth=depth+1)
+                    continue
+            
+            # Create a simple signal for this BDA
+            sig_type = self._map_btype_to_signal_type(btype)
+            
+            if bda_name and (bda_name.lower().endswith(".t") or bda_name == "T"):
+                sig_type = SignalType.TIMESTAMP
+            
+            # Control check
+            access = "RO"
+            if fc == "CO" or bda_name == "ctlVal":
+                sig_type = SignalType.COMMAND
+                access = "RW"
+            
+            # Build full address
+            if ld_name and not path_prefix.startswith(ld_name + "/"):
+                full_address = f"{ld_name}/{path_prefix}.{bda_name}"
+            else:
+                full_address = f"{path_prefix}.{bda_name}"
+            
+            signal = Signal(
+                name=bda_name,
+                address=full_address,
+                signal_type=sig_type,
+                description=f"FC:{fc} Type:{btype or bda_type}",
+                access=access,
+                fc=fc
+            )
+            
+            # Check for enum mapping
+            if bda_type and bda_type in templates:
+                possible_enum = templates[bda_type]
+                if isinstance(possible_enum, dict):
+                    signal.enum_map = possible_enum
+            
+            # Extract default value from <Val> element if present
+            val_element = bda.find("scl:Val", self.ns) or bda.find("Val")
+            if val_element is not None and val_element.text:
+                try:
+                    signal.value = self._parse_val_to_python(val_element.text, btype, bda_type)
+                    logger.debug(f"  Default value for {full_address}: {signal.value}")
+                except Exception as e:
+                    logger.warning(f"  Failed to parse default value for {full_address}: {e}")
+            
+            parent_node.signals.append(signal)
 
     def extract_ieds_info(self) -> List[Dict[str, Any]]:
         """

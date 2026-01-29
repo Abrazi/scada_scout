@@ -137,7 +137,10 @@ class ControlDialog(QDialog):
         # Determine Input Widget
         if "BOOL" in sig_type or "SPC" in self.signal.address or "ctlVal" in self.signal.name: 
             self.input_widget = QComboBox()
-            self.input_widget.addItems(["On (False / 0)", "Off (True / 1)"])
+            # User reports False(0) Closes the breaker. 
+            # Standard logic: False=0, True=1.
+            # So "Close" -> 0, "Open" -> 1.
+            self.input_widget.addItems(["Close / On (False / 0)", "Open / Off (True / 1)"])
         elif "FLOAT" in sig_type:
             self.input_widget = QDoubleSpinBox()
             self.input_widget.setRange(-1e9, 1e9)
@@ -388,8 +391,32 @@ class ControlDialog(QDialog):
                     self._update_button_states()
                     self.lbl_status.setText(f"Context Initialized: {name}")
                     self._set_label_status(self.lbl_status, "success")
+                    return
+                
+                # ctx is None - try offline fallback
+                offline_model = self._read_offline_ctrlmodel()
+                if offline_model is not None:
+                    self.detected_control_model = offline_model
+                    names = {
+                        0: "Status Only (0)",
+                        1: "Direct Normal (1)",
+                        2: "SBO Normal (2)",
+                        3: "Direct Enhanced (3)",
+                        4: "SBO Enhanced (4)"
+                    }
+                    name = names.get(self.detected_control_model, f"Unknown ({self.detected_control_model})")
+                    self.txt_control_model.setText(f"{name} [from SCD]")
+                    
+                    if self.detected_control_model == 0:
+                        self._set_field_state(self.txt_control_model, "error")
+                    else:
+                        self._set_field_state(self.txt_control_model, "ok")
+                    
+                    self._update_button_states()
+                    self.lbl_status.setText(f"Offline Mode: {name} (from SCD file)")
+                    self._set_label_status(self.lbl_status, "info")
                 else:
-                    self.lbl_status.setText("Control NOT support (ctlModel=0 or missing)")
+                    self.lbl_status.setText("Control NOT supported (ctlModel=0 or missing)")
                     self.txt_control_model.setText("Not Supported")
                     self._set_field_state(self.txt_control_model, "error")
             else:
@@ -417,6 +444,78 @@ class ControlDialog(QDialog):
         except Exception as e:
             logger.warning(f"Failed to sync UI from context: {e}")
 
+    
+    def _read_offline_ctrlmodel(self) -> Optional[int]:
+        """Try to read ctrlModel from device tree structure (offline fallback)."""
+        try:
+            device = self.device_manager.get_device(self.device_name)
+            if not device or not hasattr(device, 'root_node'):
+                logger.info(f"Offline ctrlModel: No device or root_node for {self.device_name}")
+                return None
+            
+            # Try to find ctrlModel signal in the tree
+            # Format: LD/LN.DO.ctlModel
+            ctl_model_paths = [
+                f"{self.obj_ref}.ctlModel",
+                f"{self.obj_ref}$ctlModel"
+            ]
+            
+            logger.info(f"Offline ctrlModel: Searching for paths: {ctl_model_paths}")
+            logger.info(f"Offline ctrlModel: obj_ref={self.obj_ref}, signal.address={self.signal.address}")
+            
+            # Log available signals for debugging
+            all_addrs = self._collect_all_signal_addresses(device.root_node)
+            matching = [a for a in all_addrs if 'ctlmodel' in a.lower()]
+            if matching:
+                logger.info(f"Offline ctrlModel: Found {len(matching)} ctlModel signals: {matching[:5]}")
+            
+            for ctl_path in ctl_model_paths:
+                signal = self._find_signal_in_tree(device.root_node, ctl_path)
+                if signal:
+                    logger.info(f"Offline ctrlModel: Found signal at {ctl_path}, value={signal.value}")
+                    if signal.value is not None:
+                        try:
+                            return int(signal.value)
+                        except (ValueError, TypeError):
+                            pass
+            
+            logger.info(f"Offline ctrlModel: No ctrlModel found")
+            return None
+        except Exception as e:
+            logger.error(f"Failed to read offline ctrlModel: {e}", exc_info=True)
+            return None
+    
+    def _collect_all_signal_addresses(self, node, addresses=None):
+        """Collect all signal addresses in the tree for debugging."""
+        if addresses is None:
+            addresses = []
+        
+        if hasattr(node, 'signals'):
+            for sig in node.signals:
+                if sig.address:
+                    addresses.append(sig.address)
+        
+        if hasattr(node, 'children'):
+            for child in node.children:
+                self._collect_all_signal_addresses(child, addresses)
+        
+        return addresses
+    
+    def _find_signal_in_tree(self, node, address: str):
+        """Recursively search for a signal by address in the device tree."""
+        if hasattr(node, 'signals'):
+            for sig in node.signals:
+                if sig.address == address:
+                    return sig
+        
+        if hasattr(node, 'children'):
+            for child in node.children:
+                result = self._find_signal_in_tree(child, address)
+                if result:
+                    return result
+        
+        return None
+
     def _update_button_states(self):
         model = self.detected_control_model
         is_sbo = model in [2, 4]
@@ -426,6 +525,18 @@ class ControlDialog(QDialog):
         self.btn_operate.setEnabled(is_sbo and self.selected)
         self.btn_direct.setEnabled(is_direct)
         self.btn_abort.setEnabled(is_sbo and self.selected)
+        
+        # Lock input widget if selected (SBO) to prevent value mismatch between Select and Operate
+        if self.input_widget:
+            self.input_widget.setEnabled(not (is_sbo and self.selected))
+        
+        # Disable control buttons if adapter not connected
+        adapter = self._get_adapter()
+        if not adapter or not getattr(adapter, 'connected', False):
+            self.btn_select.setEnabled(False)
+            self.btn_operate.setEnabled(False)
+            self.btn_direct.setEnabled(False)
+            self.btn_abort.setEnabled(False)
         
         if is_sbo:
             if self.selected:
@@ -440,17 +551,21 @@ class ControlDialog(QDialog):
     def _load_current_value(self):
         try:
             adapter = self._get_adapter()
-            if adapter:
+            res = None
+            
+            # Try live device first if connected
+            if adapter and getattr(adapter, 'connected', False):
+                logger.info(f"Control Dialog: Attempting live read for stVal")
                 # Determine stVal path
                 # Try both . and $ separators
                 st_paths = [f"{self.obj_ref}.stVal", f"{self.obj_ref}$stVal"]
                 
-                res = None
                 from src.models.device_models import Signal
                 for st_path in st_paths:
                     dummy = Signal(name="stVal", address=st_path)
                     res = adapter.read_signal(dummy)
                     if res and res.value is not None:
+                        logger.info(f"Control Dialog: Live read successful, value={res.value}")
                         break
                 
                 if res and res.value is not None:
@@ -462,12 +577,70 @@ class ControlDialog(QDialog):
                     except Exception:
                         self.lbl_current_val.setToolTip(str(res.value))
                     self._set_label_status(self.lbl_current_val, "info")
+                    return
                 else:
-                    self.lbl_current_val.setText("NULL (Read Failed)")
-                    self.lbl_current_val.setToolTip("")
-                    self._set_label_status(self.lbl_current_val, "error")
+                    logger.info(f"Control Dialog: Live read failed or returned None, trying offline fallback")
+            
+            # Offline fallback: read from device tree structure
+            # This runs when device is offline OR when live read failed
+            logger.info(f"Control Dialog: Trying offline fallback for stVal")
+            offline_stval = self._read_offline_stval()
+            if offline_stval is not None:
+                formatted = self._format_status_value(offline_stval)
+                # Check if value is actually populated
+                if offline_stval.value is not None:
+                    self.lbl_current_val.setText(f"{formatted} [from SCD]")
+                else:
+                    # Signal exists but value is None
+                    self.lbl_current_val.setText("-- [from SCD, no default value]")
+                try:
+                    self.lbl_current_val.setToolTip(repr(offline_stval.value) if offline_stval.value is not None else "No value in SCD")
+                except Exception:
+                    self.lbl_current_val.setToolTip(str(offline_stval.value) if offline_stval.value is not None else "No value")
+                self._set_label_status(self.lbl_current_val, "info")
+            else:
+                logger.info(f"Control Dialog: Offline fallback also failed")
+                self.lbl_current_val.setText("NULL (Not found in device or SCD)")
+                self.lbl_current_val.setToolTip("")
+                self._set_label_status(self.lbl_current_val, "error")
         except Exception as e:
+            logger.error(f"Control Dialog: Error in _load_current_value: {e}", exc_info=True)
             self.lbl_current_val.setText(str(e))
+    
+    def _read_offline_stval(self):
+        """Try to read stVal from device tree structure (offline fallback)."""
+        try:
+            device = self.device_manager.get_device(self.device_name)
+            if not device or not hasattr(device, 'root_node'):
+                logger.info(f"Offline stVal: No device or root_node for {self.device_name}")
+                return None
+            
+            # Try to find stVal signal in the tree
+            st_paths = [
+                f"{self.obj_ref}.stVal",
+                f"{self.obj_ref}$stVal"
+            ]
+            
+            logger.info(f"Offline stVal: Searching for paths: {st_paths}")
+            logger.info(f"Offline stVal: obj_ref={self.obj_ref}, signal.address={self.signal.address}")
+            
+            # Log available signals for debugging
+            all_addrs = self._collect_all_signal_addresses(device.root_node)
+            matching = [a for a in all_addrs if 'stval' in a.lower() and any(p.replace('.stVal', '').replace('$stVal', '') in a for p in st_paths)]
+            if matching:
+                logger.info(f"Offline stVal: Found {len(matching)} stVal signals near obj_ref: {matching[:5]}")
+            
+            for st_path in st_paths:
+                signal = self._find_signal_in_tree(device.root_node, st_path)
+                if signal:
+                    logger.info(f"Offline stVal: Found signal at {st_path}, value={signal.value}")
+                    return signal
+            
+            logger.info(f"Offline stVal: No stVal found")
+            return None
+        except Exception as e:
+            logger.error(f"Failed to read offline stVal: {e}", exc_info=True)
+            return None
 
     def _get_params(self):
         params = {}
@@ -541,7 +714,19 @@ class ControlDialog(QDialog):
             if ctx:
                 ctx.originator_cat = params['originator_category']
                 ctx.originator_id = params['originator_identity']
-                ctx.ctl_num = self.num_ctl_num.value()
+                ctx.originator_cat = params['originator_category']
+                ctx.originator_id = params['originator_identity']
+                
+                # Only update ctlNum from UI if it was manually changed or if context is 0
+                # If context has a valid non-zero ctlNum (captured from Select), preserve it!
+                if ctx.ctl_num == 0 or self.num_ctl_num.value() != 0:
+                     # This logic is tricky. If UI shows 0 and ctx has index 2, we should trust ctx?
+                     # Better: trust UI only if user specifically touched it?
+                     # Let's say: If UI is 0 AND ctx has value > 0, KEEP ctx value.
+                     if self.num_ctl_num.value() == 0 and ctx.ctl_num > 0:
+                         logger.debug(f"Preserving context ctlNum={ctx.ctl_num} despite UI=0")
+                     else:
+                         ctx.ctl_num = self.num_ctl_num.value()
 
             val = self._get_value()
             
@@ -572,6 +757,7 @@ class ControlDialog(QDialog):
                     self._set_label_status(self.lbl_status, "error")
             else:
                 # Direct operate or already selected SBO
+                logger.info(f"ControlDialog: Calling operate with val={val}, ctlNum={ctx.ctl_num if ctx else '?'}")
                 success = adapter.operate(self.signal, val, params=params)
                 
                 if success:
