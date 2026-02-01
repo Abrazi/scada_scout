@@ -17,7 +17,7 @@ Option 3: Add as an alternative control method
 from .control_client_fixed import IEC61850ControlClient
 
 # Add to __init__ method:
-def __init__(self, ...):
+def __init__(self, *args, **kwargs):
     # ... existing code ...
     self._fixed_control_client = None
 
