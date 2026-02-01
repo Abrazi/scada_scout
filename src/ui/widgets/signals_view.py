@@ -18,6 +18,7 @@ class SignalsViewWidget(QWidget):
         self.watch_list_manager = watch_list_manager
         self.current_device_name = None  # Track which device's signals we're showing
         self.current_node = None        # Track current node for manual refresh
+        self._open_control_dialogs = []
         # Queue for chunked background reads to keep UI responsive on large selections
         self._read_batch_queue = []  # list of (device_name, signal)
         self._read_batch_timer = None
@@ -692,10 +693,14 @@ class SignalsViewWidget(QWidget):
             dlg.exec()
             return
 
-        # Fallback to generic IEC control dialog
+        # Fallback to generic IEC control dialog (non-modal)
         from src.ui.dialogs.control_dialog import ControlDialog
         dialog = ControlDialog(device_name, signal, self.device_manager, self)
-        dialog.exec()
+        dialog.setWindowModality(Qt.NonModal)
+        dialog.setAttribute(Qt.WA_DeleteOnClose, True)
+        self._open_control_dialogs.append(dialog)
+        dialog.destroyed.connect(lambda: self._open_control_dialogs.remove(dialog) if dialog in self._open_control_dialogs else None)
+        dialog.show()
 
 
     def _setup_chart_tab(self):

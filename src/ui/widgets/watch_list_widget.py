@@ -22,6 +22,7 @@ class WatchListWidget(QWidget):
         super().__init__(parent)
         self.watch_manager = watch_list_manager
         self.device_manager = device_manager
+        self._open_control_dialogs = []
         
         self._setup_ui()
         self._connect_signals()
@@ -695,7 +696,11 @@ class WatchListWidget(QWidget):
             else:
                 from src.ui.dialogs.control_dialog import ControlDialog
                 dlg = ControlDialog(device_name, signal, self.device_manager, self)
-                dlg.exec()
+                dlg.setWindowModality(Qt.NonModal)
+                dlg.setAttribute(Qt.WA_DeleteOnClose, True)
+                self._open_control_dialogs.append(dlg)
+                dlg.destroyed.connect(lambda: self._open_control_dialogs.remove(dlg) if dlg in self._open_control_dialogs else None)
+                dlg.show()
         except Exception:
             logger.exception("Failed to open control dialog from watch list")
     

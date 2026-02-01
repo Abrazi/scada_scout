@@ -27,6 +27,7 @@ class DeviceTreeWidget(QWidget):
         super().__init__(parent)
         self.device_manager = device_manager
         self.watch_list_manager = watch_list_manager
+        self._open_control_dialogs = []
         # Suppress selection events triggered programmatically (e.g., refresh/filter)
         self._suppress_selection_changed = False
         # Batch loading mode for bulk device additions
@@ -1773,7 +1774,11 @@ class DeviceTreeWidget(QWidget):
             else:
                 from src.ui.dialogs.control_dialog import ControlDialog
                 dlg = ControlDialog(device_name, signal, self.device_manager, self)
-                dlg.exec()
+                dlg.setWindowModality(Qt.NonModal)
+                dlg.setAttribute(Qt.WA_DeleteOnClose, True)
+                self._open_control_dialogs.append(dlg)
+                dlg.destroyed.connect(lambda: self._open_control_dialogs.remove(dlg) if dlg in self._open_control_dialogs else None)
+                dlg.show()
         except Exception:
             logger.exception("Failed to open control dialog")
 

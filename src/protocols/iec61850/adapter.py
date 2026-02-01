@@ -1686,21 +1686,29 @@ class IEC61850Adapter(BaseProtocol):
                 if not orcat_written and self.event_logger:
                     self.event_logger.warning("IEC61850", f"Failed to write Oper.origin.orCat with any path variant")
                 
-                # Write orIdent
+                # Write orIdent (skip if IED rejects this attribute)
                 orident_written = False
-                for oper_orident_path in orident_paths:
-                    try:
-                        err = iec61850.IedConnection_writeVisibleStringValue(self.connection, oper_orident_path, iec61850.IEC61850_FC_CO, origin_id)
-                        if err == iec61850.IED_ERROR_OK:
-                            if self.event_logger: self.event_logger.debug("IEC61850", f"✓ Wrote {oper_orident_path}={origin_id}")
-                            orident_written = True
-                            break
-                        else:
-                            if self.event_logger: self.event_logger.debug("IEC61850", f"Write {oper_orident_path} failed with err={err}, trying next...")
-                    except Exception as e:
-                        if self.event_logger: self.event_logger.debug("IEC61850", f"Exception writing {oper_orident_path}: {e}")
+                if getattr(ctx, "_skip_orident_write", False):
+                    if self.event_logger:
+                        self.event_logger.debug("IEC61850", "Skipping Oper.origin.orIdent write (previously rejected by IED)")
+                else:
+                    for oper_orident_path in orident_paths:
+                        try:
+                            err = iec61850.IedConnection_writeVisibleStringValue(self.connection, oper_orident_path, iec61850.IEC61850_FC_CO, origin_id)
+                            if err == iec61850.IED_ERROR_OK:
+                                if self.event_logger: self.event_logger.debug("IEC61850", f"✓ Wrote {oper_orident_path}={origin_id}")
+                                orident_written = True
+                                break
+                            else:
+                                if self.event_logger: self.event_logger.debug("IEC61850", f"Write {oper_orident_path} failed with err={err}, trying next...")
+                                if err in (22, 25):
+                                    if self.event_logger: self.event_logger.info("IEC61850", "Oper.origin.orIdent not supported by IED; disabling future writes")
+                                    setattr(ctx, "_skip_orident_write", True)
+                                    break
+                        except Exception as e:
+                            if self.event_logger: self.event_logger.debug("IEC61850", f"Exception writing {oper_orident_path}: {e}")
                 
-                if not orident_written and self.event_logger:
+                if not orident_written and not getattr(ctx, "_skip_orident_write", False) and self.event_logger:
                     self.event_logger.warning("IEC61850", f"Failed to write Oper.origin.orIdent with any path variant")
 
             try:
@@ -1710,10 +1718,42 @@ class IEC61850Adapter(BaseProtocol):
             except Exception:
                 ctl_model = None
             
+            # CRITICAL: Configure ControlObjectClient with check settings from params
+            # These settings affect how the IED processes the control command
+            params = params or {}
+            try:
+                # Set interlock check (default: False - bypass interlock)
+                interlock = params.get('interlock_check', False)
+                iec61850.ControlObjectClient_setInterlockCheck(control_client, interlock)
+                if self.event_logger:
+                    self.event_logger.debug("IEC61850", f"Set interlockCheck={interlock}")
+            except Exception as e:
+                if self.event_logger:
+                    self.event_logger.debug("IEC61850", f"Failed to set interlockCheck: {e}")
+            
+            try:
+                # Set synchro check (default: False - bypass synchro check)
+                synchro = params.get('synchro_check', False)
+                iec61850.ControlObjectClient_setSynchroCheck(control_client, synchro)
+                if self.event_logger:
+                    self.event_logger.debug("IEC61850", f"Set synchroCheck={synchro}")
+            except Exception as e:
+                if self.event_logger:
+                    self.event_logger.debug("IEC61850", f"Failed to set synchroCheck: {e}")
+            
+            try:
+                # Set test mode (default: False - real operation)
+                test_mode = params.get('test', False)
+                iec61850.ControlObjectClient_setTestMode(control_client, test_mode)
+                if self.event_logger:
+                    self.event_logger.debug("IEC61850", f"Set testMode={test_mode}")
+            except Exception as e:
+                if self.event_logger:
+                    self.event_logger.debug("IEC61850", f"Failed to set testMode: {e}")
+            
             success = False
             if ctl_model == 4 and value is not None: # SBO_ENHANCED
                 # Use a consistent ctlNum for SELECT (default 0 unless overridden by params)
-                params = params or {}
                 select_ctl_num = params.get('select_ctl_num', 0)
                 if ctx:
                     ctx.ctl_num = int(select_ctl_num)
@@ -1725,63 +1765,32 @@ class IEC61850Adapter(BaseProtocol):
                 except Exception:
                     pass
                 
-                # Build a full Select structure with embedded origin
-                select_struct = None
-                if ctx:
+                # CRITICAL FIX: ControlObjectClient_selectWithValue expects just the ctlVal (boolean),
+                # NOT the entire SBOw structure. The library builds the structure internally using
+                # the settings we configured (originator, interlockCheck, synchroCheck, testMode, ctlNum).
+                # CSWI.Pos uses inverted logic: True=Open, False=Close (opposite of standard SPC)
+                actual_value = value
+                if "CSWI" in object_ref and "Pos" in object_ref:
+                    actual_value = not value  # Invert for CSWI.Pos
+                    if self.event_logger:
+                        self.event_logger.debug("IEC61850", f"CSWI.Pos: Inverted {value} → {actual_value}")
+                
+                mms_val = iec61850.MmsValue_newBoolean(bool(actual_value))
+                if mms_val:
                     try:
-                        select_struct = self._build_operate_struct(value, ctx, is_select=True)
-                    except Exception:
-                        select_struct = None
-
-                if select_struct:
-                    try:
-                        try:
-                            self._dump_mms_val(select_struct, 'select_with_value_struct')
-                        except Exception:
-                            pass
-                        # Validate select_struct is a proper MmsValue using same logic as _is_valid_mmsvalue
-                        # (int handles from C lib are valid, as are wrapper objects)
-                        valid = self._is_valid_mmsvalue(select_struct)
-                        if not valid:
-                            if self.event_logger: self.event_logger.debug("IEC61850", f"select_struct not a valid MmsValue (type={type(select_struct)}), aborting selectWithValue")
-                            # Don't pass invalid handles to C functions
-                            success = False
-                        else:
-                            # Valid MmsValue - use selectWithValue with the ctlNum already embedded in the structure
-                            if self.event_logger: 
-                                self.event_logger.info("IEC61850", f"→ Sending SELECT packet to IED (selectWithValue with struct)")
-                            success = iec61850.ControlObjectClient_selectWithValue(control_client, select_struct)
-                            if self.event_logger:
-                                self.event_logger.info("IEC61850", f"← SELECT response received: {success}")
+                        if self.event_logger: 
+                            self.event_logger.info("IEC61850", f"→ Sending SELECT to IED (ctlVal={bool(actual_value)})")
+                        success = iec61850.ControlObjectClient_selectWithValue(control_client, mms_val)
+                        if self.event_logger:
+                            self.event_logger.info("IEC61850", f"← SELECT response: {success}")
+                            if not success:
+                                err = iec61850.ControlObjectClient_getLastError(control_client)
+                                self.event_logger.debug("IEC61850", f"SELECT error code: {err}")
                     finally:
                         try:
-                            iec61850.MmsValue_delete(select_struct)
+                            iec61850.MmsValue_delete(mms_val)
                         except Exception:
                             pass
-                else:
-                    # Fallback to simple value select
-                    mms_val = self._create_mms_value(value, signal)
-                    if mms_val:
-                        try:
-                            try:
-                                self._dump_mms_val(mms_val, 'select_with_value')
-                            except Exception:
-                                pass
-                            # Ensure client ctlNum is consistent with select_ctl_num for simple selectWithValue
-                            try:
-                                iec61850.ControlObjectClient_setCtlNum(control_client, int(select_ctl_num))
-                            except Exception:
-                                pass
-                            if self.event_logger:
-                                self.event_logger.info("IEC61850", f"→ Sending SELECT packet to IED (selectWithValue with simple MMS value)")
-                            success = iec61850.ControlObjectClient_selectWithValue(control_client, mms_val)
-                            if self.event_logger:
-                                self.event_logger.info("IEC61850", f"← SELECT response received: {success}")
-                        finally:
-                            try:
-                                iec61850.MmsValue_delete(mms_val)
-                            except Exception:
-                                pass
             else:
                 if self.event_logger:
                     self.event_logger.info("IEC61850", f"→ Sending SELECT packet to IED (simple select)")
@@ -1810,7 +1819,10 @@ class IEC61850Adapter(BaseProtocol):
                         pass
 
                     # For SBO models, ensure Oper.origin matches SBOw.origin to prevent deselect
-                    if ctx.ctl_model.is_sbo:
+                    # FAST PATH: Skip origin sync if we know it's not supported (previously failed)
+                    skip_origin_sync = getattr(self, '_skip_origin_sync', False)
+                    
+                    if ctx.ctl_model.is_sbo and not skip_origin_sync:
                         # Read from SBOw.origin and write to Oper.origin
                         # First try copy entire SBOw.origin object to Oper.origin to preserve exact types
                         try:
@@ -1822,75 +1834,86 @@ class IEC61850Adapter(BaseProtocol):
                                     if err_write == iec61850.IED_ERROR_OK:
                                         if self.event_logger: self.event_logger.debug("IEC61850", f"Copied SBOw.origin -> Oper.origin (object)")
                                     else:
-                                        if self.event_logger: self.event_logger.warning("IEC61850", f"Failed to write Oper.origin object, err={err_write}")
+                                        if self.event_logger: self.event_logger.debug("IEC61850", f"Failed to write Oper.origin object, err={err_write}")
+                                        # Disable future attempts to save time
+                                        self._skip_origin_sync = True
                                 finally:
                                     try:
                                         iec61850.MmsValue_delete(sbo_origin_obj)
                                     except Exception:
                                         pass
                             else:
-                                if self.event_logger: self.event_logger.debug("IEC61850", "SBOw.origin object not present, falling back to field copy")
+                                if self.event_logger: self.event_logger.debug("IEC61850", "SBOw.origin object not present")
+                                self._skip_origin_sync = True
                         except Exception as e:
-                            if self.event_logger: self.event_logger.warning("IEC61850", f"Exception copying SBOw.origin object: {e} (falling back)")
+                            if self.event_logger: self.event_logger.debug("IEC61850", f"Exception copying SBOw.origin: {e}")
+                            self._skip_origin_sync = True
 
-                        # Fallback: copy individual fields (orIdent, orCat) with type handling
-                        try:
-                            sbo_orident_path = f"{object_ref}.SBOw.origin.orIdent"
-                            orident_val, err = iec61850.IedConnection_readVisibleStringValue(self.connection, sbo_orident_path, iec61850.IEC61850_FC_ST)
-                            if err == iec61850.IED_ERROR_OK and orident_val:
-                                oper_orident_path = f"{object_ref}.Oper.origin.orIdent"
-                                err_write = iec61850.IedConnection_writeVisibleStringValue(self.connection, oper_orident_path, iec61850.IEC61850_FC_CO, orident_val)
-                                if err_write == iec61850.IED_ERROR_OK:
-                                    if self.event_logger: self.event_logger.debug("IEC61850", f"Wrote Oper.origin.orIdent={orident_val} to match SBOw")
-                                else:
-                                    if self.event_logger: self.event_logger.warning("IEC61850", f"Failed to write Oper.origin.orIdent, err={err_write}")
-
-                                # ALSO write the SBOw identity into Oper.origin.orCat as a STRING (vendor peculiarity)
-                                try:
-                                    oper_orcat_path = f"{object_ref}.Oper.origin.orCat"
-                                    err_write2 = iec61850.IedConnection_writeVisibleStringValue(self.connection, oper_orcat_path, iec61850.IEC61850_FC_CO, orident_val)
-                                    if err_write2 == iec61850.IED_ERROR_OK:
-                                        if self.event_logger: self.event_logger.debug("IEC61850", f"Wrote Oper.origin.orCat (as string)={orident_val} to match SBOw.orIdent")
-                                    else:
-                                        if self.event_logger: self.event_logger.warning("IEC61850", f"Failed to write Oper.origin.orCat as string, err={err_write2}")
-                                except Exception as e2:
-                                    if self.event_logger: self.event_logger.warning("IEC61850", f"Exception writing Oper.origin.orCat as string: {e2}")
-                            else:
-                                if self.event_logger: self.event_logger.warning("IEC61850", f"Failed to read SBOw.origin.orIdent, err={err}")
-                        except Exception as e:
-                            if self.event_logger: self.event_logger.warning("IEC61850", f"Exception syncing orIdent: {e}")
-                        try:
-                            sbo_orcat_path = f"{object_ref}.SBOw.origin.orCat"
-                            # Try reading as int first
-                            orcat_val_int, err_int = iec61850.IedConnection_readInt32Value(self.connection, sbo_orcat_path, iec61850.IEC61850_FC_ST)
-                            if err_int == iec61850.IED_ERROR_OK:
-                                oper_orcat_path = f"{object_ref}.Oper.origin.orCat"
-                                err_write = iec61850.IedConnection_writeInt32Value(self.connection, oper_orcat_path, iec61850.IEC61850_FC_CO, orcat_val_int)
-                                if err_write == iec61850.IED_ERROR_OK:
-                                    if self.event_logger: self.event_logger.debug("IEC61850", f"Wrote Oper.origin.orCat={orcat_val_int} (int) to match SBOw")
-                                else:
-                                    if self.event_logger: self.event_logger.warning("IEC61850", f"Failed to write Oper.origin.orCat (int), err={err_write}")
-                            else:
-                                # Fallback: try reading as VisibleString (some IEDs store category as string)
-                                orcat_val_str, err_str = iec61850.IedConnection_readVisibleStringValue(self.connection, sbo_orcat_path, iec61850.IEC61850_FC_ST)
-                                if err_str == iec61850.IED_ERROR_OK and orcat_val_str:
-                                    oper_orcat_path = f"{object_ref}.Oper.origin.orCat"
-                                    err_write = iec61850.IedConnection_writeVisibleStringValue(self.connection, oper_orcat_path, iec61850.IEC61850_FC_CO, orcat_val_str)
+                        # Skip individual field fallback if origin sync disabled
+                        if not self._skip_origin_sync:
+                            # Fallback: copy individual fields (orIdent, orCat) with type handling
+                            try:
+                                sbo_orident_path = f"{object_ref}.SBOw.origin.orIdent"
+                                orident_val, err = iec61850.IedConnection_readStringValue(self.connection, sbo_orident_path, iec61850.IEC61850_FC_ST)
+                                if err == iec61850.IED_ERROR_OK and orident_val:
+                                    oper_orident_path = f"{object_ref}.Oper.origin.orIdent"
+                                    err_write = iec61850.IedConnection_writeVisibleStringValue(self.connection, oper_orident_path, iec61850.IEC61850_FC_CO, orident_val)
                                     if err_write == iec61850.IED_ERROR_OK:
-                                        if self.event_logger: self.event_logger.debug("IEC61850", f"Wrote Oper.origin.orCat={orcat_val_str} (string) to match SBOw")
+                                        if self.event_logger: self.event_logger.debug("IEC61850", f"Wrote Oper.origin.orIdent={orident_val} to match SBOw")
                                     else:
-                                        if self.event_logger: self.event_logger.warning("IEC61850", f"Failed to write Oper.origin.orCat (string), err={err_write}")
+                                        if self.event_logger: self.event_logger.warning("IEC61850", f"Failed to write Oper.origin.orIdent, err={err_write}")
+
+                                    # ALSO write the SBOw identity into Oper.origin.orCat as a STRING (vendor peculiarity)
+                                    try:
+                                        oper_orcat_path = f"{object_ref}.Oper.origin.orCat"
+                                        err_write2 = iec61850.IedConnection_writeVisibleStringValue(self.connection, oper_orcat_path, iec61850.IEC61850_FC_CO, orident_val)
+                                        if err_write2 == iec61850.IED_ERROR_OK:
+                                            if self.event_logger: self.event_logger.debug("IEC61850", f"Wrote Oper.origin.orCat (as string)={orident_val} to match SBOw.orIdent")
+                                        else:
+                                            if self.event_logger: self.event_logger.warning("IEC61850", f"Failed to write Oper.origin.orCat as string, err={err_write2}")
+                                    except Exception as e2:
+                                        if self.event_logger: self.event_logger.warning("IEC61850", f"Exception writing Oper.origin.orCat as string: {e2}")
                                 else:
-                                    if self.event_logger: self.event_logger.warning("IEC61850", f"Failed to read SBOw.origin.orCat as int or string (int_err={err_int}, str_err={err_str})")
-                        except Exception as e:
-                            if self.event_logger: self.event_logger.warning("IEC61850", f"Exception syncing orCat: {e}")
+                                    if self.event_logger: self.event_logger.warning("IEC61850", f"Failed to read SBOw.origin.orIdent, err={err}")
+                            except Exception as e:
+                                if self.event_logger: self.event_logger.warning("IEC61850", f"Exception syncing orIdent: {e}")
+                            try:
+                                sbo_orcat_path = f"{object_ref}.SBOw.origin.orCat"
+                                # Try reading as int first
+                                orcat_val_int, err_int = iec61850.IedConnection_readInt32Value(self.connection, sbo_orcat_path, iec61850.IEC61850_FC_ST)
+                                if err_int == iec61850.IED_ERROR_OK:
+                                    oper_orcat_path = f"{object_ref}.Oper.origin.orCat"
+                                    err_write = iec61850.IedConnection_writeInt32Value(self.connection, oper_orcat_path, iec61850.IEC61850_FC_CO, orcat_val_int)
+                                    if err_write == iec61850.IED_ERROR_OK:
+                                        if self.event_logger: self.event_logger.debug("IEC61850", f"Wrote Oper.origin.orCat={orcat_val_int} (int) to match SBOw")
+                                    else:
+                                        if self.event_logger: self.event_logger.warning("IEC61850", f"Failed to write Oper.origin.orCat (int), err={err_write}")
+                                else:
+                                    # Fallback: try reading as VisibleString (some IEDs store category as string)
+                                    orcat_val_str, err_str = iec61850.IedConnection_readStringValue(self.connection, sbo_orcat_path, iec61850.IEC61850_FC_ST)
+                                    if err_str == iec61850.IED_ERROR_OK and orcat_val_str:
+                                        oper_orcat_path = f"{object_ref}.Oper.origin.orCat"
+                                        err_write = iec61850.IedConnection_writeVisibleStringValue(self.connection, oper_orcat_path, iec61850.IEC61850_FC_CO, orcat_val_str)
+                                        if err_write == iec61850.IED_ERROR_OK:
+                                            if self.event_logger: self.event_logger.debug("IEC61850", f"Wrote Oper.origin.orCat={orcat_val_str} (string) to match SBOw")
+                                        else:
+                                            if self.event_logger: self.event_logger.warning("IEC61850", f"Failed to write Oper.origin.orCat (string), err={err_write}")
+                                    else:
+                                        if self.event_logger: self.event_logger.warning("IEC61850", f"Failed to read SBOw.origin.orCat as int or string (int_err={err_int}, str_err={err_str})")
+                            except Exception as e:
+                                if self.event_logger: self.event_logger.warning("IEC61850", f"Exception syncing orCat: {e}")
 
                     # For SBO models, ensure Oper.ctlVal matches the selected value to prevent deselect
+                    if ctx.ctl_model.is_sbo and not skip_origin_sync:
                         try:
                             oper_ctlval_path = f"{object_ref}.Oper.ctlVal"
-                            err = iec61850.IedConnection_writeBooleanValue(self.connection, oper_ctlval_path, iec61850.IEC61850_FC_CO, bool(value))
+                            # CSWI.Pos uses inverted logic
+                            write_val = value
+                            if "CSWI" in object_ref and "Pos" in object_ref:
+                                write_val = not value
+                            err = iec61850.IedConnection_writeBooleanValue(self.connection, oper_ctlval_path, iec61850.IEC61850_FC_CO, bool(write_val))
                             if err == iec61850.IED_ERROR_OK:
-                                if self.event_logger: self.event_logger.debug("IEC61850", f"Wrote Oper.ctlVal={bool(value)} to prevent deselect")
+                                if self.event_logger: self.event_logger.debug("IEC61850", f"Wrote Oper.ctlVal={bool(write_val)} to prevent deselect")
                             else:
                                 if self.event_logger: self.event_logger.warning("IEC61850", f"Failed to write Oper.ctlVal, err={err}")
                         except Exception as e:
@@ -1937,34 +1960,63 @@ class IEC61850Adapter(BaseProtocol):
                             if self.event_logger: self.event_logger.warning("IEC61850", f"Exception writing SBOw.origin.orCat: {e}")
 
                     # Try to capture the updated ctlNum assigned by IED during selection
-                    import time
-                    time.sleep(0.05) # Give IED 50ms to update SBOw
-                    try:
-                         # Some IEDs expose the assigned ctlNum in the DO. Use FC=ST.
-                         # Try standard DO.ctlNum and SBOw.ctlNum (some IEDs put assignment there)
-                         ctl_num_paths = [
-                             f"{object_ref}.ctlNum", 
-                             f"{object_ref}$ctlNum",
-                             f"{object_ref}.SBOw.ctlNum",
-                             f"{object_ref}$SBOw$ctlNum",
-                             f"{object_ref}.Oper.ctlNum",  # Try Oper.ctlNum for consistency with operate
-                             f"{object_ref}$Oper$ctlNum"
-                         ]
-                         for p in ctl_num_paths: 
-                             if self.event_logger: self.event_logger.info("IEC61850", f"Trying to read assigned ctlNum from: {p}")
-                             val, err = iec61850.IedConnection_readInt32Value(self.connection, p, iec61850.IEC61850_FC_ST)
-                             if err == iec61850.IED_ERROR_OK:
-                                 ctx.ctl_num = val
-                                 if self.event_logger: self.event_logger.info("IEC61850", f"Captured ied-assigned ctlNum: {val} from {p}")
-                                 break
-                             else:
-                                 if self.event_logger: self.event_logger.info("IEC61850", f"Failed to read {p}: err={err}")
-                    except Exception as e:
-                        if self.event_logger: self.event_logger.error("IEC61850", f"Exception during ctlNum capture: {e}")
+                    # FAST PATH: If we know ctlNum reading is not supported, skip directly to assumption
+                    skip_ctlnum_read = getattr(self, '_skip_ctlnum_read', False)
+                    
+                    if not skip_ctlnum_read:
+                        import time
+                        time.sleep(0.05) # Give IED 50ms to update SBOw
+                        try:
+                             # Some IEDs expose the assigned ctlNum in the DO. Use FC=ST.
+                             # CRITICAL: Try SBOw.ctlNum FIRST - this is where IED stores the assigned ctlNum after SELECT
+                             # The generic .ctlNum often returns 0 (default) instead of the actual assigned value
+                             ctl_num_paths = [
+                                 f"{object_ref}.SBOw.ctlNum",      # IED assigns ctlNum here after SELECT
+                                 f"{object_ref}$SBOw$ctlNum",
+                                 f"{object_ref}.Oper.ctlNum",      # Some IEDs use Oper.ctlNum
+                                 f"{object_ref}$Oper$ctlNum",
+                                 f"{object_ref}.ctlNum",           # Fallback to generic ctlNum
+                                 f"{object_ref}$ctlNum"
+                             ]
+                             found_ctlnum = False
+                             for p in ctl_num_paths: 
+                                 if self.event_logger: self.event_logger.debug("IEC61850", f"Trying to read assigned ctlNum from: {p}")
+                                 # Try FC_ST first
+                                 val, err = iec61850.IedConnection_readInt32Value(self.connection, p, iec61850.IEC61850_FC_ST)
+                                 if err == iec61850.IED_ERROR_OK:
+                                     ctx.ctl_num = val
+                                     if self.event_logger: self.event_logger.info("IEC61850", f"✓ Captured IED-assigned ctlNum={val} from {p}")
+                                     found_ctlnum = True
+                                     break
+                                 # Try FC_CO if ST fails (some IEDs store control state in CO)
+                                 val, err = iec61850.IedConnection_readInt32Value(self.connection, p, iec61850.IEC61850_FC_CO)
+                                 if err == iec61850.IED_ERROR_OK:
+                                     ctx.ctl_num = val
+                                     if self.event_logger: self.event_logger.info("IEC61850", f"✓ Captured IED-assigned ctlNum={val} from {p} (FC=CO)")
+                                     found_ctlnum = True
+                                     break
+                                 else:
+                                     if self.event_logger: self.event_logger.debug("IEC61850", f"Failed to read {p}: err={err}")
+                             
+                             # If all reads failed, disable future attempts and fall through to assumption
+                             if not found_ctlnum:
+                                 self._skip_ctlnum_read = True
+                                 if self.event_logger: self.event_logger.debug("IEC61850", "ctlNum read not supported, will assume values in future")
+                        except Exception as e:
+                            if self.event_logger: self.event_logger.error("IEC61850", f"Exception during ctlNum capture: {e}")
+                            self._skip_ctlnum_read = True
+                    
+                    # If ctlNum reading is disabled or failed, assume standard behavior
+                    if not hasattr(ctx, 'ctl_num') or ctx.ctl_num is None or ctx.ctl_num == 0:
+                        ctx.ctl_num = 1  # Most IEDs start at 1 after first SELECT
+                        if self.event_logger:
+                            self.event_logger.info("IEC61850", f"Assuming IED-assigned ctlNum=1 (default after SELECT)")
 
-                    # If we still don't have ctlNum, try async fallback to capture it via selectAsync callbacks
+                    # If we still don't have a valid ctlNum (couldn't read from any path), 
+                    # try async fallback to capture it via selectAsync callbacks
                     try:
-                        if getattr(ctx, 'ctl_num', None) in (None, 0, 1728):
+                        # Only use fallback if we have no ctlNum or got the magic value 1728
+                        if getattr(ctx, 'ctl_num', None) in (None, 1728):
                             if self._wait_for_ctlnum(ctx, object_ref, timeout_ms=250):
                                 if self.event_logger: self.event_logger.info("IEC61850", f"Captured ctlNum via async callback: {ctx.ctl_num}")
                     except Exception:
@@ -1986,16 +2038,24 @@ class IEC61850Adapter(BaseProtocol):
                     10: "TYPE_CONFLICT",
                     11: "FAILED_DUE_TO_COMMUNICATIONS_CONSTRAINT",
                     12: "FAILED_DUE_TO_SERVER_CONSTRAINT",
+                    13: "OBJECT_ACCESS_DENIED",
+                    14: "OBJECT_UNDEFINED",
+                    17: "TYPE_INCONSISTENT",
+                    19: "OBJECT_VALUE_INVALID",
+                    20: "OPTION_NOT_SUPPORTED",
+                    21: "OBJECT_ACCESS_UNSUPPORTED",
+                    22: "TYPE_INCONSISTENT",
+                    23: "TEMPORARILY_UNAVAILABLE", 
+                    24: "OBJECT_ACCESS_DENIED",
+                    25: "OBJECT_NONE_EXISTENT",
+                    32: "CONTROL_SYNTAX_ERROR",
                 }
                 err_name = error_names.get(err, f"UNKNOWN_{err}")
-                if self.event_logger: 
+                if self.event_logger:
                     self.event_logger.error("IEC61850", f"SELECT FAILED: IED Error {err} ({err_name})")
-                    self.event_logger.warning("IEC61850", f"Trying IEDScout-style direct write fallback for {object_ref}")
                 
-                # Try IEDScout approach: direct WRITE to Oper object instead of using control services
-                self._last_control_error = f"IED rejected SELECT: Error {err} ({err_name}), trying direct write"
-                return self._direct_write_control(signal, value, object_ref, params)
-                # return self._fallback_select(signal, value, object_ref)
+                self._last_control_error = f"IED rejected SELECT: Error {err} ({err_name})"
+                return False
 
         finally:
             if own_client and control_client:
@@ -2011,14 +2071,12 @@ class IEC61850Adapter(BaseProtocol):
             if self.event_logger:
                 self.event_logger.debug("IEC61850", f"OPERATE: signal.address={signal.address}")
                 self.event_logger.debug("IEC61850", f"OPERATE: object_ref={object_ref}")
-                self.event_logger.debug("IEC61850", f"OPERATE: signal.address={signal.address}")
-                self.event_logger.debug("IEC61850", f"OPERATE: object_ref={object_ref}")
                 self.event_logger.debug("IEC61850", f"OPERATE: value={value}")
                 
             # Log params ctlNum vs context ctlNum
-            ctx_debug = self.controls.get(object_ref)
-            if ctx_debug:
-                 logger.info(f"Adapter Operate: Context ctlNum={ctx_debug.ctl_num}")
+            ctx = self.controls.get(object_ref)
+            if ctx:
+                 logger.info(f"Adapter Operate: Context ctlNum={ctx.ctl_num}")
             else:
                  logger.info("Adapter Operate: No Context found")
 
@@ -2067,6 +2125,24 @@ class IEC61850Adapter(BaseProtocol):
             origin_id, origin_cat = self._compute_originator_info(ctx, params)
             iec61850.ControlObjectClient_setOriginator(control_client, origin_id, origin_cat)
 
+            # CRITICAL: Configure ControlObjectClient with check settings from params
+            params = params or {}
+            try:
+                interlock = params.get('interlock_check', False)
+                iec61850.ControlObjectClient_setInterlockCheck(control_client, interlock)
+            except Exception:
+                pass
+            try:
+                synchro = params.get('synchro_check', False)
+                iec61850.ControlObjectClient_setSynchroCheck(control_client, synchro)
+            except Exception:
+                pass
+            try:
+                test_mode = params.get('test', False)
+                iec61850.ControlObjectClient_setTestMode(control_client, test_mode)
+            except Exception:
+                pass
+
             # Sync ctlNum only if we are using a fresh client for this phase
             if own_client and ctx and ctx.ctl_num is not None:
                 try:
@@ -2076,30 +2152,47 @@ class IEC61850Adapter(BaseProtocol):
                 except Exception:
                     pass
 
-            mms_val = self._build_operate_struct(value, ctx, is_select=False)
+            # CRITICAL FIX: ControlObjectClient_operate expects just the ctlVal (boolean),
+            # NOT a complex structure. The library builds the structure internally using
+            # the settings we configured (originator, interlockCheck, synchroCheck, testMode, ctlNum).
+            # CSWI.Pos uses inverted logic: True=Open, False=Close (opposite of standard SPC)
+            actual_value = value
+            if "CSWI" in object_ref and "Pos" in object_ref:
+                actual_value = not value  # Invert for CSWI.Pos
+                if self.event_logger:
+                    self.event_logger.debug("IEC61850", f"CSWI.Pos: Inverted {value} → {actual_value}")
+            
+            mms_val = iec61850.MmsValue_newBoolean(bool(actual_value))
             if not mms_val: 
                 if self.event_logger:
-                    self.event_logger.error("IEC61850", "Failed to build operate structure")
+                    self.event_logger.error("IEC61850", "Failed to create boolean MmsValue for OPERATE")
                 return False
 
+            # Add small delay after SELECT to ensure IED is ready for OPERATE
+            # Some IEDs require time between SELECT and OPERATE phases
+            import time
+            time.sleep(0.1)  # 100ms delay
+
             try:
-                try:
-                    self._dump_mms_val(mms_val, 'operate_value')
-                except Exception:
-                    pass
-                # Safety: avoid calling into C-level operate if the mms_val handle doesn't look valid
-                if not self._is_valid_mmsvalue(mms_val):
-                    if self.event_logger: self.event_logger.error("IEC61850", "Invalid MmsValue for OPERATE; falling back to manual write to Oper.ctlVal and Oper.origin")
-                    return self._fallback_operate(signal, value, object_ref)
-                success = iec61850.ControlObjectClient_operate(control_client, mms_val, 1728)
+                if self.event_logger:
+                    self.event_logger.info("IEC61850", f"→ Sending OPERATE to IED (ctlVal={bool(actual_value)})")
+                
+                # Some IEDs require timestamp for OPERATE - use current time in milliseconds
+                import time
+                timestamp = int(time.time() * 1000)  # Current time in ms since epoch
+                success = iec61850.ControlObjectClient_operate(control_client, mms_val, timestamp)
                 if success:
-                    if self.event_logger: self.event_logger.transaction("IEC61850", "← OPERATE SUCCESS")
+                    if self.event_logger: 
+                        self.event_logger.transaction("IEC61850", "← OPERATE SUCCESS")
+                        self.event_logger.info("IEC61850", f"Control operation completed successfully")
                     if ctx:
                         ctx.state = ControlState.OPERATED
                         ctx.ctl_num = (ctx.ctl_num + 1) % 256
                     return True
                 else:
                     err = iec61850.ControlObjectClient_getLastError(control_client)
+                    if self.event_logger:
+                        self.event_logger.debug("IEC61850", f"OPERATE error code: {err}")
                     error_names = {
                         0: "OK",
                         1: "INSTANCE_NOT_AVAILABLE",
@@ -2114,10 +2207,24 @@ class IEC61850Adapter(BaseProtocol):
                         10: "TYPE_CONFLICT",
                         11: "FAILED_DUE_TO_COMMUNICATIONS_CONSTRAINT",
                         12: "FAILED_DUE_TO_SERVER_CONSTRAINT",
+                        13: "OBJECT_ACCESS_DENIED",
+                        17: "TYPE_INCONSISTENT", 
+                        19: "OBJECT_VALUE_INVALID",
+                        20: "OPTION_NOT_SUPPORTED",
+                        21: "OBJECT_ACCESS_UNSUPPORTED",
+                        22: "TYPE_INCONSISTENT",
+                        23: "TEMPORARILY_UNAVAILABLE",
+                        24: "OBJECT_ACCESS_DENIED",
+                        25: "OBJECT_NONE_EXISTENT",
+                        32: "CONTROL_SYNTAX_ERROR",
                     }
                     err_name = error_names.get(err, f"UNKNOWN_{err}")
                     if self.event_logger: 
-                        self.event_logger.error("IEC61850", f"OPERATE FAILED: IED Error {err} ({err_name})")
+                        # Error 20 is vendor-specific - fallback usually works
+                        if err == 20:
+                            self.event_logger.info("IEC61850", f"Standard control service not supported (Error {err}), using direct write fallback...")
+                        else:
+                            self.event_logger.error("IEC61850", f"OPERATE FAILED: IED Error {err} ({err_name})")
                     
                     # If ctlNum mismatch, try reading Oper.ctlNum and retry
                     if "ctlNum" in str(err).lower() or err in [10, 11]:  # Common ctlNum mismatch errors
@@ -2137,8 +2244,8 @@ class IEC61850Adapter(BaseProtocol):
                         except Exception as retry_e:
                             if self.event_logger: self.event_logger.error("IEC61850", f"ctlNum retry failed: {retry_e}")
                     
-                    if self.event_logger: self.event_logger.warning("IEC61850", f"Trying fallback OPERATE for {object_ref}")
-                    return self._fallback_operate(signal, value, object_ref)
+                    self._last_control_error = f"OPERATE failed: Error {err} ({err_name})"
+                    return False
             finally:
                 iec61850.MmsValue_delete(mms_val)
 
@@ -2151,12 +2258,7 @@ class IEC61850Adapter(BaseProtocol):
                 self._last_control_error = "OPERATE failed"
             if self.event_logger:
                 self.event_logger.error("IEC61850", f"OPERATE EXCEPTION: {e}")
-                self.event_logger.warning("IEC61850", f"Trying fallback method...")
             
-            # FALLBACK: Try manual Oper write on exception
-            object_ref = self._get_control_object_reference(signal.address)
-            if object_ref:
-                return self._fallback_operate(signal, value, object_ref)
             return False
         finally:
             if own_client and control_client:
@@ -2283,22 +2385,21 @@ class IEC61850Adapter(BaseProtocol):
             address = address.split("::", 1)[1]
         
         # Order matters: try longer suffixes first to avoid partial matches
-        suffixes = [".Oper.ctlVal", ".SBO.ctlVal", ".SBOw.ctlVal", ".Cancel.ctlVal",
-                    ".Oper", ".SBO", ".SBOw", ".Cancel", 
-                    ".ctlVal", ".stVal", ".q", ".t"]
+        # Support both '.' and '$' separators used by IEC 61850 references
+        suffixes = [
+            ".Oper.ctlVal", ".SBO.ctlVal", ".SBOw.ctlVal", ".Cancel.ctlVal",
+            "$Oper$ctlVal", "$SBO$ctlVal", "$SBOw$ctlVal", "$Cancel$ctlVal",
+            ".Oper", ".SBO", ".SBOw", ".Cancel",
+            "$Oper", "$SBO", "$SBOw", "$Cancel",
+            ".ctlVal", "$ctlVal",
+            ".stVal", "$stVal",
+            ".q", "$q",
+            ".t", "$t",
+        ]
         for suffix in suffixes:
             if address.endswith(suffix):
                 return address[:-len(suffix)]
         return address
-
-    def _create_mms_value(self, value, signal):
-        """Create MmsValue with ctlVal for this IED."""
-        if isinstance(value, bool):
-            return iec61850.MmsValue_newBoolean(value)
-        elif isinstance(value, int):
-            return iec61850.MmsValue_newInt32(0 if value else 1)
-        else:
-            return None
 
     def _build_operate_struct(self, value, ctx: ControlObjectRuntime, is_select: bool = False):
         """Builds the complex Operate structure by modifying an existing template from the IED."""
@@ -2469,15 +2570,38 @@ class IEC61850Adapter(BaseProtocol):
         # Accept generic objects (for test mocks that use object())
         return True
 
-    def _direct_write_control(self, signal: Signal, value: Any, object_ref: str, params: dict = None) -> bool:
+    def _direct_write_control(self, signal: Signal, value: Any, object_ref: str, params: dict = None, is_select_phase: bool = False) -> bool:
         """Direct write to control object - mimics IEDScout's approach.
         
         Uses the fallback_operate method which writes individual attributes
         to the Oper object, exactly like IEDScout does.
+        
+        CRITICAL FIX: When called during SELECT phase (is_select_phase=True),
+        we DON'T perform the actual control - we just mark the context as
+        "direct control mode" and return True. The actual operation happens
+        when operate() is called.
         """
         try:
+            ctx = self.controls.get(object_ref)
+            
+            # CRITICAL FIX: During SELECT phase, don't actually operate!
+            # Just mark that this IED uses direct control (no SBO support)
+            if is_select_phase:
+                if self.event_logger:
+                    self.event_logger.info("IEC61850", f"IED uses direct control mode (no SBO). SELECT phase is a no-op.")
+                    self.event_logger.info("IEC61850", f"Value will be written when OPERATE is clicked.")
+                
+                # Mark context for direct control mode
+                if ctx:
+                    ctx.state = ControlState.SELECTED
+                    ctx._direct_control_mode = True  # Flag for operate() to know SBO was skipped
+                    ctx._pending_value = value  # Store value for operate phase
+                
+                return True  # Indicate "selection successful" (direct control doesn't need selection)
+            
+            # Normal case: actually perform the direct write
             if self.event_logger:
-                self.event_logger.info("IEC61850", f"Attempting IEDScout-style direct write for {object_ref}")
+                self.event_logger.info("IEC61850", f"Performing direct write control for {object_ref}")
             
             # Use the existing fallback_operate method which writes individual attributes
             return self._fallback_operate(signal, value, object_ref)
@@ -2487,16 +2611,6 @@ class IEC61850Adapter(BaseProtocol):
                 self.event_logger.error("IEC61850", f"Exception in direct write: {e}")
             self._last_control_error = f"Direct write exception: {e}"
             return False
-            
-            # Get context for origin info
-            ctx = self.controls.get(object_ref)
-            if not ctx:
-                if self.event_logger:
-                    self.event_logger.warning("IEC61850", "No control context, creating minimal origin info")
-                origin_id = "SCADAScout"
-                origin_cat = 3  # Remote
-            else:
-                origin_id, origin_cat = self._compute_originator_info(ctx, params)
     def _compute_originator_info(self, ctx, params: dict = None):
         """Return a tuple (origin_id, origin_cat) normalized for ControlAction calls.
 
@@ -2910,8 +3024,8 @@ class IEC61850Adapter(BaseProtocol):
                     
                     if err == iec61850.IED_ERROR_OK:
                         if self.event_logger:
-                            self.event_logger.transaction("IEC61850", "← FALLBACK OPERATE SUCCESS")
-                            self.event_logger.info("IEC61850", f"Fallback OPERATE succeeded with {oper_attr}")
+                            self.event_logger.transaction("IEC61850", "← CONTROL OPERATION SUCCESSFUL")
+                            self.event_logger.info("IEC61850", f"Control succeeded using direct write to {oper_attr}")
                         
                         # Update context if it exists
                         if ctx:

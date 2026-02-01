@@ -4,13 +4,67 @@ from PySide6.QtWidgets import (
     QMessageBox, QWidget, QGroupBox, QFormLayout, QCheckBox,
     QLineEdit, QDateTimeEdit, QApplication
 )
-from PySide6.QtCore import Qt, QDateTime
+from PySide6.QtCore import Qt, QDateTime, QThread, Signal as QtSignal, QObject
 import logging
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Any
 import re
 
 logger = logging.getLogger(__name__)
+
+
+class ControlWorker(QObject):
+    """
+    Worker to run control operations in background thread.
+    **CRITICAL FIX**: Prevents UI freezing during select/operate.
+    """
+    progress = QtSignal(str)
+    success = QtSignal(bool, str)
+    finished = QtSignal()
+    
+    def __init__(self, adapter, signal, operation, value=None, params=None):
+        super().__init__()
+        self.adapter = adapter
+        self.signal = signal
+        self.operation = operation
+        self.value = value
+        self.params = params or {}
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
+    
+    def run(self):
+        try:
+            if self._cancelled:
+                return
+            if self.operation == 'select':
+                self.progress.emit("Sending SELECT to IED...")
+                result = self.adapter.select(self.signal, self.value, self.params)
+                
+                if result:
+                    self.success.emit(True, "SELECT successful - Ready to operate")
+                else:
+                    error_msg = getattr(self.adapter, '_last_control_error', 'SELECT failed')
+                    self.success.emit(False, f"SELECT failed: {error_msg}")
+            
+            elif self.operation == 'operate':
+                self.progress.emit("Sending OPERATE to IED...")
+                result = self.adapter.operate(self.signal, self.value, self.params)
+                
+                if result:
+                    self.success.emit(True, f"OPERATE successful - Control value: {self.value}")
+                else:
+                    error_msg = getattr(self.adapter, '_last_control_error', 'OPERATE failed')
+                    self.success.emit(False, f"OPERATE failed: {error_msg}")
+            else:
+                self.success.emit(False, f"Unknown operation: {self.operation}")
+        
+        except Exception as e:
+            self.success.emit(False, f"Exception: {str(e)}")
+            logger.error(f"Control worker error: {e}", exc_info=True)
+        finally:
+            self.finished.emit()
 
 class ControlDialog(QDialog):
     """
@@ -20,6 +74,16 @@ class ControlDialog(QDialog):
     def __init__(self, device_name, signal, device_manager, parent=None):
         super().__init__(parent)
         self.device_name = device_name
+        if not self.device_name:
+            # Fallback: derive device name from signal.unique_address or signal.address
+            try:
+                unique = getattr(signal, "unique_address", "") or ""
+                addr = getattr(signal, "address", "") or ""
+                source = unique if "::" in unique else addr
+                if "::" in source:
+                    self.device_name = source.split("::", 1)[0]
+            except Exception:
+                pass
         self.signal = signal
         self.device_manager = device_manager
         
@@ -29,6 +93,10 @@ class ControlDialog(QDialog):
         self.is_sbo = False
         self.selected = False
         self.detected_control_model = -1
+        
+        # Worker thread for async operations (FIX FOR UI FREEZE)
+        self._worker = None
+        self._thread = None
         
         self._setup_ui()
         
@@ -45,6 +113,16 @@ class ControlDialog(QDialog):
         
         # Extract Object Reference (DO)
         self.obj_ref = self.signal.address
+        # Prefer adapter logic to normalize/strip suffixes and device prefixes
+        try:
+            adapter = self._get_adapter()
+            if adapter and hasattr(adapter, "_get_control_object_reference"):
+                normalized = adapter._get_control_object_reference(self.signal.address)
+                if normalized:
+                    self.obj_ref = normalized
+        except Exception:
+            pass
+
         if "." in self.obj_ref or "$" in self.obj_ref:
             # Handle both . and $ as separators
             parts = re.split(r'[\.\$]', self.obj_ref)
@@ -137,10 +215,11 @@ class ControlDialog(QDialog):
         # Determine Input Widget
         if "BOOL" in sig_type or "SPC" in self.signal.address or "ctlVal" in self.signal.name: 
             self.input_widget = QComboBox()
-            # User reports False(0) Closes the breaker. 
-            # Standard logic: False=0, True=1.
-            # So "Close" -> 0, "Open" -> 1.
-            self.input_widget.addItems(["Close / On (False / 0)", "Open / Off (True / 1)"])
+            # IEC 61850 SPC (Single Point Control) standard:
+            # ctlVal = False (0) → Open/Off command
+            # ctlVal = True (1) → Close/On command
+            # Index 0 → False, Index 1 → True
+            self.input_widget.addItems(["Open / Off (False / 0)", "Close / On (True / 1)"])
         elif "FLOAT" in sig_type:
             self.input_widget = QDoubleSpinBox()
             self.input_widget.setRange(-1e9, 1e9)
@@ -501,11 +580,33 @@ class ControlDialog(QDialog):
         
         return addresses
     
+    def _normalize_address_for_compare(self, address: str) -> str:
+        """Normalize address for loose matching (handles $ vs . and device prefixes)."""
+        if not address:
+            return ""
+        addr = address.strip()
+        # Strip device name prefix if present (format: "DeviceName::LD/LN.DO")
+        if "::" in addr:
+            addr = addr.split("::", 1)[1]
+        # Normalize separators
+        addr = addr.replace("$", ".")
+        return addr.lower()
+
+    def _addresses_match(self, signal_addr: str, target_addr: str) -> bool:
+        sig_norm = self._normalize_address_for_compare(signal_addr)
+        target_norm = self._normalize_address_for_compare(target_addr)
+        if not sig_norm or not target_norm:
+            return False
+        if sig_norm == target_norm:
+            return True
+        # Allow suffix match to handle missing/extra LD prefixes
+        return sig_norm.endswith(target_norm) or target_norm.endswith(sig_norm)
+
     def _find_signal_in_tree(self, node, address: str):
         """Recursively search for a signal by address in the device tree."""
         if hasattr(node, 'signals'):
             for sig in node.signals:
-                if sig.address == address:
+                if self._addresses_match(sig.address, address):
                     return sig
         
         if hasattr(node, 'children'):
@@ -559,6 +660,10 @@ class ControlDialog(QDialog):
                 # Determine stVal path
                 # Try both . and $ separators
                 st_paths = [f"{self.obj_ref}.stVal", f"{self.obj_ref}$stVal"]
+                # If control object is CSWI, status may live on XCBR.Pos.stVal
+                if "CSWI" in self.obj_ref and "XCBR" not in self.obj_ref:
+                    xcb_ref = self.obj_ref.replace("CSWI", "XCBR")
+                    st_paths.extend([f"{xcb_ref}.stVal", f"{xcb_ref}$stVal"])
                 
                 from src.models.device_models import Signal
                 for st_path in st_paths:
@@ -567,6 +672,28 @@ class ControlDialog(QDialog):
                     if res and res.value is not None:
                         logger.info(f"Control Dialog: Live read successful, value={res.value}")
                         break
+
+                # If read_signal failed, try a raw readObject fallback (some IEDs only respond via readObject)
+                if (not res) or (res.value is None):
+                    try:
+                        from src.protocols.iec61850 import iec61850_wrapper as iec61850
+                        for st_path in st_paths:
+                            for fc in (iec61850.IEC61850_FC_ST, iec61850.IEC61850_FC_MX):
+                                try:
+                                    raw, err = iec61850.IedConnection_readObject(adapter.connection, st_path, fc)
+                                    if err == iec61850.IED_ERROR_OK and raw:
+                                        val_str, _val_type, err_msg = adapter._parse_mms_value(raw)
+                                        if not err_msg:
+                                            res = Signal(name="stVal", address=st_path)
+                                            res.value = val_str
+                                            logger.info(f"Control Dialog: Raw readObject OK, value={val_str}")
+                                            break
+                                except Exception:
+                                    pass
+                            if res and res.value is not None:
+                                break
+                    except Exception as e:
+                        logger.info(f"Control Dialog: Raw readObject fallback failed: {e}")
                 
                 if res and res.value is not None:
                     formatted = self._format_status_value(res)
@@ -620,6 +747,10 @@ class ControlDialog(QDialog):
                 f"{self.obj_ref}.stVal",
                 f"{self.obj_ref}$stVal"
             ]
+            # If control object is CSWI, status may live on XCBR.Pos.stVal
+            if "CSWI" in self.obj_ref and "XCBR" not in self.obj_ref:
+                xcb_ref = self.obj_ref.replace("CSWI", "XCBR")
+                st_paths.extend([f"{xcb_ref}.stVal", f"{xcb_ref}$stVal"])
             
             logger.info(f"Offline stVal: Searching for paths: {st_paths}")
             logger.info(f"Offline stVal: obj_ref={self.obj_ref}, signal.address={self.signal.address}")
@@ -666,118 +797,177 @@ class ControlDialog(QDialog):
         return 0
 
     def _on_select(self):
-        """Submit Select command."""
+        """Submit Select command (FIXED: runs in background thread)."""
         try:
             adapter = self._get_adapter()
-            if not adapter: return
-
-            # Update Context from UI
+            if not adapter:
+                self.lbl_status.setText("Adapter not available")
+                self._set_label_status(self.lbl_status, "error")
+                return
+            
+            # Disable buttons during operation
+            self.btn_select.setEnabled(False)
+            self.btn_operate.setEnabled(False)
+            self.btn_abort.setEnabled(False)
+            
+            # Get parameters
             params = self._get_params()
+            val = self._get_value()
+            
+            # Update context from UI
             object_ref = adapter._get_control_object_reference(self.signal.address)
             ctx = adapter.controls.get(object_ref)
             if ctx:
                 ctx.originator_cat = params['originator_category']
                 ctx.originator_id = params['originator_identity']
                 ctx.ctl_num = self.num_ctl_num.value()
-
-            val = self._get_value()
             
-            self.lbl_status.setText("Selecting Module...")
+            # Show initial status
+            self.lbl_status.setText("Starting SELECT...")
             self._set_label_status(self.lbl_status, "info")
-            QApplication.processEvents()
-
-            if adapter.select(self.signal, value=val, params=params):
-                self.lbl_status.setText("SELECT Successful (Ready to Operate)")
-                self._set_label_status(self.lbl_status, "success")
-                self.selected = True 
-                self._sync_ui_from_context()
-            else:
-                err = getattr(adapter, '_last_control_error', "SELECT FAILED (Check device logs)")
-                self.lbl_status.setText(err)
-                self._set_label_status(self.lbl_status, "error")
+            
+            # Create worker thread
+            self._worker = ControlWorker(adapter, self.signal, 'select', val, params)
+            self._thread = QThread()
+            self._worker.moveToThread(self._thread)
+            
+            # Connect signals
+            self._thread.started.connect(self._worker.run)
+            self._worker.progress.connect(self._on_control_progress)
+            self._worker.success.connect(self._on_select_result)
+            self._worker.finished.connect(self._thread.quit)
+            self._worker.finished.connect(self._worker.deleteLater)
+            self._thread.finished.connect(self._thread.deleteLater)
+            
+            # Start thread
+            self._thread.start()
+            
         except Exception as e:
+            logger.error(f"Select error: {e}", exc_info=True)
             self.lbl_status.setText(f"Select Error: {e}")
             self._set_label_status(self.lbl_status, "error")
+            self.btn_select.setEnabled(True)
+            self.btn_operate.setEnabled(True)
+            self.btn_abort.setEnabled(True)
+    
+    def _on_control_progress(self, message: str):
+        """Handle progress updates from worker thread."""
+        self.lbl_status.setText(message)
+        self._set_label_status(self.lbl_status, "info")
+    
+    def _on_select_result(self, success: bool, message: str):
+        """Handle SELECT result from worker thread."""
+        self.lbl_status.setText(message)
+        
+        if success:
+            self._set_label_status(self.lbl_status, "success")
+            self.selected = True
+            self._sync_ui_from_context()
+        else:
+            self._set_label_status(self.lbl_status, "error")
+            self.selected = False  # CRITICAL: SELECT failed, cannot operate
+        
+        # Re-enable buttons with correct state
+        self._update_button_states()
+    
+    def _on_operate_result(self, success: bool, message: str):
+        """Handle OPERATE result from worker thread."""
+        self.lbl_status.setText(message)
+        
+        if success:
+            self._set_label_status(self.lbl_status, "success")
+            self.selected = False  # Reset after successful operate
+            self._sync_ui_from_context()
+            # Reload current value to verify
+            try:
+                self._load_current_value()
+            except:
+                pass
+        else:
+            self._set_label_status(self.lbl_status, "error")
+            # Keep selected state - user can retry OPERATE or ABORT
+        
+        # Re-enable buttons with correct state
+        self._update_button_states()
+
+    def _cleanup_worker(self):
+        try:
+            if self._worker:
+                try:
+                    self._worker.cancel()
+                except Exception:
+                    pass
+            if self._thread and self._thread.isRunning():
+                self._thread.quit()
+                self._thread.wait(2000)
+        finally:
+            self._worker = None
+            self._thread = None
 
     def _on_operate(self):
-        self.lbl_status.setText("Operating...")
-        self._set_label_status(self.lbl_status, "info")
-        QApplication.processEvents()
-        
+        """Submit Operate command (FIXED: runs in background thread)."""
         try:
             adapter = self._get_adapter()
-            params = self._get_params()
+            if not adapter:
+                self.lbl_status.setText("Adapter not available")
+                self._set_label_status(self.lbl_status, "error")
+                return
             
-            # Update Context from UI
+            # CRITICAL: Enforce SBO rules - OPERATE only allowed after successful SELECT
+            if self.detected_control_model in [2, 4] and not self.selected:
+                self.lbl_status.setText("OPERATE denied: Must SELECT first (SBO rules)")
+                self._set_label_status(self.lbl_status, "error")
+                return
+            
+            # Disable buttons during operation
+            self.btn_select.setEnabled(False)
+            self.btn_operate.setEnabled(False)
+            self.btn_abort.setEnabled(False)
+            
+            # Get parameters
+            params = self._get_params()
+            val = self._get_value()
+            
+            # Update context from UI
             object_ref = adapter._get_control_object_reference(self.signal.address)
             ctx = adapter.controls.get(object_ref)
             if ctx:
                 ctx.originator_cat = params['originator_category']
                 ctx.originator_id = params['originator_identity']
-                ctx.originator_cat = params['originator_category']
-                ctx.originator_id = params['originator_identity']
                 
-                # Only update ctlNum from UI if it was manually changed or if context is 0
-                # If context has a valid non-zero ctlNum (captured from Select), preserve it!
-                if ctx.ctl_num == 0 or self.num_ctl_num.value() != 0:
-                     # This logic is tricky. If UI shows 0 and ctx has index 2, we should trust ctx?
-                     # Better: trust UI only if user specifically touched it?
-                     # Let's say: If UI is 0 AND ctx has value > 0, KEEP ctx value.
-                     if self.num_ctl_num.value() == 0 and ctx.ctl_num > 0:
-                         logger.debug(f"Preserving context ctlNum={ctx.ctl_num} despite UI=0")
-                     else:
-                         ctx.ctl_num = self.num_ctl_num.value()
-
-            val = self._get_value()
+                # Preserve ctlNum from context if it's valid
+                if self.num_ctl_num.value() == 0 and ctx.ctl_num > 0:
+                    logger.debug(f"Preserving context ctlNum={ctx.ctl_num}")
+                else:
+                    ctx.ctl_num = self.num_ctl_num.value()
             
-            # Use automatic SBO workflow if SBO model and not already selected
-            if ctx and ctx.ctl_model.is_sbo and not self.selected:
-                # Full SBO sequence: SELECT -> wait -> OPERATE
-                success = adapter.send_command(self.signal, val, params=params)
-                if success:
-                    self.lbl_status.setText("SBO SEQUENCE SUCCESSFUL")
-                    self._set_label_status(self.lbl_status, "success")
-                    self.selected = False  # Reset selection state
-                    
-                    import time
-                    time.sleep(0.5)
-                    QApplication.processEvents()
-                    
-                    self._sync_ui_from_context()
-                    self._load_current_value()
-                else:
-                    # If adapter provided a specific control error, show it to the user
-                    err = getattr(adapter, '_last_control_error', None)
-                    if err:
-                        from PySide6.QtWidgets import QMessageBox
-                        QMessageBox.warning(self, "Operate Aborted", f"Operation aborted: {err}")
-                        self.lbl_status.setText(err)
-                    else:
-                        self.lbl_status.setText("SBO SEQUENCE FAILED")
-                    self._set_label_status(self.lbl_status, "error")
-            else:
-                # Direct operate or already selected SBO
-                logger.info(f"ControlDialog: Calling operate with val={val}, ctlNum={ctx.ctl_num if ctx else '?'}")
-                success = adapter.operate(self.signal, val, params=params)
-                
-                if success:
-                    self.lbl_status.setText("OPERATE SUCCESSFUL")
-                    self._set_label_status(self.lbl_status, "success")
-                    self.selected = False 
-                    
-                    import time
-                    time.sleep(0.5)
-                    QApplication.processEvents()
-                    
-                    self._sync_ui_from_context()
-                    self._load_current_value()
-                else:
-                    err = getattr(adapter, '_last_control_error', "OPERATE FAILED")
-                    self.lbl_status.setText(err)
-                    self._set_label_status(self.lbl_status, "error")
+            # Show initial status
+            self.lbl_status.setText("Starting OPERATE...")
+            self._set_label_status(self.lbl_status, "info")
+            
+            # Create worker thread
+            self._worker = ControlWorker(adapter, self.signal, 'operate', val, params)
+            self._thread = QThread()
+            self._worker.moveToThread(self._thread)
+            
+            # Connect signals
+            self._thread.started.connect(self._worker.run)
+            self._worker.progress.connect(self._on_control_progress)
+            self._worker.success.connect(self._on_operate_result)
+            self._worker.finished.connect(self._thread.quit)
+            self._worker.finished.connect(self._worker.deleteLater)
+            self._thread.finished.connect(self._thread.deleteLater)
+            
+            # Start thread
+            self._thread.start()
+            
         except Exception as e:
-            self.lbl_status.setText(f"Error: {e}")
+            logger.error(f"Operate error: {e}", exc_info=True)
+            self.lbl_status.setText(f"Operate Error: {e}")
             self._set_label_status(self.lbl_status, "error")
+            self.btn_select.setEnabled(True)
+            self.btn_operate.setEnabled(True)
+            self.btn_abort.setEnabled(True)
 
     def _on_direct(self):
         # Same as operate, but without selection check (adapter handles it)
@@ -811,9 +1001,16 @@ class ControlDialog(QDialog):
     def done(self, result):
         """Override done to ensure context is cleared when dialog closes."""
         try:
+            self._cleanup_worker()
             adapter = self._get_adapter()
             if adapter and hasattr(adapter, 'clear_control_context'):
                 adapter.clear_control_context(self.signal.address)
         except Exception:
             pass
         super().done(result)
+
+    def closeEvent(self, event):
+        try:
+            self._cleanup_worker()
+        finally:
+            super().closeEvent(event)

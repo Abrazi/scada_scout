@@ -51,11 +51,35 @@ This project uses the native `libiec61850` library with **pure Python ctypes bin
 
 ## 📖 Documentation
 
-See the following files for detailed information:
+### Setup & Installation
 - `IEC61850_SETUP.md` - IEC 61850 library installation guide
 - `CROSS_PLATFORM_INSTALLATION.md` - Installation guide
+
+### Protocol Guides
 - `MODBUS_TCP_GUIDE.md` - Modbus usage
 - `MODBUS_SLAVE_SERVER_GUIDE.md` - Server mode
+- **`IEC61850_SBO_CONTROL_FIX.md`** - ⭐ IEC 61850 control operations (SBO) - Complete guide
+- **`QUICK_REFERENCE_CONTROL.md`** - ⭐ IEC 61850 control quick reference
+
+### Control Operations (IEC 61850)
+**NEW:** Fixed implementation for IEC 61850 SBO (Select-Before-Operate) control:
+- ✅ Correct `.Oper.ctlVal` path handling
+- ✅ Proper SBO sequence (Select → Operate)
+- ✅ Complete control parameter support
+- ✅ Automatic control model detection
+
+**Quick Start:**
+```python
+from protocols.iec61850.control_client_fixed import IEC61850ControlClient
+client = IEC61850ControlClient(connection)
+client.control("LD0/CSWI1.Pos", True)  # Automatic SBO handling
+```
+
+**Files:**
+- `src/protocols/iec61850/control_client_fixed.py` - Fixed control client implementation
+- `test_control_fixed.py` - Comprehensive test suite
+- `INTEGRATION_SNIPPET.py` - Integration examples
+- `IMPLEMENTATION_SUMMARY.md` - Complete implementation details
 
 ## ✨ Features
 
