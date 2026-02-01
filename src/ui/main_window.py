@@ -255,6 +255,13 @@ class MainWindow(QMainWindow):
         python_scripts_action.setStatusTip("Open the Python script editor")
         python_scripts_action.triggered.connect(self._open_python_script_dialog)
         self.view_menu.addAction(python_scripts_action)
+        
+        script_ide_action = QAction("Script &IDE (Debug)...", self)
+        script_ide_action.setShortcut("Ctrl+Shift+D")
+        script_ide_action.setStatusTip("Open the Script IDE with debugger")
+        script_ide_action.triggered.connect(self._open_script_ide)
+        self.view_menu.addAction(script_ide_action)
+        
         self.view_menu.addSeparator()
         
         # Settings action
@@ -580,6 +587,42 @@ class MainWindow(QMainWindow):
             dlg = PythonScriptDialog(self.device_manager, self)
             dlg.setAttribute(Qt.WA_DeleteOnClose, True)
             dlg.show()
+    
+    def _open_script_ide(self):
+        """Open the Script IDE with full debugger support."""
+        from src.ui.dialogs.script_ide import ScriptIDEWindow
+        from shiboken6 import isValid
+        
+        # Check if window exists and is still valid (not deleted by Qt)
+        try:
+            existing = getattr(self, '_script_ide_window', None)
+            if existing is not None and isValid(existing):
+                # Window exists and is valid - just show it
+                existing.show()
+                existing.raise_()
+                existing.activateWindow()
+                return
+        except (RuntimeError, AttributeError):
+            # Object was deleted or reference is stale
+            pass
+        
+        # Create new window
+        try:
+            self._script_ide_window = ScriptIDEWindow(
+                self.device_manager, 
+                self.event_logger, 
+                self
+            )
+            # Don't use WA_DeleteOnClose - keep the window around
+            self._script_ide_window.show()
+            self._script_ide_window.raise_()
+            self._script_ide_window.activateWindow()
+        except Exception as e:
+            QMessageBox.critical(
+                self, 
+                "Error", 
+                f"Failed to open Script IDE:\n{e}"
+            )
 
     def _run_script_once_from_file(self):
         script_path, _ = QFileDialog.getOpenFileName(self, "Run Python Script (Once)", "", "Python Files (*.py)")
