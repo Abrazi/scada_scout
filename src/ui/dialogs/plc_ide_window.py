@@ -507,6 +507,14 @@ class PLCIDEWindow(QMainWindow):
         
         debug_toolbar.addSeparator()
         
+        # Verbose logging toggle
+        self.verbose_check = QCheckBox("📋 Verbose Logging")
+        self.verbose_check.setToolTip("Enable detailed execution logging")
+        self.verbose_check.stateChanged.connect(self._toggle_verbose_logging)
+        debug_toolbar.addWidget(self.verbose_check)
+        
+        debug_toolbar.addSeparator()
+        
         # Scan time display
         self.scan_label = QLabel("Scan: 0.0ms")
         toolbar.addWidget(self.scan_label)
