@@ -998,6 +998,10 @@ END_PROGRAM
         form_layout.addRow("Enabled:", enabled_check)
         
         # Program assignment
+        # Ensure current program is registered if user created/edited before opening task config
+        if not self.plc_ext.programs and self.current_program is not None:
+            self.plc_ext.add_program(self.current_program)
+
         program_list = QListWidget()
         program_list.setSelectionMode(QListWidget.MultiSelection)
         for prog in self.plc_ext.programs:
