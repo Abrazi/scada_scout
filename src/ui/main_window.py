@@ -31,6 +31,7 @@ from src.ui.widgets.iec61850_simulator_dialog import IEC61850SimulatorDialog
 from src.ui.widgets.connection_progress_dialog import ConnectionProgressDialog
 from src.ui.widgets.import_progress_dialog import ImportProgressDialog
 from src.ui.dialogs.settings_dialog import SettingsDialog
+from src.ui.dialogs.ai_assistant_dialog import AIAssistantDialog
 from src.core.workers import SCDImportWorker
 from src.core.project_manager import ProjectManager
 from src.utils.network_utils import NetworkUtils
@@ -262,6 +263,12 @@ class MainWindow(QMainWindow):
         script_ide_action.triggered.connect(self._open_script_ide)
         self.view_menu.addAction(script_ide_action)
         
+        plc_ide_action = QAction("&PLC IDE (IEC 61131-3)", self)
+        plc_ide_action.setShortcut("Ctrl+Shift+P")
+        plc_ide_action.setStatusTip("Open PLC IDE for IEC 61131-3 program development")
+        plc_ide_action.triggered.connect(self._open_plc_ide_dialog)
+        self.view_menu.addAction(plc_ide_action)
+        
         self.view_menu.addSeparator()
         
         # Settings action
@@ -279,20 +286,87 @@ class MainWindow(QMainWindow):
         
         # Help Menu
         help_menu = menu_bar.addMenu("&Help")
+        
+        # Help Index - Master documentation index
+        help_index_action = QAction("📚 Help &Index...", self)
+        help_index_action.setShortcut("F1")
+        help_index_action.setStatusTip("Complete documentation index with quick access to all guides")
+        help_index_action.triggered.connect(self._open_help_index)
+        help_menu.addAction(help_index_action)
+        
+        help_menu.addSeparator()
+        
+        # AI Assistant
+        ai_assistant_action = QAction("🤖 &AI Assistant...", self)
+        ai_assistant_action.setShortcut("Ctrl+Shift+A")
+        ai_assistant_action.setStatusTip("Ask AI for protocol analysis and troubleshooting")
+        ai_assistant_action.triggered.connect(self._show_ai_assistant)
+        help_menu.addAction(ai_assistant_action)
+        
+        help_menu.addSeparator()
 
-        # Open project documentation (README.md). Falls back to docs/*.md if README not present.
+        # Main Documentation
         open_docs_action = QAction("&Documentation (README)...", self)
-        open_docs_action.setShortcut("F1")
+        open_docs_action.setShortcut("Shift+F1")
         open_docs_action.setStatusTip("Open project documentation (README.md)")
         open_docs_action.triggered.connect(self._open_help_file)
         help_menu.addAction(open_docs_action)
+        
+        help_menu.addSeparator()
+        
+        # Scripting Guides
         scripting_guide_action = QAction("&Scripting Guide...", self)
-        scripting_guide_action.setStatusTip("Open the Scripting Guide (docs/script_user_guide.md)")
-        # Use a distinct shortcut so F1 remains dedicated to the main Documentation action
-        scripting_guide_action.setShortcut("Shift+F1")
+        scripting_guide_action.setStatusTip("Open the Scripting Guide (Python automation)")
         scripting_guide_action.triggered.connect(self._open_scripting_guide)
         help_menu.addAction(scripting_guide_action)
         
+        script_ide_guide_action = QAction("Script &IDE Guide...", self)
+        script_ide_guide_action.setStatusTip("Open the Script IDE Advanced Guide")
+        script_ide_guide_action.triggered.connect(self._open_script_ide_guide)
+        help_menu.addAction(script_ide_guide_action)
+        
+        help_menu.addSeparator()
+        
+        # PLC IDE Documentation
+        plc_quickstart_action = QAction("&PLC IDE Quick Start...", self)
+        plc_quickstart_action.setStatusTip("Open PLC IDE Quick Start Guide (IEC 61131-3)")
+        plc_quickstart_action.setShortcut("Ctrl+F1")
+        plc_quickstart_action.triggered.connect(self._open_plc_quickstart)
+        help_menu.addAction(plc_quickstart_action)
+        
+        plc_architecture_action = QAction("PLC IDE &Architecture...", self)
+        plc_architecture_action.setStatusTip("Open PLC IDE Architecture Documentation")
+        plc_architecture_action.triggered.connect(self._open_plc_architecture)
+        help_menu.addAction(plc_architecture_action)
+        
+        plc_phase2_action = QAction("PLC IDE Phase &2 Features...", self)
+        plc_phase2_action.setStatusTip("Open PLC IDE Phase 2 Implementation Summary")
+        plc_phase2_action.triggered.connect(self._open_plc_phase2)
+        help_menu.addAction(plc_phase2_action)
+        
+        plc_reference_action = QAction("PLC IDE Quick &Reference Card...", self)
+        plc_reference_action.setStatusTip("Open PLC IDE Quick Reference Card (shortcuts & syntax)")
+        plc_reference_action.setShortcut("F2")
+        plc_reference_action.triggered.connect(self._open_plc_reference)
+        help_menu.addAction(plc_reference_action)
+        
+        help_menu.addSeparator()
+        
+        # Protocol Guides
+        modbus_guide_action = QAction("&Modbus Usage Guide...", self)
+        modbus_guide_action.setStatusTip("Open Modbus Protocol Usage Guide")
+        modbus_guide_action.triggered.connect(self._open_modbus_guide)
+        help_menu.addAction(modbus_guide_action)
+        
+        modbus_slave_guide_action = QAction("Modbus S&lave Guide...", self)
+        modbus_slave_guide_action.setStatusTip("Open Modbus Slave Server Guide")
+        modbus_slave_guide_action.triggered.connect(self._open_modbus_slave_guide)
+        help_menu.addAction(modbus_slave_guide_action)
+        
+    def _open_help_index(self):
+        """Open the Help Index - comprehensive documentation master index."""
+        self._open_doc_file("docs/HELP_INDEX.md", "Help Index")
+
     def _open_scripting_guide(self):
         """Open the local scripting user guide (docs/script_user_guide.md) in the user's default viewer."""
         try:
@@ -302,8 +376,69 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, 'Scripting Guide not found', f'Cannot find: {doc_path}')
                 return
             QDesktopServices.openUrl(QUrl.fromLocalFile(doc_path))
-        except Exception as exc:
-            QMessageBox.critical(self, 'Error opening Scripting Guide', str(exc))
+            if self.event_logger:
+                self.event_logger.info("Help", "Opened Scripting Guide")
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Failed to open Scripting Guide: {e}")
+    
+    def _open_script_ide_guide(self):
+        """Open the Script IDE Guide."""
+        self._open_doc_file('docs/SCRIPT_IDE_GUIDE.md', 'Script IDE Guide')
+    
+    def _open_plc_quickstart(self):
+        """Open the PLC IDE Quick Start Guide."""
+        self._open_doc_file('docs/PLC_IDE_QUICKSTART.md', 'PLC IDE Quick Start')
+    
+    def _open_plc_architecture(self):
+        """Open the PLC IDE Architecture documentation."""
+        self._open_doc_file('docs/PLC_IDE_ARCHITECTURE.md', 'PLC IDE Architecture')
+    
+    def _open_plc_phase2(self):
+        """Open the PLC IDE Phase 2 Features summary."""
+        self._open_doc_file('docs/PLC_IDE_PHASE2_SUMMARY.md', 'PLC IDE Phase 2 Features')
+    
+    def _open_plc_reference(self):
+        """Open the PLC IDE Quick Reference Card."""
+        self._open_doc_file('docs/PLC_IDE_QUICK_REFERENCE.md', 'PLC IDE Quick Reference')
+    
+    def _open_modbus_guide(self):
+        """Open the Modbus Usage Guide."""
+        self._open_doc_file('docs/modbus_usage_guide.md', 'Modbus Usage Guide')
+    
+    def _open_modbus_slave_guide(self):
+        """Open the Modbus Slave Guide."""
+        self._open_doc_file('docs/modbus_slave_guide.md', 'Modbus Slave Guide')
+    
+    def _open_doc_file(self, relative_path: str, doc_name: str):
+        """Generic helper to open a documentation file."""
+        try:
+            base = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+            doc_path = os.path.join(base, relative_path)
+            if not os.path.exists(doc_path):
+                QMessageBox.information(self, f'{doc_name} not found', 
+                                       f'Cannot find: {doc_path}\n\nThe documentation may not have been installed.')
+                return
+            
+            url = QUrl.fromLocalFile(doc_path)
+            opened = QDesktopServices.openUrl(url)
+            
+            # Fallback to subprocess if desktop service fails
+            if not opened:
+                try:
+                    import subprocess
+                    opener = 'xdg-open' if subprocess.run(['which', 'xdg-open'], 
+                                                         capture_output=True).returncode == 0 else 'open'
+                    subprocess.Popen([opener, doc_path])
+                    opened = True
+                except Exception:
+                    opened = False
+            
+            if opened and self.event_logger:
+                self.event_logger.info("Help", f"Opened {doc_name}")
+            elif not opened:
+                QMessageBox.warning(self, "Error", f"Failed to open {doc_name}")
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Failed to open {doc_name}: {e}")
 
     def _on_device_renamed(self, old_name: str, new_name: str):
         """Handler for device rename events to update in-memory caches."""
@@ -571,6 +706,34 @@ class MainWindow(QMainWindow):
         dialog = SettingsDialog(self)
         dialog.settings_changed.connect(self._apply_settings)
         dialog.exec()
+    
+    def _show_ai_assistant(self):
+        """Opens the AI Assistant dialog for protocol analysis."""
+        try:
+            # Get watch list manager if available
+            watch_list_mgr = getattr(self, 'watch_list_manager', None)
+            
+            # Get protocol gateway if available
+            protocol_gateway = getattr(self.device_manager, 'protocol_gateway', None)
+            
+            dialog = AIAssistantDialog(
+                device_manager=self.device_manager,
+                watch_list_manager=watch_list_mgr,
+                protocol_gateway=protocol_gateway,
+                event_logger=self.event_logger,
+                parent=self
+            )
+            
+            # AI provider is now configured via Settings (⚙️ Settings → AI Assistant tab)
+            # Users can configure OpenAI, Claude, Azure, Ollama, or custom providers
+            
+            dialog.exec()
+        except Exception as e:
+            QMessageBox.critical(
+                self, 
+                "Error", 
+                f"Failed to open AI Assistant:\n{e}"
+            )
 
     def _open_python_script_dialog(self):
         from src.ui.dialogs.python_script_dialog import PythonScriptDialog
@@ -623,6 +786,54 @@ class MainWindow(QMainWindow):
                 "Error", 
                 f"Failed to open Script IDE:\n{e}"
             )
+    
+    def _open_plc_ide_dialog(self):
+        """Prompt user to select a device for PLC IDE."""
+        from PySide6.QtWidgets import QInputDialog
+        
+        devices = self.device_manager.get_all_devices()
+        if not devices:
+            QMessageBox.warning(self, "No Devices", "Add a device first to open PLC IDE.")
+            return
+        
+        device_names = [d.config.name for d in devices]
+        device_name, ok = QInputDialog.getItem(
+            self,
+            "Select Device for PLC IDE",
+            "Choose a device to develop PLC programs for:",
+            device_names,
+            0,
+            False
+        )
+        
+        if ok and device_name:
+            self._open_plc_ide_for_device(device_name)
+    
+    def _open_plc_ide_for_device(self, device_name: str):
+        """Open PLC IDE for specific device."""
+        try:
+            from src.ui.dialogs.plc_ide_window import PLCIDEWindow
+            from shiboken6 import isValid
+            
+            # Check if IDE is already open for this device
+            ide_attr = f'_plc_ide_{device_name}'
+            existing = getattr(self, ide_attr, None)
+            
+            if existing is not None and isValid(existing):
+                existing.show()
+                existing.raise_()
+                existing.activateWindow()
+                return
+            
+            # Create new window
+            ide_window = PLCIDEWindow(self.device_manager, device_name, self)
+            setattr(self, ide_attr, ide_window)
+            ide_window.show()
+            ide_window.raise_()
+            ide_window.activateWindow()
+        except Exception as e:
+            logger.exception(f"Failed to open PLC IDE for device {device_name}")
+            QMessageBox.critical(self, "Error", f"Failed to open PLC IDE:\n{e}")
 
     def _run_script_once_from_file(self):
         script_path, _ = QFileDialog.getOpenFileName(self, "Run Python Script (Once)", "", "Python Files (*.py)")

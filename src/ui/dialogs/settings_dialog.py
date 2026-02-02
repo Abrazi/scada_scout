@@ -5,7 +5,8 @@ from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QTabWidget, QWidget,
     QPushButton, QLabel, QComboBox, QSpinBox, QGroupBox,
     QFormLayout, QColorDialog, QFontComboBox, QCheckBox,
-    QDialogButtonBox, QMessageBox, QApplication, QPlainTextEdit
+    QDialogButtonBox, QMessageBox, QApplication, QPlainTextEdit,
+    QLineEdit
 )
 from PySide6.QtCore import Qt, QSettings, Signal, QTimer, QSize
 from PySide6.QtGui import QColor, QFont, QIcon, QPixmap
@@ -63,6 +64,10 @@ class SettingsDialog(QDialog):
         # Network / Packet Capture tab
         self.network_tab = self._create_network_tab()
         self.tabs.addTab(self.network_tab, "🌐 Network")
+        
+        # AI Assistant tab
+        self.ai_tab = self._create_ai_assistant_tab()
+        self.tabs.addTab(self.ai_tab, "🤖 AI Assistant")
         
         # Button box
         button_box = QDialogButtonBox(
@@ -359,6 +364,230 @@ class SettingsDialog(QDialog):
         
         return widget
 
+    def _create_ai_assistant_tab(self):
+        """Create the AI Assistant configuration tab."""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        
+        # Information label
+        info_label = QLabel(
+            "Configure your AI/LLM provider for protocol analysis and troubleshooting.\n"
+            "The AI Assistant helps analyze device configurations, logs, and signal issues."
+        )
+        info_label.setWordWrap(True)
+        layout.addWidget(info_label)
+        
+        # Provider selection
+        provider_group = QGroupBox("LLM Provider")
+        provider_layout = QFormLayout(provider_group)
+        
+        self.ai_provider = QComboBox()
+        self.ai_provider.addItems(["Disabled", "OpenAI", "Anthropic Claude", "Azure OpenAI", "Ollama (Local)", "Custom"])
+        self.ai_provider.currentTextChanged.connect(self._on_ai_provider_changed)
+        provider_layout.addRow("Provider:", self.ai_provider)
+        
+        layout.addWidget(provider_group)
+        
+        # OpenAI settings
+        self.openai_group = QGroupBox("OpenAI Configuration")
+        openai_layout = QFormLayout(self.openai_group)
+        
+        self.openai_api_key = QLineEdit()
+        self.openai_api_key.setEchoMode(QLineEdit.Password)
+        self.openai_api_key.setPlaceholderText("sk-...")
+        openai_layout.addRow("API Key:", self.openai_api_key)
+        
+        self.openai_model = QComboBox()
+        self.openai_model.addItems(["gpt-4-turbo-preview", "gpt-4", "gpt-3.5-turbo"])
+        self.openai_model.setEditable(True)
+        openai_layout.addRow("Model:", self.openai_model)
+        
+        layout.addWidget(self.openai_group)
+        
+        # Anthropic settings
+        self.anthropic_group = QGroupBox("Anthropic Claude Configuration")
+        anthropic_layout = QFormLayout(self.anthropic_group)
+        
+        self.anthropic_api_key = QLineEdit()
+        self.anthropic_api_key.setEchoMode(QLineEdit.Password)
+        self.anthropic_api_key.setPlaceholderText("sk-ant-...")
+        anthropic_layout.addRow("API Key:", self.anthropic_api_key)
+        
+        self.anthropic_model = QComboBox()
+        self.anthropic_model.addItems(["claude-3-opus-20240229", "claude-3-sonnet-20240229", "claude-3-haiku-20240307"])
+        self.anthropic_model.setEditable(True)
+        anthropic_layout.addRow("Model:", self.anthropic_model)
+        
+        layout.addWidget(self.anthropic_group)
+        
+        # Azure OpenAI settings
+        self.azure_group = QGroupBox("Azure OpenAI Configuration")
+        azure_layout = QFormLayout(self.azure_group)
+        
+        self.azure_endpoint = QLineEdit()
+        self.azure_endpoint.setPlaceholderText("https://your-resource.openai.azure.com/")
+        azure_layout.addRow("Endpoint:", self.azure_endpoint)
+        
+        self.azure_api_key = QLineEdit()
+        self.azure_api_key.setEchoMode(QLineEdit.Password)
+        azure_layout.addRow("API Key:", self.azure_api_key)
+        
+        self.azure_deployment = QLineEdit()
+        self.azure_deployment.setPlaceholderText("gpt-4")
+        azure_layout.addRow("Deployment:", self.azure_deployment)
+        
+        self.azure_api_version = QLineEdit()
+        self.azure_api_version.setText("2024-02-15-preview")
+        azure_layout.addRow("API Version:", self.azure_api_version)
+        
+        layout.addWidget(self.azure_group)
+        
+        # Ollama settings
+        self.ollama_group = QGroupBox("Ollama Configuration (Local LLM)")
+        ollama_layout = QFormLayout(self.ollama_group)
+        
+        self.ollama_base_url = QLineEdit()
+        self.ollama_base_url.setText("http://localhost:11434")
+        ollama_layout.addRow("Base URL:", self.ollama_base_url)
+        
+        self.ollama_model = QComboBox()
+        self.ollama_model.addItems(["llama2", "mistral", "codellama", "mixtral"])
+        self.ollama_model.setEditable(True)
+        ollama_layout.addRow("Model:", self.ollama_model)
+        
+        ollama_info = QLabel(
+            "<small>Ollama runs models locally (no internet required). "
+            "Install from <a href='https://ollama.ai/'>ollama.ai</a></small>"
+        )
+        ollama_info.setOpenExternalLinks(True)
+        ollama_info.setWordWrap(True)
+        ollama_layout.addRow("", ollama_info)
+        
+        layout.addWidget(self.ollama_group)
+        
+        # Custom settings
+        self.custom_group = QGroupBox("Custom Provider Configuration")
+        custom_layout = QFormLayout(self.custom_group)
+        
+        self.custom_endpoint = QLineEdit()
+        self.custom_endpoint.setPlaceholderText("https://api.your-provider.com")
+        custom_layout.addRow("Endpoint:", self.custom_endpoint)
+        
+        self.custom_api_key = QLineEdit()
+        self.custom_api_key.setEchoMode(QLineEdit.Password)
+        custom_layout.addRow("API Key:", self.custom_api_key)
+        
+        self.custom_model = QLineEdit()
+        self.custom_model.setPlaceholderText("model-name")
+        custom_layout.addRow("Model:", self.custom_model)
+        
+        layout.addWidget(self.custom_group)
+        
+        # Advanced settings
+        advanced_group = QGroupBox("Advanced Settings")
+        advanced_layout = QFormLayout(advanced_group)
+        
+        self.ai_temperature = QSpinBox()
+        self.ai_temperature.setRange(0, 100)
+        self.ai_temperature.setValue(20)
+        self.ai_temperature.setSuffix(" (0.2)")
+        advanced_layout.addRow("Temperature:", self.ai_temperature)
+        
+        temp_help = QLabel("<small>Lower = more focused/deterministic (recommended for troubleshooting)</small>")
+        temp_help.setWordWrap(True)
+        advanced_layout.addRow("", temp_help)
+        
+        self.ai_max_tokens = QSpinBox()
+        self.ai_max_tokens.setRange(1000, 16000)
+        self.ai_max_tokens.setValue(4096)
+        self.ai_max_tokens.setSingleStep(1024)
+        advanced_layout.addRow("Max Tokens:", self.ai_max_tokens)
+        
+        layout.addWidget(advanced_group)
+        
+        # Test button
+        test_layout = QHBoxLayout()
+        test_layout.addStretch()
+        self.test_ai_btn = QPushButton("🧪 Test Connection")
+        self.test_ai_btn.clicked.connect(self._test_ai_connection)
+        test_layout.addWidget(self.test_ai_btn)
+        layout.addLayout(test_layout)
+        
+        layout.addStretch()
+        
+        # Initialize visibility
+        self._on_ai_provider_changed("Disabled")
+        
+        return widget
+    
+    def _on_ai_provider_changed(self, provider):
+        """Show/hide provider-specific settings based on selection."""
+        self.openai_group.setVisible(provider == "OpenAI")
+        self.anthropic_group.setVisible(provider == "Anthropic Claude")
+        self.azure_group.setVisible(provider == "Azure OpenAI")
+        self.ollama_group.setVisible(provider == "Ollama (Local)")
+        self.custom_group.setVisible(provider == "Custom")
+        self.test_ai_btn.setEnabled(provider != "Disabled")
+    
+    def _test_ai_connection(self):
+        """Test the AI provider configuration."""
+        provider = self.ai_provider.currentText()
+        
+        if provider == "Disabled":
+            QMessageBox.information(self, "AI Disabled", "AI Assistant is currently disabled.")
+            return
+        
+        # Simple validation
+        if provider == "OpenAI":
+            if not self.openai_api_key.text():
+                QMessageBox.warning(self, "Missing API Key", "Please enter your OpenAI API key.")
+                return
+            msg = f"OpenAI configuration looks valid.\nModel: {self.openai_model.currentText()}"
+        
+        elif provider == "Anthropic Claude":
+            if not self.anthropic_api_key.text():
+                QMessageBox.warning(self, "Missing API Key", "Please enter your Anthropic API key.")
+                return
+            msg = f"Anthropic configuration looks valid.\nModel: {self.anthropic_model.currentText()}"
+        
+        elif provider == "Azure OpenAI":
+            if not self.azure_api_key.text() or not self.azure_endpoint.text():
+                QMessageBox.warning(self, "Missing Configuration", "Please enter Azure endpoint and API key.")
+                return
+            msg = f"Azure OpenAI configuration looks valid.\nDeployment: {self.azure_deployment.text()}"
+        
+        elif provider == "Ollama (Local)":
+            import requests
+            try:
+                url = self.ollama_base_url.text()
+                response = requests.get(f"{url}/api/version", timeout=2)
+                if response.ok:
+                    msg = f"✅ Ollama is running!\nModel: {self.ollama_model.currentText()}"
+                else:
+                    msg = "⚠️ Ollama server responded but may not be ready."
+            except requests.RequestException:
+                QMessageBox.warning(
+                    self, 
+                    "Connection Failed",
+                    f"Cannot connect to Ollama at {url}\n\n"
+                    "Make sure Ollama is running:\n"
+                    "1. Install from https://ollama.ai/\n"
+                    "2. Run: ollama serve\n"
+                    "3. Pull a model: ollama pull llama2"
+                )
+                return
+        
+        elif provider == "Custom":
+            if not self.custom_endpoint.text():
+                QMessageBox.warning(self, "Missing Endpoint", "Please enter a custom endpoint URL.")
+                return
+            msg = f"Custom configuration set.\nEndpoint: {self.custom_endpoint.text()}"
+        
+        else:
+            msg = "Configuration saved."
+        
+        QMessageBox.information(self, "Configuration Valid", msg + "\n\nSettings will be saved when you click OK or Apply.")
+    
     def _create_network_tab(self):
         """Create the network/packet capture settings tab."""
         try:
@@ -585,6 +814,27 @@ For more details, see README.md and docs/ folder.
             self.opc_mirror_endpoint.setText(self.settings.value("opc_mirror_endpoint", "opc.tcp://0.0.0.0:4843"))
         except Exception:
             pass
+        
+        # AI Assistant settings
+        try:
+            self.ai_provider.setCurrentText(self.settings.value("ai_provider", "Disabled"))
+            self.openai_api_key.setText(self.settings.value("ai_openai_key", ""))
+            self.openai_model.setCurrentText(self.settings.value("ai_openai_model", "gpt-4-turbo-preview"))
+            self.anthropic_api_key.setText(self.settings.value("ai_anthropic_key", ""))
+            self.anthropic_model.setCurrentText(self.settings.value("ai_anthropic_model", "claude-3-opus-20240229"))
+            self.azure_endpoint.setText(self.settings.value("ai_azure_endpoint", ""))
+            self.azure_api_key.setText(self.settings.value("ai_azure_key", ""))
+            self.azure_deployment.setText(self.settings.value("ai_azure_deployment", "gpt-4"))
+            self.azure_api_version.setText(self.settings.value("ai_azure_api_version", "2024-02-15-preview"))
+            self.ollama_base_url.setText(self.settings.value("ai_ollama_url", "http://localhost:11434"))
+            self.ollama_model.setCurrentText(self.settings.value("ai_ollama_model", "llama2"))
+            self.custom_endpoint.setText(self.settings.value("ai_custom_endpoint", ""))
+            self.custom_api_key.setText(self.settings.value("ai_custom_key", ""))
+            self.custom_model.setText(self.settings.value("ai_custom_model", ""))
+            self.ai_temperature.setValue(int(self.settings.value("ai_temperature", 20)))
+            self.ai_max_tokens.setValue(int(self.settings.value("ai_max_tokens", 4096)))
+        except Exception:
+            pass
 
         # update setcap commands display
         try:
@@ -684,6 +934,27 @@ For more details, see README.md and docs/ folder.
         try:
             self.settings.setValue("opc_mirror_enabled", self.opc_mirror_enable.isChecked())
             self.settings.setValue("opc_mirror_endpoint", self.opc_mirror_endpoint.text())
+        except Exception:
+            pass
+        
+        # AI Assistant settings
+        try:
+            self.settings.setValue("ai_provider", self.ai_provider.currentText())
+            self.settings.setValue("ai_openai_key", self.openai_api_key.text())
+            self.settings.setValue("ai_openai_model", self.openai_model.currentText())
+            self.settings.setValue("ai_anthropic_key", self.anthropic_api_key.text())
+            self.settings.setValue("ai_anthropic_model", self.anthropic_model.currentText())
+            self.settings.setValue("ai_azure_endpoint", self.azure_endpoint.text())
+            self.settings.setValue("ai_azure_key", self.azure_api_key.text())
+            self.settings.setValue("ai_azure_deployment", self.azure_deployment.text())
+            self.settings.setValue("ai_azure_api_version", self.azure_api_version.text())
+            self.settings.setValue("ai_ollama_url", self.ollama_base_url.text())
+            self.settings.setValue("ai_ollama_model", self.ollama_model.currentText())
+            self.settings.setValue("ai_custom_endpoint", self.custom_endpoint.text())
+            self.settings.setValue("ai_custom_key", self.custom_api_key.text())
+            self.settings.setValue("ai_custom_model", self.custom_model.text())
+            self.settings.setValue("ai_temperature", self.ai_temperature.value())
+            self.settings.setValue("ai_max_tokens", self.ai_max_tokens.value())
         except Exception:
             pass
         

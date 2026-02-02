@@ -31,6 +31,8 @@ class DeviceManagerCore(EventEmitter):
         self._script_manager = None
         self._script_tag_manager = ScriptTagManager(self)
         self._saved_scripts = {}
+        self._iec61131_manager = None
+        self._saved_iec61131_scripts = {}
         # Variable manager (script-scoped and global variables bound to device signals)
         self._variable_manager = VariableManager(self)
         # Executor for background SCD parsing (lazy-created)
@@ -40,6 +42,11 @@ class DeviceManagerCore(EventEmitter):
             self._load_user_scripts()
         except Exception:
             logger.exception("Failed to load persisted user scripts")
+
+        try:
+            self._load_iec61131_scripts()
+        except Exception:
+            logger.exception("Failed to load persisted IEC 61131 scripts")
         
         # Authoritative Subscription Manager
         self.subscription_manager = IECSubscriptionManager()
@@ -761,6 +768,16 @@ class DeviceManagerCore(EventEmitter):
             logger.exception("Failed to persist user script on start")
         self._script_manager.start_script(name, code, interval)
 
+    def start_iec61131_script(self, name: str, code: str, interval: float = 0.5):
+        if not self._iec61131_manager:
+            from src.core.iec61131_runtime import IEC61131ScriptManager
+            self._iec61131_manager = IEC61131ScriptManager(self.event_logger)
+        try:
+            self.save_iec61131_script(name, code, interval)
+        except Exception:
+            logger.exception("Failed to persist IEC 61131 script on start")
+        self._iec61131_manager.start_script(name, code, interval)
+
     # --- User script persistence ---
     def _scripts_file_path(self):
         try:
@@ -769,6 +786,14 @@ class DeviceManagerCore(EventEmitter):
             return os.path.join(folder, 'user_scripts.json')
         except Exception:
             return 'user_scripts.json'
+
+    def _iec61131_scripts_file_path(self):
+        try:
+            cfg = os.path.abspath(self.config_path)
+            folder = os.path.dirname(cfg)
+            return os.path.join(folder, 'iec61131_scripts.json')
+        except Exception:
+            return 'iec61131_scripts.json'
 
     def _load_user_scripts(self):
         path = self._scripts_file_path()
@@ -862,6 +887,54 @@ class DeviceManagerCore(EventEmitter):
         except Exception:
             logger.exception('Failed to persist user script')
 
+    def _load_iec61131_scripts(self):
+        path = self._iec61131_scripts_file_path()
+        if not os.path.exists(path):
+            return
+        try:
+            with open(path, 'r') as f:
+                data = json.load(f)
+            scripts = {}
+            for entry in data or []:
+                name = entry.get('name')
+                code = entry.get('code', '')
+                interval = entry.get('interval', 0.5)
+                scripts[name] = {'code': code, 'interval': interval}
+            self._saved_iec61131_scripts = scripts
+        except Exception as e:
+            logger.error(f"Failed to load IEC 61131 scripts file: {e}")
+
+    def _save_iec61131_scripts_file(self):
+        path = self._iec61131_scripts_file_path()
+        data = []
+        for name, meta in (self._saved_iec61131_scripts or {}).items():
+            data.append({'name': name, 'code': meta.get('code', ''), 'interval': meta.get('interval', 0.5)})
+        try:
+            with open(path, 'w') as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to save IEC 61131 scripts file: {e}")
+
+    def save_iec61131_script(self, name: str, code: str, interval: float = 0.5):
+        if not name:
+            raise ValueError('IEC 61131 script name required')
+        self._saved_iec61131_scripts[name] = {'code': code, 'interval': interval}
+        try:
+            self._save_iec61131_scripts_file()
+        except Exception:
+            logger.exception('Failed to persist IEC 61131 script')
+
+    def delete_iec61131_script(self, name: str):
+        if name in self._saved_iec61131_scripts:
+            del self._saved_iec61131_scripts[name]
+            try:
+                self._save_iec61131_scripts_file()
+            except Exception:
+                logger.exception('Failed to delete IEC 61131 script from disk')
+
+    def get_saved_iec61131_scripts(self):
+        return dict(self._saved_iec61131_scripts)
+
     def delete_user_script(self, name: str):
         if name in self._saved_scripts:
             del self._saved_scripts[name]
@@ -877,6 +950,12 @@ class DeviceManagerCore(EventEmitter):
         from src.core.script_runtime import run_script_once
         run_script_once(code, self, self.event_logger)
 
+    def run_iec61131_script_once(self, name: str, code: str):
+        if not self._iec61131_manager:
+            from src.core.iec61131_runtime import IEC61131ScriptManager
+            self._iec61131_manager = IEC61131ScriptManager(self.event_logger)
+        self._iec61131_manager.run_once(name, code)
+
     def stop_user_script(self, name: str):
         if self._script_manager:
             # Ensure any script-scoped variables are stopped/cleaned
@@ -886,6 +965,10 @@ class DeviceManagerCore(EventEmitter):
             except Exception:
                 pass
             self._script_manager.stop_script(name)
+
+    def stop_iec61131_script(self, name: str):
+        if self._iec61131_manager:
+            self._iec61131_manager.stop_script(name)
 
     def stop_all_user_scripts(self):
         if self._script_manager:
@@ -899,10 +982,19 @@ class DeviceManagerCore(EventEmitter):
                 except Exception:
                     pass
 
+    def stop_all_iec61131_scripts(self):
+        if self._iec61131_manager:
+            self._iec61131_manager.stop_all()
+
     def list_user_scripts(self):
         if not self._script_manager:
             return []
         return self._script_manager.list_scripts()
+
+    def list_iec61131_scripts(self):
+        if not self._iec61131_manager:
+            return []
+        return self._iec61131_manager.list_scripts()
 
     # VariableManager convenience helpers (preferred: use ctx.bind_variable from scripts)
     def create_variable(self, owner: Optional[str], name: str, unique_address: str, mode: str = 'on_demand', interval_ms: Optional[int] = None):

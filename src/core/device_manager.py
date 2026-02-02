@@ -146,26 +146,50 @@ class DeviceManager(QObject):
     def start_user_script(self, name: str, code: str, interval: float = 0.5):
         return self._core.start_user_script(name, code, interval)
 
+    def start_iec61131_script(self, name: str, code: str, interval: float = 0.5):
+        return self._core.start_iec61131_script(name, code, interval)
+
     def run_user_script_once(self, code: str):
         return self._core.run_user_script_once(code)
+
+    def run_iec61131_script_once(self, name: str, code: str):
+        return self._core.run_iec61131_script_once(name, code)
 
     def stop_user_script(self, name: str):
         return self._core.stop_user_script(name)
 
+    def stop_iec61131_script(self, name: str):
+        return self._core.stop_iec61131_script(name)
+
     def stop_all_user_scripts(self):
         return self._core.stop_all_user_scripts()
+
+    def stop_all_iec61131_scripts(self):
+        return self._core.stop_all_iec61131_scripts()
 
     def list_user_scripts(self):
         return self._core.list_user_scripts()
 
+    def list_iec61131_scripts(self):
+        return self._core.list_iec61131_scripts()
+
     def save_user_script(self, name: str, code: str, interval: float = 0.5):
         return self._core.save_user_script(name, code, interval)
+
+    def save_iec61131_script(self, name: str, code: str, interval: float = 0.5):
+        return self._core.save_iec61131_script(name, code, interval)
 
     def delete_user_script(self, name: str):
         return self._core.delete_user_script(name)
 
+    def delete_iec61131_script(self, name: str):
+        return self._core.delete_iec61131_script(name)
+
     def get_saved_scripts(self):
         return self._core.get_saved_scripts()
+
+    def get_saved_iec61131_scripts(self):
+        return self._core.get_saved_iec61131_scripts()
 
     def resolve_script_tokens(self, code: str) -> str:
         """Resolve token placeholders in user script code to current unique addresses."""

@@ -1091,6 +1091,36 @@ class DeviceTreeWidget(QWidget):
             device_name = data
             device = self._resolve_device(device_name, root_item)
             if device:
+                # Automation scripts (Python / IEC 61131)
+                scripts_menu = menu.addMenu("Automation Scripts")
+
+                python_scripts_action = QAction("Python Scripts...", self)
+                python_scripts_action.triggered.connect(lambda: self._open_python_scripts_for_device(device_name))
+                scripts_menu.addAction(python_scripts_action)
+
+                iec61131_scripts_action = QAction("IEC 61131 Scripts...", self)
+                iec61131_scripts_action.triggered.connect(lambda: self._open_iec61131_scripts_for_device(device_name))
+                scripts_menu.addAction(iec61131_scripts_action)
+
+                scripts_menu.addSeparator()
+
+                stop_python_action = QAction("Stop Python Scripts for Device", self)
+                stop_python_action.triggered.connect(lambda: self._stop_device_python_scripts(device_name))
+                scripts_menu.addAction(stop_python_action)
+
+                stop_iec_action = QAction("Stop IEC 61131 Scripts for Device", self)
+                stop_iec_action.triggered.connect(lambda: self._stop_device_iec61131_scripts(device_name))
+                scripts_menu.addAction(stop_iec_action)
+
+                menu.addSeparator()
+
+                # PLC IDE for program development
+                plc_ide_action = QAction("Open PLC IDE...", self)
+                plc_ide_action.triggered.connect(lambda: self._open_plc_ide(device_name))
+                menu.addAction(plc_ide_action)
+
+                menu.addSeparator()
+
                 # IEC 61850: Add switchgear status (XCBR/CSWI/XSWI Pos.stVal) to Watch List
                 if device.config.device_type in (DeviceType.IEC61850_IED, DeviceType.IEC61850_SERVER):
                     switchgear_action = QAction("Add All Switchgear Status to Watch List", self)
@@ -1705,6 +1735,80 @@ class DeviceTreeWidget(QWidget):
         from PySide6.QtWidgets import QApplication
         clipboard = QApplication.clipboard()
         clipboard.setText(text)
+
+    def _open_python_scripts_for_device(self, device_name: str):
+        try:
+            from src.ui.dialogs.python_script_dialog import PythonScriptDialog
+            from shiboken6 import isValid
+            
+            dlg = getattr(self, '_python_script_dialog', None)
+            if dlg is None or not isValid(dlg):
+                dlg = PythonScriptDialog(self.device_manager, self)
+                self._python_script_dialog = dlg
+            if not dlg.txt_name.text().strip():
+                dlg.txt_name.setText(f"{device_name}::Script")
+            dlg.show()
+            dlg.raise_()
+            dlg.activateWindow()
+        except Exception:
+            logger.exception("Failed to open Python Scripts dialog")
+
+    def _open_iec61131_scripts_for_device(self, device_name: str):
+        try:
+            from src.ui.dialogs.iec61131_script_dialog import IEC61131ScriptDialog
+            from shiboken6 import isValid
+            
+            dlg = getattr(self, '_iec61131_script_dialog', None)
+            if dlg is None or not isValid(dlg):
+                dlg = IEC61131ScriptDialog(self.device_manager, self)
+                self._iec61131_script_dialog = dlg
+            if not dlg.txt_name.text().strip():
+                dlg.txt_name.setText(f"{device_name}::Script")
+            dlg.show()
+            dlg.raise_()
+            dlg.activateWindow()
+        except Exception:
+            logger.exception("Failed to open IEC 61131 Scripts dialog")
+
+    def _stop_device_python_scripts(self, device_name: str):
+        try:
+            prefix = f"{device_name}::"
+            running = self.device_manager.list_user_scripts()
+            for name in running:
+                if name.startswith(prefix):
+                    self.device_manager.stop_user_script(name)
+        except Exception:
+            logger.exception("Failed to stop Python scripts for device")
+
+    def _stop_device_iec61131_scripts(self, device_name: str):
+        try:
+            prefix = f"{device_name}::"
+            running = self.device_manager.list_iec61131_scripts()
+            for name in running:
+                if name.startswith(prefix):
+                    self.device_manager.stop_iec61131_script(name)
+        except Exception:
+            logger.exception("Failed to stop IEC 61131 scripts for device")
+
+    def _open_plc_ide(self, device_name: str):
+        """Open PLC IDE for device program development."""
+        try:
+            from src.ui.dialogs.plc_ide_window import PLCIDEWindow
+            from shiboken6 import isValid
+            
+            # Check if IDE is already open for this device
+            ide_attr = f'_plc_ide_{device_name}'
+            dlg = getattr(self, ide_attr, None)
+            
+            if dlg is None or not isValid(dlg):
+                dlg = PLCIDEWindow(self.device_manager, device_name, self)
+                setattr(self, ide_attr, dlg)
+            
+            dlg.show()
+            dlg.raise_()
+            dlg.activateWindow()
+        except Exception:
+            logger.exception(f"Failed to open PLC IDE for device {device_name}")
 
     def _add_node_to_live_data(self, node, device_name):
         """Add a node and all its signals to the Live Data view."""

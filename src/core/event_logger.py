@@ -1,9 +1,20 @@
 from PySide6.QtCore import QObject, Signal as QtSignal
 from datetime import datetime
+from enum import Enum
 import json
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+class EventType(Enum):
+    """Event type enumeration for filtering."""
+    INFO = "INFO"
+    WARNING = "WARNING"
+    ERROR = "ERROR"
+    TRANSACTION = "TRANSACTION"
+    DEBUG = "DEBUG"
+
 
 class EventLogger(QObject):
     """
@@ -19,9 +30,10 @@ class EventLogger(QObject):
 
     def log(self, level: str, source: str, message: str):
         """Record and emit a log event."""
-        timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        timestamp = datetime.now()
         event = {
             'timestamp': timestamp,
+            'type': level,  # Add type field for AI filtering
             'level': level,
             'source': source,
             'message': message
@@ -50,6 +62,18 @@ class EventLogger(QObject):
 
     def get_history(self):
         return self._history
+    
+    def get_recent_events(self, limit: int = 200):
+        """
+        Get recent events from history.
+        
+        Args:
+            limit: Maximum number of events to return (most recent)
+        
+        Returns:
+            List of recent event dictionaries with timestamp, type, message
+        """
+        return self._history[-limit:] if limit < len(self._history) else self._history.copy()
 
     def clear_history(self):
         self._history = []
