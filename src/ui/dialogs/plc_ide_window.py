@@ -823,7 +823,10 @@ END_PROGRAM
         # Sync with debug engine
         self.runtime.debug_engine.toggle_breakpoint(self.current_program.program_id, line)
         
-        self._log(f"Toggled breakpoint at line {line}")
+        if line in self.editor.breakpoints:
+            self._log(f"✓ Breakpoint set at line {line}")
+        else:
+            self._log(f"✗ Breakpoint removed at line {line}")
     
     def _step_into(self):
         """Step into next statement."""
@@ -831,12 +834,9 @@ END_PROGRAM
             self._log("PLC must be in DEBUG mode to step", "warning")
             return
         
-        self.runtime.debug_engine.debug_state = DebugState.STEP_INTO
-        self.runtime.debug_engine._step_requested = DebugState.STEP_INTO
-        self.runtime.debug_engine._step_event.set()
+        self.runtime.debug_engine.step_into()
         self._log("⤵ Step into...")
-        QTimer.singleShot(100, self._update_callstack)
-        QTimer.singleShot(100, self._update_watch_list)
+        QTimer.singleShot(100, self._update_debug_ui)
     
     def _step_over(self):
         """Step over current statement."""
@@ -844,12 +844,9 @@ END_PROGRAM
             self._log("PLC must be in DEBUG mode to step", "warning")
             return
         
-        self.runtime.debug_engine.debug_state = DebugState.STEP_OVER
-        self.runtime.debug_engine._step_requested = DebugState.STEP_OVER
-        self.runtime.debug_engine._step_event.set()
+        self.runtime.debug_engine.step_over()
         self._log("⏭ Step over...")
-        QTimer.singleShot(100, self._update_callstack)
-        QTimer.singleShot(100, self._update_watch_list)
+        QTimer.singleShot(100, self._update_debug_ui)
     
     def _continue_debug(self):
         """Continue execution from breakpoint."""
@@ -857,12 +854,8 @@ END_PROGRAM
             self._log("PLC must be in DEBUG mode to continue", "warning")
             return
         
-        self.runtime.debug_engine.debug_state = DebugState.RUNNING
-        self.runtime.debug_engine._step_event.set()
-        self._log("▶ Continuing execution...")
-        
         self.runtime.debug_engine.continue_execution()
-        self._log("Continue execution")
+        self._log("▶ Continuing execution...")
     
     def _add_watch_expression(self):
         """Add watch expression."""

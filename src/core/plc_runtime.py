@@ -133,13 +133,18 @@ class DebugEngine:
     
     def wait_for_step(self):
         """Wait for step command (used by runtime)."""
-        if self.debug_state != DebugState.RUNNING:
-            self._step_event.wait()
-            self._step_event.clear()
-            
-            if self._step_requested:
-                self.debug_state = self._step_requested
-                self._step_requested = None
+        # Wait with timeout to avoid hanging forever
+        max_wait = 60.0  # 60 second timeout
+        self._step_event.wait(timeout=max_wait)
+        self._step_event.clear()
+        
+        if self._step_requested:
+            self.debug_state = self._step_requested
+            self._step_requested = None
+        else:
+            # Timeout or event set, check if we should continue
+            if self.debug_state == DebugState.PAUSED:
+                self.debug_state = DebugState.RUNNING
     
     def add_watch(self, expression: str, program_id: Optional[str] = None):
         """Add watch expression."""
@@ -273,7 +278,7 @@ class PLCRuntime:
         self._running = False
         self._stop_event.set()
         
-        if self._scan_thread:
+        if self._scan_thread and threading.current_thread() is not self._scan_thread:
             self._scan_thread.join(timeout=2.0)
         
         # Hold outputs safe
@@ -541,12 +546,18 @@ class PLCRuntime:
                     executable_lines.append(line)
             
             executable_code = '\n'.join(executable_lines)
+            executable_code = self._strip_st_comments(executable_code)
             
             # Convert ST syntax to Python
             python_code = self._st_to_python(executable_code)
             
-            # Execute
-            exec(python_code, exec_context, exec_context)
+            # Execute with debug support
+            if self.device.operating_mode == PLCMode.DEBUG:
+                # Line-by-line execution for debugging
+                self._execute_with_debug(python_code, exec_context, program.program_id)
+            else:
+                # Normal execution
+                exec(python_code, exec_context, exec_context)
             
             # Debug logging
             logger.debug(f"[EXEC] Program {program.name}: context after = {exec_context}")
@@ -696,6 +707,63 @@ class PLCRuntime:
                     lines.append('    ' * indent_level + clean_line.strip())
         
         return '\n'.join(lines)
+
+    def _strip_st_comments(self, st_code: str) -> str:
+        """Remove ST comments (block and line) before translation."""
+        # Remove block comments: (* ... *)
+        cleaned = []
+        i = 0
+        in_block = False
+        while i < len(st_code):
+            if not in_block and st_code.startswith('(*', i):
+                in_block = True
+                i += 2
+                continue
+            if in_block and st_code.startswith('*)', i):
+                in_block = False
+                i += 2
+                continue
+            if not in_block:
+                cleaned.append(st_code[i])
+            i += 1
+
+        # Remove line comments: // ...
+        cleaned_text = ''.join(cleaned)
+        result_lines = []
+        for line in cleaned_text.split('\n'):
+            line_no_comment = line.split('//', 1)[0]
+            result_lines.append(line_no_comment)
+
+        return '\n'.join(result_lines)
+    
+    def _execute_with_debug(self, python_code: str, exec_context: Dict[str, Any], program_id: str):
+        """Execute code with line-by-line debugging support."""
+        lines = python_code.split('\n')
+        for line_num, line in enumerate(lines, start=1):
+            if not line.strip():
+                continue
+            
+            # Check for breakpoint before executing
+            should_break = self.debug_engine.check_breakpoint(program_id, line_num, exec_context)
+            
+            if should_break:
+                # Pause and wait for user command
+                self.debug_engine.debug_state = DebugState.PAUSED
+                if self.event_logger:
+                    self.event_logger.info("PLC Debug", f"Breakpoint hit at line {line_num}")
+                self.debug_engine.wait_for_step()
+            
+            # Execute line
+            try:
+                exec(line, exec_context, exec_context)
+            except SyntaxError:
+                # Skip empty or incomplete lines
+                pass
+            
+            # Check for step commands
+            if self.debug_engine.debug_state in (DebugState.STEP_INTO, DebugState.STEP_OVER):
+                self.debug_engine.debug_state = DebugState.PAUSED
+                self.debug_engine.wait_for_step()
     
     def _hold_outputs_safe(self):
         """Set all outputs to safe state."""

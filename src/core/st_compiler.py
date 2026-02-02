@@ -524,8 +524,11 @@ class STCompiler:
         errors = []
         warnings = []
         
+        # Strip ST comments before compilation
+        clean_source = self._strip_st_comments(program.source_code)
+        
         # Parse variable declarations
-        input_vars, output_vars, local_vars, parse_errors = self.parser.parse_variables(program.source_code)
+        input_vars, output_vars, local_vars, parse_errors = self.parser.parse_variables(clean_source)
         errors.extend(parse_errors)
         
         # Update program variable scopes
@@ -534,14 +537,14 @@ class STCompiler:
         program.local_variables = local_vars
         
         # Parse AST for control flow analysis
-        ast, ast_errors = self.parser.parse(program.source_code)
+        ast, ast_errors = self.parser.parse(clean_source)
         errors.extend(ast_errors)
         
         # Validate control flow structures
         self._validate_ast(ast, errors, warnings)
         
-        # Basic syntax validation
-        lines = program.source_code.split('\n')
+        # Basic syntax validation (use clean_source without comments)
+        lines = clean_source.split('\n')
         for line_num, line in enumerate(lines, 1):
             line_stripped = line.strip()
             
@@ -602,3 +605,31 @@ class STCompiler:
             'value': node.value,
             'children': [self._ast_to_dict(child) for child in node.children]
         }
+    
+    def _strip_st_comments(self, st_code: str) -> str:
+        """Remove ST comments (block and line) before compilation."""
+        # Remove block comments: (* ... *)
+        cleaned = []
+        i = 0
+        in_block = False
+        while i < len(st_code):
+            if not in_block and st_code.startswith('(*', i):
+                in_block = True
+                i += 2
+                continue
+            if in_block and st_code.startswith('*)', i):
+                in_block = False
+                i += 2
+                continue
+            if not in_block:
+                cleaned.append(st_code[i])
+            i += 1
+
+        # Remove line comments: // ...
+        cleaned_text = ''.join(cleaned)
+        result_lines = []
+        for line in cleaned_text.split('\n'):
+            line_no_comment = line.split('//', 1)[0]
+            result_lines.append(line_no_comment)
+
+        return '\n'.join(result_lines)
