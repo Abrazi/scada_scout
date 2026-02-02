@@ -429,7 +429,9 @@ class PLCRuntime:
                 )
                 
                 if self.verbose_logging and scan_count % 10 == 0:
-                    self._log("info", f"[SCAN {scan_count}] Executing {len(tasks)} tasks, {len(self.device.programs)} programs total")
+                    total_progs = len(self.device.programs)
+                    assigned_progs = sum(len(t.program_ids) for t in tasks)
+                    self._log("info", f"[SCAN {scan_count}] Executing {len(tasks)} tasks, {total_progs} programs total ({assigned_progs} assigned to tasks)")
                 
                 for task in tasks:
                     self._execute_task(task)
@@ -458,7 +460,10 @@ class PLCRuntime:
         task_start = time.time()
         
         if self.verbose_logging:
-            self._log("info", f"  [TASK] {task.name}: Starting with {len(task.program_ids)} programs")
+            if len(task.program_ids) == 0:
+                self._log("warning", f"  [TASK] {task.name}: ⚠️ NO PROGRAMS ASSIGNED! (program_ids is empty)")
+            else:
+                self._log("info", f"  [TASK] {task.name}: Starting with {len(task.program_ids)} programs")
         
         try:
             for program_id in task.program_ids:

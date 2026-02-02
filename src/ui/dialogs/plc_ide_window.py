@@ -233,7 +233,8 @@ class PLCIDEWindow(QMainWindow):
         
         # Initialize compiler and runtime
         self.compiler = STCompiler()
-        self.runtime = PLCRuntime(self.plc_ext, device_manager.event_logger)
+        # Use PLC IDE's own logging method instead of main event logger
+        self.runtime = PLCRuntime(self.plc_ext, self._plc_log)
         
         self.current_program: Optional[PLCProgram] = None
         
@@ -663,6 +664,25 @@ END_PROGRAM
             QMessageBox.warning(self, "No Programs", "Compile at least one program before starting PLC.")
             return
         
+        # Check if any tasks have programs assigned
+        tasks_with_programs = sum(1 for t in self.plc_ext.tasks if t.enabled and len(t.program_ids) > 0)
+        if tasks_with_programs == 0:
+            msg = f"No tasks have programs assigned!\n\n"
+            msg += f"You have {len(self.plc_ext.programs)} program(s) and {len(self.plc_ext.tasks)} task(s),\n"
+            msg += f"but no task has any programs in its program_ids list.\n\n"
+            msg += f"To fix:\n"
+            msg += f"1. Click ⚙️ Task Settings button\n"
+            msg += f"2. Select your task\n"
+            msg += f"3. Check the programs you want to execute\n"
+            msg += f"4. Click OK\n\n"
+            msg += f"Do you want to open Task Settings now?"
+            
+            reply = QMessageBox.question(self, "No Programs Assigned to Tasks", msg,
+                                        QMessageBox.Yes | QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                self._configure_tasks()
+            return
+        
         if self.runtime.start():
             self._log("PLC started (RUN mode)")
         else:
@@ -678,6 +698,19 @@ END_PROGRAM
         compiled_count = sum(1 for p in self.plc_ext.programs if p.compiled_code)
         if compiled_count == 0:
             QMessageBox.warning(self, "No Programs", "Compile at least one program before starting PLC in debug mode.")
+            return
+        
+        # Check if any tasks have programs assigned
+        tasks_with_programs = sum(1 for t in self.plc_ext.tasks if t.enabled and len(t.program_ids) > 0)
+        if tasks_with_programs == 0:
+            msg = f"No tasks have programs assigned!\n\n"
+            msg += f"To fix, click ⚙️ Task Settings and assign programs to your tasks.\n\n"
+            msg += f"Open Task Settings now?"
+            
+            reply = QMessageBox.question(self, "No Programs Assigned", msg,
+                                        QMessageBox.Yes | QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                self._configure_tasks()
             return
         
         if self.runtime.start_debug():
@@ -892,6 +925,10 @@ END_PROGRAM
         
         self.output_console.append(f'<span style="color: {color}">[{timestamp}] {message}</span>')
     
+    def _plc_log(self, level: str, message: str):
+        """Log callback for PLCRuntime - routes to PLC IDE's output console."""
+        self._log(message, level)
+    
     def _update_debug_ui(self):
         """Update debug UI elements after step."""
         QTimer.singleShot(100, self._update_callstack)
@@ -907,6 +944,14 @@ END_PROGRAM
         dialog.resize(400, 300)
         
         layout = QVBoxLayout(dialog)
+        
+        # Add warning label about program assignment
+        warning_label = QLabel("📋 Tasks execute programs. Check programs below to assign them to this task.\n"
+                              "⚠️ Tasks with NO programs assigned will run but do NOTHING!")
+        warning_label.setStyleSheet("QLabel { background-color: #FFF3CD; padding: 10px; border: 1px solid #FFC107; border-radius: 3px; }")
+        warning_label.setWordWrap(True)
+        layout.addWidget(warning_label)
+        
         form_layout = QFormLayout()
         
         # Get or create main task
