@@ -1,6 +1,9 @@
 import sys
 import os
 
+# Suppress Qt platform plugin warnings about mouse grabbing (harmless on Linux)
+os.environ.setdefault('QT_LOGGING_RULES', '*.debug=false;qt.qpa.*=false')
+
 # Ensure src is in python path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
@@ -132,6 +135,15 @@ def main():
         # Start the controller
         print("Starting controller...")
         controller.start_application()
+
+        # Optional developer/debug hook: force a reset on startup when enabled
+        if os.environ.get("SCADAScout_DEBUG_RESET_LAYOUT") in ("1", "true", "True"):
+            try:
+                window._on_reset_layout()
+                import logging as _logging
+                _logging.getLogger(__name__).info("SCADAScout_DEBUG_RESET_LAYOUT: invoked _on_reset_layout() at startup")
+            except Exception:
+                pass
 
         # Ensure controller can clean up background threads on exit
         app.aboutToQuit.connect(controller.shutdown)

@@ -47,6 +47,15 @@ class MainWindow(QMainWindow):
         self.event_logger = event_logger
         self.setWindowTitle("Scada Scout")
         
+        # Initialize Theme Manager
+        from src.ui.theme_manager import get_theme_manager
+        self.theme_manager = get_theme_manager()
+        self.theme_manager.apply_to_application(QApplication.instance())
+        self.theme_manager.theme_changed.connect(self._on_theme_changed)
+        
+        # Store reference to title bar (will be set later)
+        self._title_bar = None
+        
         # Scale initial size for Windows DPI and screen size
         base_width, base_height = 1280, 800
         min_width, min_height = 1200, 650
@@ -79,8 +88,8 @@ class MainWindow(QMainWindow):
         # Set minimum size to ensure all controls fit in two-row layout
         self.setMinimumSize(scaled_min_width, scaled_min_height)
         
-        # Use standard window with native controls (minimize, maximize, close)
-        # This provides the best user experience with native OS window management
+        # Use frameless window with custom VSCode-style title bar
+        self.setWindowFlags(Qt.Window)
         
         # Force window to be visible and get focus
         self.setAttribute(Qt.WA_ShowWithoutActivating, False)
@@ -88,8 +97,6 @@ class MainWindow(QMainWindow):
         
         # Enable VSCode-style dock behavior
         self.setDockNestingEnabled(True)
-        # Remove empty central widget so docks fill the space proportionally
-        self.setCentralWidget(None)
         
         # Initialize UI Components
         self._setup_ui()
@@ -120,14 +127,41 @@ class MainWindow(QMainWindow):
         # Re-enable dock panels so Device Explorer, Signals, Watch List, and Event Log appear
         self._create_dock_panels()
         
+        # Apply initial menu bar theme
+        self._update_menu_bar_theme()
+        
     def _create_menus(self):
-        # Use standard QMainWindow menu bar for maximum compatibility
-        # Force native menu bar on Windows for proper display
-        menu_bar = self.menuBar()
-        menu_bar.setNativeMenuBar(False)  # Ensure menu displays in window on all platforms
-        self.menu_bar = menu_bar
-        menu_bar.setVisible(True)
-        menu_bar.show()
+        # Use classic OS title bar and standard menu bar
+        from PySide6.QtWidgets import QMenuBar
+        self.menu_bar = QMenuBar(self)
+        self.setMenuBar(self.menu_bar)
+        
+        # Provide a clean central widget for docking
+        from PySide6.QtWidgets import QSizePolicy
+        central_widget = QWidget()
+        central_widget.setObjectName("CentralWorkspace")
+        central_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.setCentralWidget(central_widget)
+
+        # Central placeholder for an empty workspace (icon + short hint).
+        # Keep this as a well-behaved child (prevents stray top-level floating widgets).
+        from PySide6.QtWidgets import QVBoxLayout, QLabel
+        placeholder_layout = QVBoxLayout(central_widget)
+        placeholder_layout.setContentsMargins(0, 0, 0, 0)
+        placeholder_layout.setAlignment(Qt.AlignCenter)
+        self._central_placeholder = QLabel("\n\nNo project open — click Open or New", central_widget)
+        self._central_placeholder.setObjectName('CentralPlaceholder')
+        self._central_placeholder.setAlignment(Qt.AlignCenter)
+        self._central_placeholder.setProperty('class', 'note')
+        self._central_placeholder.setMinimumSize(120, 120)
+        # Use theme icon when available but keep text visible for accessibility
+        self._central_placeholder.setTextFormat(Qt.RichText)
+        self._central_placeholder.setText('<div style="font-size:14pt; color:var(--text-muted)">📄</div><div style="margin-top:8px;">No project open — click <b>Open</b> or <b>New</b></div>')
+        placeholder_layout.addWidget(self._central_placeholder)
+        self._central_placeholder.hide()  # shown only when workspace truly empty
+        
+        # Standard menu bar
+        menu_bar = self.menu_bar
 
         # File Menu
         file_menu = menu_bar.addMenu("&File")
@@ -478,7 +512,86 @@ class MainWindow(QMainWindow):
     def _create_toolbar(self):
         self.toolbar = QToolBar("Main Toolbar")
         self.toolbar.setObjectName("MainToolbar")
+        # Keep toolbar below the menu/title bar and visually compact
+        self.toolbar.setMovable(False)
+        self.toolbar.setToolButtonStyle(Qt.ToolButtonIconOnly)
         self.addToolBar(self.toolbar)
+
+        # Populate toolbar with primary actions (icons from theme where possible)
+        from PySide6.QtGui import QIcon
+        def _icon(name, fallback_text=None):
+            ic = QIcon.fromTheme(name)
+            if ic.isNull() and fallback_text:
+                # Create a simple text-based icon substitute using QIcon.fromTheme fallback
+                return QIcon()
+            return ic
+
+        new_action = QAction(_icon('document-new', 'New'), 'New', self)
+        new_action.setStatusTip('Create new project')
+        new_action.triggered.connect(self._on_new_project)
+        self.toolbar.addAction(new_action)
+
+        open_action = QAction(_icon('document-open', 'Open'), 'Open', self)
+        open_action.setStatusTip('Open project')
+        open_action.triggered.connect(self._on_open_project)
+        self.toolbar.addAction(open_action)
+
+        save_action = QAction(_icon('document-save', 'Save'), 'Save', self)
+        save_action.setStatusTip('Save project')
+        save_action.triggered.connect(self._on_save_project)
+        self.toolbar.addAction(save_action)
+
+        self.toolbar.addSeparator()
+
+        connect_action = QAction(_icon('network-connect', 'Connect'), 'Connect', self)
+        connect_action.setStatusTip('Connect to selected device')
+        connect_action.triggered.connect(lambda: self._show_connection_dialog())
+        self.toolbar.addAction(connect_action)
+
+        run_action = QAction(_icon('media-playback-start', 'Run'), 'Run', self)
+        run_action.setStatusTip('Start runtime / simulation')
+        run_action.triggered.connect(lambda: getattr(self, '_start_runtime', lambda: None)())
+        self.toolbar.addAction(run_action)
+
+        stop_action = QAction(_icon('media-playback-stop', 'Stop'), 'Stop', self)
+        stop_action.setStatusTip('Stop runtime / simulation')
+        stop_action.triggered.connect(lambda: getattr(self, '_stop_runtime', lambda: None)())
+        self.toolbar.addAction(stop_action)
+
+        self.toolbar.addSeparator()
+
+        reset_action = QAction(_icon('view-refresh', 'Reset'), 'Reset Layout', self)
+        reset_action.setStatusTip('Reset layout to default')
+        reset_action.triggered.connect(self._on_reset_layout)
+        self.toolbar.addAction(reset_action)
+
+        settings_action = QAction(_icon('preferences-system', 'Settings'), 'Settings', self)
+        settings_action.setStatusTip('Open settings')
+        settings_action.triggered.connect(self._show_settings_dialog)
+        self.toolbar.addAction(settings_action)
+
+        # Small theme toggle on the far right
+        self.toolbar.addSeparator()
+        toggle_theme_action = QAction(_icon('color-management', 'Theme'), 'Toggle Theme', self)
+        toggle_theme_action.setStatusTip('Toggle Epic Dark/Bright theme')
+        toggle_theme_action.triggered.connect(self._toggle_theme)
+        self.toolbar.addAction(toggle_theme_action)
+
+        # Ensure toolbar is visible and set reasonable icon size (may be overridden by settings)
+        try:
+            from PySide6.QtCore import QSize
+            icon_size = 24
+            self.toolbar.setIconSize(QSize(icon_size, icon_size))
+            self.toolbar.show()
+        except Exception:
+            pass
+
+        # Log toolbar population for diagnostics
+        try:
+            import logging as _logging
+            _logging.getLogger(__name__).info('Main toolbar populated with %d actions', len(self.toolbar.actions()))
+        except Exception:
+            pass
         
     def _create_statusbar(self):
         self.status_bar = QStatusBar()
@@ -518,7 +631,11 @@ class MainWindow(QMainWindow):
         self.dock_left = QDockWidget("Device Explorer", self)
         self.dock_left.setObjectName("DockDeviceExplorer")
         self.dock_left.setAllowedAreas(Qt.AllDockWidgetAreas)
-        self.dock_left.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable | QDockWidget.DockWidgetClosable)
+        self.dock_left.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetClosable)
+        
+        # Set size constraints for dock widget
+        self.dock_left.setMinimumWidth(200)
+        self.dock_left.setMaximumWidth(600)
         
         self.device_tree = DeviceTreeWidget(self.device_manager, self.watch_list_manager)
         self.device_tree.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -537,7 +654,7 @@ class MainWindow(QMainWindow):
         self.dock_right = QDockWidget("Data Visualization", self)
         self.dock_right.setObjectName("DockDataVisualization")
         self.dock_right.setAllowedAreas(Qt.AllDockWidgetAreas)
-        self.dock_right.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable | QDockWidget.DockWidgetClosable)
+        self.dock_right.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetClosable)
         
         self.signals_view = SignalsViewWidget(self.device_manager, self.watch_list_manager)
         self.signals_view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -552,7 +669,7 @@ class MainWindow(QMainWindow):
         self.dock_bottom = QDockWidget("Watch List", self)
         self.dock_bottom.setObjectName("DockWatchList")
         self.dock_bottom.setAllowedAreas(Qt.AllDockWidgetAreas)
-        self.dock_bottom.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable | QDockWidget.DockWidgetClosable)
+        self.dock_bottom.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetClosable)
         
         self.watch_list_widget = WatchListWidget(self.watch_list_manager, self.device_manager)
         self.watch_list_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -563,21 +680,21 @@ class MainWindow(QMainWindow):
         self.dock_events = QDockWidget("Event Log", self)
         self.dock_events.setObjectName("DockEventLog")
         self.dock_events.setAllowedAreas(Qt.AllDockWidgetAreas)
-        self.dock_events.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable | QDockWidget.DockWidgetClosable)
+        self.dock_events.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetClosable)
         
         self.event_log_widget = EventLogWidget()
         if self.event_logger:
             self.event_log_widget.set_event_logger(self.event_logger)
         self.event_log_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.dock_events.setWidget(self.event_log_widget)
-        self.addDockWidget(Qt.BottomDockWidgetArea, self.dock_events)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.dock_events)
         self.device_tree.show_event_log_requested.connect(self.dock_events.raise_)
         
         # Modbus Slave Server panel (hidden by default)
         self.dock_modbus_slave = QDockWidget("Modbus Slave Server", self)
         self.dock_modbus_slave.setObjectName("DockModbusSlaveServer")
         self.dock_modbus_slave.setAllowedAreas(Qt.AllDockWidgetAreas)
-        self.dock_modbus_slave.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable | QDockWidget.DockWidgetClosable)
+        self.dock_modbus_slave.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetClosable)
         
         self.modbus_slave_widget = ModbusSlaveWidget(
             event_logger=self.event_logger
@@ -586,21 +703,32 @@ class MainWindow(QMainWindow):
         self.dock_modbus_slave.setWidget(self.modbus_slave_widget)
         self.addDockWidget(Qt.BottomDockWidgetArea, self.dock_modbus_slave)
         
-        # Layout arrangement - Put all panels at bottom, tabbed together
-        # Use a different ordering to ensure proper tabbing
+        # Layout arrangement - Device Explorer on left, bottom panels tabbed
+        # Remove and re-add for clean layout
         self.removeDockWidget(self.dock_bottom)
         self.removeDockWidget(self.dock_events)
         self.removeDockWidget(self.dock_modbus_slave)
         
-        # Add first one to bottom
+        # Re-add to bottom area
         self.addDockWidget(Qt.BottomDockWidgetArea, self.dock_right)
-        # Tab the rest to it
+        self.addDockWidget(Qt.BottomDockWidgetArea, self.dock_bottom)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.dock_events)
+        self.addDockWidget(Qt.BottomDockWidgetArea, self.dock_modbus_slave)
+        
+        # Tab them together
         self.tabifyDockWidget(self.dock_right, self.dock_bottom)
-        self.tabifyDockWidget(self.dock_right, self.dock_events)
+        # Keep Event Log on the right (not tabbed with bottom panels)
         self.tabifyDockWidget(self.dock_right, self.dock_modbus_slave)
         
-        self.dock_right.raise_()  # Show Data Visualization tab by default
+        # Show Data Visualization by default, hide Modbus Slave
+        self.dock_right.raise_()
         self.dock_modbus_slave.setVisible(False)
+        
+        # Connect visibility signals to restore proper placement
+        self.dock_left.visibilityChanged.connect(self._on_dock_visibility_changed)
+        self.dock_right.visibilityChanged.connect(self._on_dock_visibility_changed)
+        self.dock_bottom.visibilityChanged.connect(self._on_dock_visibility_changed)
+        self.dock_events.visibilityChanged.connect(self._on_dock_visibility_changed)
         
         # Apply initial layout with proper sizing
         # Attempt to load user-saved default layout first
@@ -642,16 +770,89 @@ class MainWindow(QMainWindow):
         window_height = self.height()
         
         # Calculate proportional sizes (percentages of window size)
-        left_panel_width = int(window_width * 0.25)    # 25% for device explorer
-        bottom_panel_height = int(window_height * 0.40) # 40% for bottom panels (Data Viz, Watch List, Event Log)
+        left_panel_width = int(window_width * 0.20)    # 20% for device explorer
+        bottom_panel_height = int(window_height * 0.35) # 35% for bottom panels
         
-        # Apply minimum constraints only
-        left_panel_width = max(250, left_panel_width)   # Minimum 250px
-        bottom_panel_height = max(200, bottom_panel_height) # Minimum 200px
+        # Apply minimum constraints
+        left_panel_width = max(280, min(left_panel_width, 400))   # 280-400px
+        bottom_panel_height = max(250, min(bottom_panel_height, 500)) # 250-500px
+        right_panel_width = max(260, min(int(window_width * 0.22), 420))
         
         # Set dock sizes
         self.resizeDocks([self.dock_left], [left_panel_width], Qt.Horizontal)
         self.resizeDocks([self.dock_right], [bottom_panel_height], Qt.Vertical)
+        if hasattr(self, 'dock_events'):
+            self.resizeDocks([self.dock_events], [right_panel_width], Qt.Horizontal)
+    
+    def _on_dock_visibility_changed(self, visible):
+        """Handle dock widget visibility changes to restore proper placement."""
+        if not visible:
+            return
+        
+        dock = self.sender()
+        if not dock:
+            return
+        
+        # Store current sizes before repositioning
+        window_width = self.width()
+        window_height = self.height()
+        
+        # When a dock becomes visible, ensure it's in the correct area
+        if dock == self.dock_left:
+            # Ensure Device Explorer is on the left
+            current_area = self.dockWidgetArea(dock)
+            if current_area != Qt.LeftDockWidgetArea:
+                self.removeDockWidget(dock)
+                self.addDockWidget(Qt.LeftDockWidgetArea, dock)
+            
+            # Restore size after short delay to ensure layout is ready
+            left_width = max(280, min(int(window_width * 0.20), 400))
+            QTimer.singleShot(50, lambda: self.resizeDocks(
+                [self.dock_left], 
+                [left_width], 
+                Qt.Horizontal
+            ))
+        
+        elif dock in (self.dock_right, self.dock_bottom):
+            # Ensure bottom panels are in bottom area and tabbed
+            current_area = self.dockWidgetArea(dock)
+            if current_area != Qt.BottomDockWidgetArea:
+                self.removeDockWidget(dock)
+                self.addDockWidget(Qt.BottomDockWidgetArea, dock)
+                
+                # Re-establish tabbing
+                if self.dock_right.isVisible() and dock != self.dock_right:
+                    self.tabifyDockWidget(self.dock_right, dock)
+                elif dock == self.dock_right:
+                    if self.dock_bottom.isVisible():
+                        self.tabifyDockWidget(self.dock_right, self.dock_bottom)
+                    if self.dock_events.isVisible():
+                        self.tabifyDockWidget(self.dock_right, self.dock_events)
+                
+                # Raise the newly shown panel
+                dock.raise_()
+            
+            # Restore size after short delay
+            bottom_height = max(250, min(int(window_height * 0.35), 500))
+            QTimer.singleShot(50, lambda: self.resizeDocks(
+                [self.dock_right], 
+                [bottom_height], 
+                Qt.Vertical
+            ))
+
+        elif dock == self.dock_events:
+            # Ensure Event Log is on the right
+            current_area = self.dockWidgetArea(dock)
+            if current_area != Qt.RightDockWidgetArea:
+                self.removeDockWidget(dock)
+                self.addDockWidget(Qt.RightDockWidgetArea, dock)
+                dock.raise_()
+            right_width = max(260, min(int(window_width * 0.22), 420))
+            QTimer.singleShot(50, lambda: self.resizeDocks(
+                [self.dock_events],
+                [right_width],
+                Qt.Horizontal
+            ))
 
     def resizeEvent(self, event):
         # Keep floating title bar stretched across the top
@@ -683,23 +884,205 @@ class MainWindow(QMainWindow):
         return False
 
     def _on_reset_layout(self):
-        """Restores the basic docking layout with flexible sizing."""
-        self.dock_left.setVisible(True)
-        self.dock_right.setVisible(True)
-        self.dock_bottom.setVisible(True)
-        self.dock_events.setVisible(True)
-        
-        self.addDockWidget(Qt.LeftDockWidgetArea, self.dock_left)
-        self.addDockWidget(Qt.BottomDockWidgetArea, self.dock_right)
-        self.addDockWidget(Qt.BottomDockWidgetArea, self.dock_bottom)
-        self.addDockWidget(Qt.BottomDockWidgetArea, self.dock_events)
-        
-        self.tabifyDockWidget(self.dock_right, self.dock_bottom)
-        self.tabifyDockWidget(self.dock_bottom, self.dock_events)
-        self.dock_right.raise_()
-        
-        # Reapply flexible initial sizing
-        QTimer.singleShot(100, self._apply_initial_layout)
+        """Restore a reliable, centered default layout and clear saved state.
+
+        This forces a known-good geometry, undocks any floating panels, re-docks
+        widgets into their canonical areas and reapplies conservative sizes so
+        the UI is predictable across screen sizes.
+        """
+        from PySide6.QtGui import QGuiApplication
+
+        # Clear saved layout so restoreState won't reapply a broken layout
+        settings = QSettings("ScadaScout", "Layout")
+        settings.remove("geometry")
+        settings.remove("windowState")
+
+        # Ensure main window is in normal state and visible
+        try:
+            self.showNormal()
+            self.raise_()
+        except Exception:
+            pass
+
+        # Determine a sensible default size (centered, responsive to screen)
+        screen = QGuiApplication.primaryScreen()
+        if screen:
+            sg = screen.availableGeometry()
+            default_w = max(1000, min(1400, int(sg.width() * 0.78)))
+            default_h = max(700, min(900, int(sg.height() * 0.72)))
+            default_x = sg.x() + (sg.width() - default_w) // 2
+            default_y = sg.y() + (sg.height() - default_h) // 2
+            self.setGeometry(default_x, default_y, default_w, default_h)
+        else:
+            # fallback
+            self.resize(1200, 800)
+
+        # Make sure title/menu bar remains visible
+        try:
+            if hasattr(self, 'vscode_title_bar'):
+                self.vscode_title_bar.show()
+        except Exception:
+            pass
+
+        # Undock any floating docks and re-dock them in canonical areas
+        docks = [getattr(self, name) for name in ('dock_left', 'dock_right', 'dock_bottom', 'dock_events') if hasattr(self, name)]
+        if hasattr(self, 'dock_modbus_slave'):
+            docks.append(self.dock_modbus_slave)
+
+        for d in docks:
+            try:
+                if d.isFloating():
+                    d.setFloating(False)
+                # Ensure docks are visible (but optional ones can stay hidden)
+                d.setVisible(True)
+                d.show()
+            except Exception:
+                pass
+
+        # Remove and re-add to ensure correct areas (prevents weird tabbing/overlap)
+        for d in docks:
+            try:
+                self.removeDockWidget(d)
+            except Exception:
+                pass
+
+        # Re-add in canonical arrangement
+        if hasattr(self, 'dock_left'):
+            self.addDockWidget(Qt.LeftDockWidgetArea, self.dock_left)
+        if hasattr(self, 'dock_right'):
+            self.addDockWidget(Qt.BottomDockWidgetArea, self.dock_right)
+        if hasattr(self, 'dock_bottom'):
+            self.addDockWidget(Qt.BottomDockWidgetArea, self.dock_bottom)
+        if hasattr(self, 'dock_events'):
+            self.addDockWidget(Qt.RightDockWidgetArea, self.dock_events)
+        if hasattr(self, 'dock_modbus_slave'):
+            # keep Modbus slave hidden by default
+            self.addDockWidget(Qt.BottomDockWidgetArea, self.dock_modbus_slave)
+            self.dock_modbus_slave.setVisible(False)
+
+        # Tab bottom panels together and raise primary panel
+        try:
+            if hasattr(self, 'dock_right') and hasattr(self, 'dock_bottom'):
+                self.tabifyDockWidget(self.dock_right, self.dock_bottom)
+            if hasattr(self, 'dock_modbus_slave'):
+                self.tabifyDockWidget(self.dock_right, self.dock_modbus_slave)
+            if hasattr(self, 'dock_right'):
+                self.dock_right.raise_()
+        except Exception:
+            pass
+
+        # Apply conservative size proportions after layout stabilizes
+        def _apply_sizes():
+            try:
+                w = self.width()
+                h = self.height()
+                if hasattr(self, 'dock_left'):
+                    left_w = max(220, min(420, int(w * 0.22)))
+                    self.resizeDocks([self.dock_left], [left_w], Qt.Horizontal)
+                if hasattr(self, 'dock_right'):
+                    bottom_h = max(220, min(520, int(h * 0.36)))
+                    self.resizeDocks([self.dock_right], [bottom_h], Qt.Vertical)
+                if hasattr(self, 'dock_events'):
+                    right_w = max(260, min(420, int(w * 0.22)))
+                    self.resizeDocks([self.dock_events], [right_w], Qt.Horizontal)
+            except Exception:
+                pass
+
+        QTimer.singleShot(120, _apply_sizes)
+
+        # Persist a clean default layout so future restores are sane
+        QTimer.singleShot(300, lambda: settings.setValue('windowState', self.saveState()))
+        QTimer.singleShot(300, lambda: settings.setValue('geometry', self.saveGeometry()))
+
+        # Make menu/titlebar top-most in stacking order and ensure visible
+        try:
+            mw = self.menuWidget()
+            if mw:
+                mw.show()
+                mw.raise_()
+        except Exception:
+            pass
+
+        # Ensure core panels are visible after reset
+        try:
+            if hasattr(self, 'dock_left'):
+                self.dock_left.show()
+                self.dock_left.raise_()
+            if hasattr(self, 'dock_events'):
+                self.dock_events.show()
+            if hasattr(self, 'dock_right'):
+                self.dock_right.show()
+            if hasattr(self, 'dock_bottom'):
+                self.dock_bottom.show()
+        except Exception:
+            pass
+
+        # Hide central placeholder once panels are restored
+        try:
+            if hasattr(self, '_central_placeholder'):
+                self._central_placeholder.hide()
+        except Exception:
+            pass
+
+        # Defensive: hide any stray top-level, small, unparented widgets that
+        # accidentally appear inside the main window (common source of the
+        # 'floating icon in center' bug). Exclude known menus/titlebar.
+        try:
+            from PySide6.QtWidgets import QApplication, QMenu
+            _hidden = []
+            for tw in QApplication.topLevelWidgets():
+                # skip the main window, menus, and our title bar
+                if tw is self or isinstance(tw, QMenu) or getattr(tw, 'objectName', lambda: '')().startswith('VSCodeTitleBar'):
+                    continue
+                geom = tw.geometry()
+                if 24 <= geom.width() <= 220 and 24 <= geom.height() <= 220:
+                    # only hide widgets that lie (mostly) inside the main window
+                    if self.geometry().intersects(geom):
+                        try:
+                            tw.hide()
+                            _hidden.append(f"{tw.__class__.__name__}:{geom.getRect()}")
+                        except Exception:
+                            pass
+            if _hidden:
+                import logging as _logging
+                _logging.getLogger(__name__).info('Layout reset hid stray widgets: %s', ','.join(_hidden))
+        except Exception:
+            pass
+
+        # If device tree exists, restore a sensible selection (first device)
+        device_selected = False
+        try:
+            if hasattr(self, 'device_tree') and getattr(self.device_tree, 'model', None) is not None:
+                root = self.device_tree.model.invisibleRootItem()
+                # find first non-folder child (device) if present
+                first_index = None
+                for r in range(root.rowCount()):
+                    item = root.child(r, 0)
+                    if item and item.text():
+                        first_index = item.index()
+                        break
+                if first_index is not None:
+                    sel = self.device_tree.tree_view.selectionModel()
+                    from PySide6.QtCore import QItemSelectionModel
+                    sel.setCurrentIndex(first_index, QItemSelectionModel.ClearAndSelect | QItemSelectionModel.Rows)
+                    device_selected = True
+        except Exception:
+            device_selected = False
+
+        # Emit a log summary so the user can quickly verify the reset behavior
+        try:
+            import logging as _logging
+            _log = _logging.getLogger(__name__)
+            _log.info('Layout reset summary: dock_left.floating=%s, dock_left.area=%s, menu_visible=%s, device_selected=%s',
+                      getattr(self, 'dock_left').isFloating() if hasattr(self, 'dock_left') else None,
+                      self.dockWidgetArea(self.dock_left) if hasattr(self, 'dock_left') else None,
+                      bool(self.menuWidget()),
+                      device_selected)
+        except Exception:
+            pass
+
+        QApplication.instance().processEvents()
+        self.status_bar.showMessage("Layout reset to default (centered).", 3000)
 
     def _show_settings_dialog(self):
         """Opens the Settings Dialog for appearance customization."""
@@ -872,67 +1255,8 @@ class MainWindow(QMainWindow):
         theme = settings.value("theme", "IED Scout-like")
         
         # Only apply custom colors when the theme is Custom or the checkbox is enabled,
-        # otherwise keep the original theme color scheme intact.
-        custom_colors = settings.value("use_custom_colors", False, type=bool)
-        theme_is_custom = (settings.value("theme", "") == "Custom")
-
-        if custom_colors or theme_is_custom:
-            # Generate custom stylesheet based on saved colors (fall back to sensible defaults)
-            primary_color = settings.value("primary_color", "#3498db")
-            accent_color = settings.value("accent_color", "#2980b9")
-            success_color = settings.value("success_color", "#27ae60")
-            warning_color = settings.value("warning_color", "#f39c12")
-            error_color = settings.value("error_color", "#e74c3c")
-            # Prefer widget background for overall background, then main background
-            bg_main = settings.value("bg_main", "#f5f6f7")
-            bg_widget = settings.value("bg_widget", "#ffffff")
-            bg_alternate = settings.value("bg_alternate", "#f8f9fa")
-            bg_color = bg_widget
-            text_color = settings.value("text_color", "#2c3e50")
-            menu_bar_color = settings.value("menu_bar_color", "#2c3e50")
-            dock_title_color = settings.value("dock_title_color", "#3498db")
-            header_color = settings.value("header_color", "#34495e")
-            status_bar_color = settings.value("status_bar_color", "#34495e")
-            toolbar_color = settings.value("toolbar_color", "#34495e")
-            selection_color = settings.value("selection_color", "#3498db")
-            selection_text_color = settings.value("selection_text_color", "#ffffff")
-
-            # Regenerate stylesheet with custom colors
-            custom_style = styles.generate_custom_stylesheet(
-                primary_color, accent_color, success_color, warning_color,
-                error_color, bg_color, text_color
-            )
-            # Apply additional element-specific overrides for backgrounds and labels
-            custom_overrides = f"""
-QMainWindow {{ background-color: {bg_main}; }}
-QWidget {{ color: {text_color}; }}
-QLabel {{ color: {text_color}; }}
-QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox {{ background-color: {bg_widget}; color: {text_color}; }}
-QTreeView, QTableView, QListView {{ background-color: {bg_widget}; alternate-background-color: {bg_alternate}; color: {text_color}; }}
-QGroupBox {{ color: {text_color}; }}
-QTabWidget::pane {{ background-color: {bg_widget}; }}
-QTabBar::tab:selected {{ color: {text_color}; }}
-QMenuBar {{ background-color: {menu_bar_color}; }}
-QDockWidget::title {{ background-color: {dock_title_color}; }}
-QHeaderView::section {{ background-color: {header_color}; color: {text_color}; }}
-QStatusBar {{ background-color: {status_bar_color}; color: {text_color}; }}
-QToolBar {{ background-color: {toolbar_color}; }}
-QTreeView, QTableView, QListView {{ selection-background-color: {selection_color}; selection-color: {selection_text_color}; }}
-QLineEdit, QTextEdit, QPlainTextEdit {{ selection-background-color: {selection_color}; selection-color: {selection_text_color}; }}
-"""
-            base_style = custom_style + "\n" + custom_overrides
-        else:
-            # Use predefined theme
-            if theme == "Dark":
-                base_style = styles.DARK_THEME
-            elif theme == "IED Scout-like":
-                base_style = styles.IED_SCOUT_STYLE
-            elif theme == "Windows 11":
-                base_style = styles.WINDOWS_11_STYLE
-            elif theme == "iOS Style":
-                base_style = styles.IOS_STYLE
-            else:
-                base_style = styles.PROFESSIONAL_STYLE
+        # Theme is now managed by ThemeManager - stylesheet is applied automatically
+        # No need to manually apply base_style here as theme_manager handles it
         
         # Apply font settings
         font_family = settings.value("font_family", "Segoe UI")
@@ -998,7 +1322,10 @@ QTabBar::tab {{ padding: {widget_padding + 2}px {button_padding + 8}px; font-siz
         # Only append style_extra if not already present in base_style
         overrides += "\n" + style_extra
 
-        QApplication.instance().setStyleSheet(base_style + "\n" + overrides)
+        # Theme is now managed by ThemeManager, so no need to apply base_style manually
+        # Just apply the overrides on top of the current theme
+        current_stylesheet = QApplication.instance().styleSheet()
+        QApplication.instance().setStyleSheet(current_stylesheet + "\n" + overrides)
 
         # Apply icon size to toolbar if present
         try:
@@ -1548,6 +1875,83 @@ QTabBar::tab {{ padding: {widget_padding + 2}px {button_padding + 8}px; font-siz
             if device:
                 # Passing the device object tells SignalTableModel to use device.root_node
                 self.signals_view.set_filter_node(device, device_name)
+    
+    def _set_theme(self, theme_name: str):
+        """Set application theme."""
+        from src.ui.theme_presets import ThemeType
+        
+        if theme_name == "dark":
+            self.theme_manager.set_theme(ThemeType.DARK)
+        elif theme_name == "bright":
+            self.theme_manager.set_theme(ThemeType.BRIGHT)
+        
+        if self.event_logger:
+            self.event_logger.info("Theme", f"Theme changed to {theme_name.title()}")
+    
+    def _toggle_theme(self):
+        """Toggle between dark and bright themes."""
+        self.theme_manager.toggle_theme()
+    
+    def _on_theme_changed(self, theme_name: str):
+        """Handle theme changed event."""
+        # Update VSCode title bar theme
+        if hasattr(self, 'vscode_title_bar'):
+            self.vscode_title_bar.update_theme()
+        else:
+            # Fallback to menu bar update for non-VSCode mode
+            self._update_menu_bar_theme()
+        
+        # Force repaint to apply new theme immediately
+        QApplication.instance().processEvents()
+    
+    def _update_menu_bar_theme(self):
+        """Update menu bar colors based on current theme."""
+        try:
+            from src.ui.theme_presets import ColorRole
+            
+            bg_color = self.theme_manager.get_color(ColorRole.TOOLBAR_BACKGROUND)
+            text_color = self.theme_manager.get_color(ColorRole.TEXT_PRIMARY)
+            border_color = self.theme_manager.get_color(ColorRole.BORDER)
+            
+            # Apply to menu bar
+            self.menuBar().setStyleSheet(f"""
+                QMenuBar {{
+                    background-color: {bg_color};
+                    color: {text_color};
+                    border-bottom: 1px solid {border_color};
+                }}
+                QMenuBar::item {{
+                    color: {text_color};
+                }}
+            """)
+            
+            # Update window title in window title bar
+            self.setWindowTitle(f"Scada Scout - {self.theme_manager.get_current_theme().value.title()} Theme")
+            
+        except Exception:
+            pass
+    
+    def _update_title_bar_theme(self):
+        """Update title bar widget theme if available."""
+        if self._title_bar:
+            self._title_bar._apply_theme()
+        if hasattr(self, 'vscode_title_bar'):
+            self.vscode_title_bar.update_theme()
+    
+    def _on_minimize(self):
+        """Minimize window."""
+        self.showMinimized()
+    
+    def _on_maximize_restore(self):
+        """Toggle maximize/restore window."""
+        if self.isMaximized():
+            self.showNormal()
+            if hasattr(self, 'vscode_title_bar'):
+                self.vscode_title_bar.btn_max.setText("□")
+        else:
+            self.showMaximized()
+            if hasattr(self, 'vscode_title_bar'):
+                self.vscode_title_bar.btn_max.setText("❐")
 
     def closeEvent(self, event):
         """Handle window close event."""

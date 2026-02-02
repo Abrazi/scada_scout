@@ -355,8 +355,10 @@ class PLCIDEWindow(QMainWindow):
         layout.addWidget(QLabel("Variables"))
         
         self.var_table = QTableWidget()
-        self.var_table.setColumnCount(4)
-        self.var_table.setHorizontalHeaderLabels(["Name", "Type", "Value", "Quality"])
+        self.var_table.setColumnCount(6)  # Added Forced and Actions columns
+        self.var_table.setHorizontalHeaderLabels(["Name", "Type", "Value", "Quality", "Forced", "Actions"])
+        self.var_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.var_table.customContextMenuRequested.connect(self._show_variable_context_menu)
         layout.addWidget(self.var_table)
         
         return widget
@@ -413,6 +415,18 @@ class PLCIDEWindow(QMainWindow):
         save_action.setShortcut(QKeySequence.Save)
         save_action.triggered.connect(self._save_program)
         file_menu.addAction(save_action)
+        
+        file_menu.addSeparator()
+        
+        export_action = QAction("Export Program...", self)
+        export_action.setShortcut(QKeySequence("Ctrl+E"))
+        export_action.triggered.connect(self._export_program)
+        file_menu.addAction(export_action)
+        
+        import_action = QAction("Import Program...", self)
+        import_action.setShortcut(QKeySequence("Ctrl+I"))
+        import_action.triggered.connect(self._import_program)
+        file_menu.addAction(import_action)
         
         file_menu.addSeparator()
         
@@ -622,6 +636,80 @@ END_PROGRAM
         self.current_program.source_code = self.editor.toPlainText()
         self._log(f"Saved program: {self.current_program.name}")
     
+    def _export_program(self):
+        """Export current program to .st file."""
+        if not self.current_program:
+            QMessageBox.warning(self, "No Program", "No program loaded to export.")
+            return
+        
+        from PySide6.QtWidgets import QFileDialog
+        
+        # Save first
+        self._save_program()
+        
+        # Get file path
+        default_name = f"{self.current_program.name}.st"
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Export Program", default_name, "Structured Text (*.st);;All Files (*)"
+        )
+        
+        if file_path:
+            try:
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write(self.current_program.source_code)
+                self._log(f"✓ Exported program to: {file_path}")
+                QMessageBox.information(self, "Export Success", f"Program exported to:\n{file_path}")
+            except Exception as e:
+                self._log(f"✗ Export failed: {e}", "error")
+                QMessageBox.critical(self, "Export Error", f"Failed to export program:\n{e}")
+    
+    def _import_program(self):
+        """Import program from .st file."""
+        from PySide6.QtWidgets import QFileDialog
+        
+        # Get file path
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Import Program", "", "Structured Text (*.st);;All Files (*)"
+        )
+        
+        if file_path:
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    source_code = f.read()
+                
+                # Get program name
+                program_name = Path(file_path).stem
+                existing_names = [p.name for p in self.plc_ext.programs]
+                
+                if program_name in existing_names:
+                    # Ask for new name
+                    program_name, ok = QInputDialog.getText(
+                        self, "Program Name", 
+                        f"Program '{program_name}' already exists. Enter a new name:",
+                        text=f"{program_name}_imported"
+                    )
+                    if not ok or not program_name:
+                        return
+                
+                # Create new program
+                new_program = PLCProgram(
+                    program_id=f"PRG_{program_name}",
+                    name=program_name,
+                    language=IEC61131Language.ST,
+                    source_code=source_code
+                )
+                
+                self.plc_ext.add_program(new_program)
+                self._update_program_tree()
+                self._load_program(new_program)
+                
+                self._log(f"✓ Imported program: {program_name}")
+                QMessageBox.information(self, "Import Success", f"Program '{program_name}' imported successfully!")
+                
+            except Exception as e:
+                self._log(f"✗ Import failed: {e}", "error")
+                QMessageBox.critical(self, "Import Error", f"Failed to import program:\n{e}")
+    
     def _compile_program(self):
         """Compile current program."""
         if not self.current_program:
@@ -753,8 +841,23 @@ END_PROGRAM
         self.mode_label.setText(mode.value.upper())
         self.mode_label.setStyleSheet(f"QLabel {{ background-color: {color}; color: white; padding: 5px 15px; }}")
         
-        # Scan time
+        # Scan time with statistics
         self.scan_label.setText(f"Scan: {self.plc_ext.scan_time_ms:.1f}ms")
+        
+        # Update scan statistics
+        if hasattr(self.runtime, 'scan_times') and self.runtime.scan_times:
+            min_scan = min(self.runtime.scan_times)
+            avg_scan = sum(self.runtime.scan_times) / len(self.runtime.scan_times)
+            max_scan = max(self.runtime.scan_times)
+            self.stats_label.setText(f"Min/Avg/Max: {min_scan:.1f}/{avg_scan:.1f}/{max_scan:.1f}ms")
+            
+            # Visual warning if scan time exceeds target
+            if max_scan > 100:  # Warning threshold
+                self.stats_label.setStyleSheet("QLabel { color: red; }")
+            elif max_scan > 50:
+                self.stats_label.setStyleSheet("QLabel { color: orange; }")
+            else:
+                self.stats_label.setStyleSheet("QLabel { color: white; }")
         
         # Update all panels if running
         if mode in (PLCMode.RUN, PLCMode.DEBUG) and self.current_program:
@@ -763,7 +866,7 @@ END_PROGRAM
             self._update_callstack()
     
     def _update_variable_table(self):
-        """Update variable table with current values."""
+        """Update variable table with current values and force status."""
         if not self.current_program:
             self.var_table.setRowCount(0)
             return
@@ -777,10 +880,125 @@ END_PROGRAM
         self.var_table.setRowCount(len(all_vars))
         
         for i, var in enumerate(all_vars):
+            # Name
             self.var_table.setItem(i, 0, QTableWidgetItem(var.name))
+            
+            # Type
             self.var_table.setItem(i, 1, QTableWidgetItem(var.data_type.value))
-            self.var_table.setItem(i, 2, QTableWidgetItem(str(var.current_value or "")))
+            
+            # Value (show forced value if forced)
+            if var.forced:
+                value_text = f"{var.forced_value} (forced)"
+                value_item = QTableWidgetItem(value_text)
+                value_item.setForeground(QColor(255, 165, 0))  # Orange for forced
+            else:
+                value_item = QTableWidgetItem(str(var.current_value or ""))
+            self.var_table.setItem(i, 2, value_item)
+            
+            # Quality
             self.var_table.setItem(i, 3, QTableWidgetItem(var.quality.value))
+            
+            # Forced status
+            forced_item = QTableWidgetItem("✓" if var.forced else "")
+            self.var_table.setItem(i, 4, forced_item)
+            
+            # Action buttons
+            action_widget = QWidget()
+            action_layout = QHBoxLayout(action_widget)
+            action_layout.setContentsMargins(2, 2, 2, 2)
+            
+            if var.forced:
+                release_btn = QPushButton("Release")
+                release_btn.clicked.connect(lambda checked, v=var: self._release_variable(v))
+                action_layout.addWidget(release_btn)
+            else:
+                force_btn = QPushButton("Force")
+                force_btn.clicked.connect(lambda checked, v=var: self._force_variable(v))
+                action_layout.addWidget(force_btn)
+            
+            self.var_table.setCellWidget(i, 5, action_widget)
+    
+    def _show_variable_context_menu(self, position):
+        """Show context menu for variable operations."""
+        row = self.var_table.rowAt(position.y())
+        if row < 0:
+            return
+        
+        if not self.current_program:
+            return
+        
+        all_vars = (
+            self.current_program.input_variables.variables +
+            self.current_program.output_variables.variables +
+            self.current_program.local_variables.variables
+        )
+        
+        if row >= len(all_vars):
+            return
+        
+        var = all_vars[row]
+        
+        menu = QMenu(self)
+        
+        if var.forced:
+            release_action = QAction("Release Force", self)
+            release_action.triggered.connect(lambda: self._release_variable(var))
+            menu.addAction(release_action)
+        else:
+            force_action = QAction("Force Value...", self)
+            force_action.triggered.connect(lambda: self._force_variable(var))
+            menu.addAction(force_action)
+        
+        menu.addSeparator()
+        
+        copy_action = QAction("Copy Value", self)
+        copy_action.triggered.connect(lambda: self._copy_variable_value(var))
+        menu.addAction(copy_action)
+        
+        menu.exec(self.var_table.viewport().mapToGlobal(position))
+    
+    def _force_variable(self, var: PLCVariable):
+        """Force a variable to a specific value."""
+        current_val = var.forced_value if var.forced else var.current_value
+        value, ok = QInputDialog.getText(
+            self, 
+            f"Force {var.name}",
+            f"Enter value for {var.name} ({var.data_type.value}):",
+            text=str(current_val or "")
+        )
+        
+        if ok and value:
+            try:
+                # Convert to appropriate type
+                if var.data_type == PLCDataType.BOOL:
+                    converted = value.lower() in ('true', '1', 'yes')
+                elif var.data_type in (PLCDataType.INT, PLCDataType.DINT, PLCDataType.SINT):
+                    converted = int(value)
+                elif var.data_type in (PLCDataType.REAL, PLCDataType.LREAL):
+                    converted = float(value)
+                else:
+                    converted = value
+                
+                var.forced = True
+                var.forced_value = converted
+                self._log(f"✓ Forced {var.name} = {converted}")
+                self._update_variable_table()
+            except ValueError as e:
+                QMessageBox.warning(self, "Invalid Value", f"Cannot convert '{value}' to {var.data_type.value}")
+    
+    def _release_variable(self, var: PLCVariable):
+        """Release a forced variable."""
+        var.forced = False
+        var.forced_value = None
+        self._log(f"✓ Released {var.name}")
+        self._update_variable_table()
+    
+    def _copy_variable_value(self, var: PLCVariable):
+        """Copy variable value to clipboard."""
+        from PySide6.QtWidgets import QApplication
+        value = var.forced_value if var.forced else var.current_value
+        QApplication.clipboard().setText(str(value))
+        self._log(f"Copied {var.name} = {value}")
     
     def _setup_debug_shortcuts(self):
         """Setup keyboard shortcuts for debugging."""
@@ -924,6 +1142,19 @@ END_PROGRAM
     
     def _update_debug_ui(self):
         """Update debug UI elements after step."""
+        # Update current line highlight
+        current_line = self.runtime.debug_engine.current_line
+        self.code_editor.current_debug_line = current_line
+        self.code_editor.line_number_area.update()
+        
+        # Scroll to current line if set
+        if current_line:
+            cursor = self.code_editor.textCursor()
+            cursor.setPosition(0)
+            cursor.movePosition(QTextCursor.Down, QTextCursor.MoveAnchor, current_line - 1)
+            self.code_editor.setTextCursor(cursor)
+            self.code_editor.centerCursor()
+        
         QTimer.singleShot(100, self._update_callstack)
         QTimer.singleShot(100, self._update_watch_list)
         QTimer.singleShot(100, self._update_variable_table)

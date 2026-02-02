@@ -33,6 +33,7 @@ class SettingsDialog(QDialog):
         self.settings = QSettings("ScadaScout", "UI")
         self._setup_ui()
         self._load_settings()
+        self._sync_epic_theme_combo()
         
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -90,22 +91,46 @@ class SettingsDialog(QDialog):
         widget = QWidget()
         layout = QVBoxLayout(widget)
         
-        # Theme selection
-        theme_group = QGroupBox("Theme")
+        # Unified Theme selection
+        theme_group = QGroupBox("🎨 Application Theme")
         theme_layout = QFormLayout(theme_group)
         
         self.theme_combo = QComboBox()
-        self.theme_combo.addItems(["IED Scout-like", "Windows 11", "iOS Style", "Professional (Light)", "Dark", "Custom"])
-        self.theme_combo.currentTextChanged.connect(self._on_theme_changed)
-        theme_layout.addRow("Color Theme:", self.theme_combo)
+        self.theme_combo.addItems([
+            "Epic Dark 🌙",
+            "Epic Bright ☀️",
+            "─────────────",  # Separator
+            "IED Scout-like",
+            "Windows 11",
+            "iOS Style",
+            "Professional (Light)",
+            "Dark",
+            "Custom"
+        ])
+        self.theme_combo.currentTextChanged.connect(self._on_unified_theme_changed)
+        theme_layout.addRow("Theme:", self.theme_combo)
+        
+        # Theme description
+        theme_desc = QLabel(
+            "Epic Dark: Optimized for 24/7 control rooms\n"
+            "Epic Bright: Optimized for daylight operation\n"
+            "Legacy themes available for compatibility"
+        )
+        theme_desc.setStyleSheet("font-size: 9pt; color: gray;")
+        theme_layout.addRow("", theme_desc)
+        
+        # Quick toggle button
+        toggle_theme_btn = QPushButton("Toggle Epic Themes (Ctrl+Shift+T)")
+        toggle_theme_btn.setToolTip("Toggle between Epic Dark and Epic Bright")
+        toggle_theme_btn.clicked.connect(self._toggle_epic_theme)
+        theme_layout.addRow("", toggle_theme_btn)
 
         # Use custom colors (enabled automatically when theme = Custom)
         self.use_custom_colors = QCheckBox("Use custom colors (from Colors tab)")
         self.use_custom_colors.setChecked(False)
         theme_layout.addRow("", self.use_custom_colors)
         
-        # Capture backend preference moved to Network tab (keeps Appearance focused)
-        
+        # Style selector
         self.style_combo = QComboBox()
         self.style_combo.addItems(["Modern", "Classic", "Flat"])
         theme_layout.addRow("Style:", self.style_combo)
@@ -134,6 +159,58 @@ class SettingsDialog(QDialog):
         layout.addStretch()
         
         return widget
+    
+    def _on_unified_theme_changed(self, theme_text: str):
+        """Handle unified theme selection change."""
+        # Ignore separator
+        if theme_text.startswith("─"):
+            return
+        
+        # Check if it's an Epic theme
+        if "Epic" in theme_text:
+            from src.ui.theme_manager import get_theme_manager
+            from src.ui.theme_presets import ThemeType
+            
+            theme_manager = get_theme_manager()
+            
+            if "Dark" in theme_text:
+                theme_manager.set_theme(ThemeType.DARK)
+            elif "Bright" in theme_text:
+                theme_manager.set_theme(ThemeType.BRIGHT)
+            
+            # Update main window title bar
+            if self.parent():
+                main_window = self.parent()
+                if hasattr(main_window, '_update_title_bar_theme'):
+                    main_window._update_title_bar_theme()
+        else:
+            # Legacy theme - call old handler
+            self._on_theme_changed(theme_text)
+        
+        self.settings_changed.emit()
+    
+    def _toggle_epic_theme(self):
+        """Toggle between Epic Dark and Bright themes."""
+        from src.ui.theme_manager import get_theme_manager
+        
+        theme_manager = get_theme_manager()
+        theme_manager.toggle_theme()
+        
+        # Update combo box to reflect the change
+        self.theme_combo.blockSignals(True)
+        if theme_manager.is_dark_theme():
+            self.theme_combo.setCurrentText("Epic Dark 🌙")
+        else:
+            self.theme_combo.setCurrentText("Epic Bright ☀️")
+        self.theme_combo.blockSignals(False)
+        
+        # Update main window title bar
+        if self.parent():
+            main_window = self.parent()
+            if hasattr(main_window, '_update_title_bar_theme'):
+                main_window._update_title_bar_theme()
+        
+        self.settings_changed.emit()
         
     def _create_typography_tab(self):
         """Create the typography settings tab."""
@@ -723,8 +800,19 @@ For more details, see README.md and docs/ folder.
             
     def _load_settings(self):
         """Load saved settings."""
-        # Appearance
-        self.theme_combo.setCurrentText(self.settings.value("theme", "IED Scout-like"))
+        # Appearance - check for Epic theme first, then legacy
+        saved_theme = self.settings.value("theme", "Epic Dark 🌙")
+        
+        # If saved theme is one of the Epic themes, use it directly
+        # Otherwise, keep it for backward compatibility
+        if saved_theme in ["Epic Dark 🌙", "Epic Bright ☀️"]:
+            self.theme_combo.setCurrentText(saved_theme)
+        elif saved_theme in ["IED Scout-like", "Windows 11", "iOS Style", "Professional (Light)", "Dark", "Custom"]:
+            self.theme_combo.setCurrentText(saved_theme)
+        else:
+            # Default to Epic Dark if unrecognized
+            self.theme_combo.setCurrentText("Epic Dark 🌙")
+        
         self.use_custom_colors.setChecked(self.settings.value("use_custom_colors", False, type=bool))
         # capture_backend moved to Network tab
         try:
@@ -787,6 +875,25 @@ For more details, see README.md and docs/ folder.
                 self.copy_tag_tokenized.setChecked(True)
             except Exception:
                 pass
+    
+    def _sync_epic_theme_combo(self):
+        """Sync theme combo box with current theme."""
+        try:
+            from src.ui.theme_manager import get_theme_manager
+            
+            theme_manager = get_theme_manager()
+            
+            # Temporarily disconnect signal to avoid triggering change
+            self.theme_combo.blockSignals(True)
+            
+            if theme_manager.is_dark_theme():
+                self.theme_combo.setCurrentText("Epic Dark 🌙")
+            else:
+                self.theme_combo.setCurrentText("Epic Bright ☀️")
+            
+            self.theme_combo.blockSignals(False)
+        except Exception:
+            pass
 
         # Network / Capture defaults
         try:

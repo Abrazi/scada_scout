@@ -752,19 +752,22 @@ class DeviceTreeWidget(QWidget):
             if quality is not None:
                 try:
                     from src.models.device_models import SignalQuality
+                    from src.ui.theme_manager import get_theme_manager
+                    from src.ui.theme_presets import ColorRole
+                    
+                    theme = get_theme_manager()
+                    
                     if quality == SignalQuality.GOOD:
-                        brush = QBrush(QColor('darkgreen'))
+                        brush = QBrush(QColor(theme.get_color(ColorRole.QUALITY_GOOD)))
                     elif quality == SignalQuality.NOT_CONNECTED:
-                        brush = QBrush(QColor('grey'))
+                        brush = QBrush(QColor(theme.get_color(ColorRole.QUALITY_NOT_CONNECTED)))
                     else:
-                        brush = QBrush(QColor('darkorange'))
+                        brush = QBrush(QColor(theme.get_color(ColorRole.QUALITY_BAD)))
                 except Exception:
                     brush = None
 
             if brush:
                 desc_item.setForeground(brush)
-            else:
-                desc_item.setForeground(QBrush(QColor('black')))
 
             # Apply back to model (respect hierarchical parent)
             parent_index = desc_idx.parent()

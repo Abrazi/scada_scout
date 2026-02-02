@@ -1,6 +1,6 @@
 from PySide6.QtWidgets import QWidget, QHBoxLayout, QPushButton, QLabel, QSizePolicy
 from PySide6.QtCore import Qt, QSize, QPoint, Slot
-from PySide6.QtGui import QIcon
+from PySide6.QtGui import QIcon, QPalette, QColor
 import os
 
 
@@ -78,6 +78,9 @@ class TitleBarWidget(QWidget):
                 self._window.windowTitleChanged.connect(self._on_window_title_changed)
         except Exception:
             pass
+        
+        # Apply initial theme
+        self._apply_theme()
 
     def contextMenuEvent(self, event):
         # Provide a simple window control menu on right-click (Minimize/Maximize/Close)
@@ -171,3 +174,35 @@ class TitleBarWidget(QWidget):
     def mouseReleaseEvent(self, event):
         self._drag_pos = None
         return super().mouseReleaseEvent(event)
+    
+    def _apply_theme(self):
+        """Apply theme colors to title bar."""
+        try:
+            from src.ui.theme_manager import get_theme_manager
+            from src.ui.theme_presets import ColorRole
+            
+            theme_manager = get_theme_manager()
+            
+            # Get theme colors
+            bg_color = theme_manager.get_color(ColorRole.TOOLBAR_BACKGROUND)
+            text_color = theme_manager.get_color(ColorRole.TEXT_PRIMARY)
+            
+            # Apply to title bar
+            self.setStyleSheet(f"""
+                TitleBarWidget {{
+                    background-color: {bg_color};
+                }}
+            """)
+            
+            # Apply to title label
+            self.title_label.setStyleSheet(f"""
+                QLabel {{
+                    color: {text_color};
+                    font-weight: bold;
+                    font-size: 11pt;
+                }}
+            """)
+            
+        except Exception as e:
+            # Fallback to default if theme system not available
+            pass
