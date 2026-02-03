@@ -84,6 +84,11 @@ class DeviceManager(QObject):
         self._core.config_path = value
 
     @property
+    def folder_descriptions(self):
+        """Access to folder descriptions from core."""
+        return self._core.folder_descriptions
+
+    @property
     def subscription_manager(self):
         return self._core.subscription_manager
 

@@ -40,16 +40,26 @@ class WatchListManager(QObject):
     # Use `object` for response_ms so None can be emitted safely.
     signal_updated = QtSignal(str, object, object)
     watch_list_changed = QtSignal()  # Emitted when list is modified
+    polling_progress = QtSignal(int, int)  # current, total
     
     def __init__(self, device_manager):
         super().__init__()
         self.device_manager = device_manager
         self._watched_signals: Dict[str, WatchedSignal] = {}
         self._poll_interval_ms = 1000  # Default 1 second
+        self._max_poll_batch = 50  # Maximum signals to poll per batch
+        self._poll_index = 0  # Current position in polling rotation
+        self._pending_updates = []  # Batch pending UI updates
+        self._batch_update_active = False
         
         # Polling timer
         self._poll_timer = QTimer()
         self._poll_timer.timeout.connect(self._poll_all_signals)
+        
+        # Batch update timer (emit batched updates every 100ms)
+        self._batch_timer = QTimer()
+        self._batch_timer.timeout.connect(self._emit_batched_updates)
+        self._batch_timer.start(100)  # 100ms batch interval
         
         # Connect to DeviceManager updates
         if hasattr(self.device_manager, 'signal_updated'):
@@ -70,16 +80,27 @@ class WatchListManager(QObject):
         )
         
         self._watched_signals[watch_id] = watched
-        logger.info(f"Added signal to watch list: {watch_id}")
+        
+        # Auto-adjust batch size based on total signal count
+        total_signals = len(self._watched_signals)
+        if total_signals > 200:
+            self._max_poll_batch = 100  # Larger batches for 200+ signals
+        elif total_signals > 100:
+            self._max_poll_batch = 75   # Medium batches for 100-200 signals
+        else:
+            self._max_poll_batch = 50   # Default batch size
+        
+        logger.info(f"Added signal to watch list: {watch_id} (total: {total_signals}, batch: {self._max_poll_batch})")
         self.watch_list_changed.emit()
         
         # Start polling if not already running
         if not self._poll_timer.isActive():
             self._poll_timer.start(self._poll_interval_ms)
         
-        # Trigger immediate poll for this signal
-        from PySide6.QtCore import QTimer
-        QTimer.singleShot(0, self._poll_all_signals)
+        # Trigger immediate poll for this signal (only for small lists)
+        if total_signals < 50:
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(0, self._poll_all_signals)
     
     def remove_signal(self, watch_id: str):
         """Remove a signal from the watch list."""
@@ -130,10 +151,26 @@ class WatchListManager(QObject):
         return self._poll_interval_ms
     
     def _poll_all_signals(self):
-        """Poll all watched signals for updates."""
-        for watch_id, watched in self._watched_signals.items():
+        """Poll watched signals in chunks to prevent UI freezing."""
+        if not self._watched_signals:
+            return
+        
+        # Convert to list for indexed access
+        watch_items = list(self._watched_signals.items())
+        total_signals = len(watch_items)
+        
+        # Chunk polling: only poll up to _max_poll_batch signals per timer tick
+        start_idx = self._poll_index
+        end_idx = min(start_idx + self._max_poll_batch, total_signals)
+        
+        # Emit progress for large lists
+        if total_signals > 100:
+            self.polling_progress.emit(end_idx, total_signals)
+        
+        # Poll this chunk
+        for i in range(start_idx, end_idx):
+            watch_id, watched = watch_items[i]
             try:
-                # Read signal from device
                 # Record request timestamp
                 import time
                 watched.last_request_ts = time.time()
@@ -148,7 +185,6 @@ class WatchListManager(QObject):
                     watched.signal = updated_signal
                     # Compute RTT if possible
                     try:
-                        import time
                         if watched.last_request_ts:
                             rtt_ms = int(round((time.time() - watched.last_request_ts) * 1000))
                         else:
@@ -160,18 +196,37 @@ class WatchListManager(QObject):
                     if rtt_ms is not None:
                         if watched.max_response_ms is None or rtt_ms > watched.max_response_ms:
                             watched.max_response_ms = rtt_ms
-                        # Update the signal's last_rtt field for property dialog access
                         updated_signal.last_rtt = float(rtt_ms)
                         watched.signal.last_rtt = float(rtt_ms)
-                    self.signal_updated.emit(watch_id, updated_signal, rtt_ms)
+                    
+                    # Batch the update instead of emitting immediately
+                    self._pending_updates.append((watch_id, updated_signal, rtt_ms))
                 else:
-                    # Async read enqueued - DO NOT invalidate signal yet.
-                    # Wait for _on_device_signal_updated to handle the result
+                    # Async read enqueued
                     pass
                     
             except Exception as e:
                 logger.debug(f"Failed to poll {watch_id}: {e}")
+        
+        # Move to next chunk
+        self._poll_index = end_idx % total_signals if end_idx < total_signals else 0
+        
+        # Log progress for large lists
+        if total_signals > 100 and end_idx >= total_signals:
+            logger.debug(f"Completed polling cycle for {total_signals} signals")
 
+    def _emit_batched_updates(self):
+        """Emit pending signal updates in a batch."""
+        if not self._pending_updates:
+            return
+        
+        # Emit all pending updates
+        for watch_id, signal, rtt_ms in self._pending_updates:
+            self.signal_updated.emit(watch_id, signal, rtt_ms)
+        
+        # Clear batch
+        self._pending_updates.clear()
+    
     def _on_device_signal_updated(self, device_name: str, signal: Signal):
         """Handle signal updates from DeviceManager (e.g. from async workers)."""
         watch_id = f"{device_name}::{signal.address}"
@@ -192,12 +247,13 @@ class WatchListManager(QObject):
             if rtt_ms is not None:
                 if watched.max_response_ms is None or rtt_ms > watched.max_response_ms:
                     watched.max_response_ms = rtt_ms
-                # Update the signal's last_rtt field for property dialog access
                 signal.last_rtt = float(rtt_ms)
                 watched.signal.last_rtt = float(rtt_ms)
-            # Clear the last_request_ts to avoid reusing it for future unsolicited updates
+            # Clear the last_request_ts
             watched.last_request_ts = None
-            self.signal_updated.emit(watch_id, signal, rtt_ms)
+            
+            # Batch the update instead of emitting immediately
+            self._pending_updates.append((watch_id, signal, rtt_ms))
     
     def save_to_file(self, filepath: str):
         """Save watch list to JSON file."""

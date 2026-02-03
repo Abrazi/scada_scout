@@ -53,9 +53,15 @@ class ControlObjectRuntime:
     originator_id: str = "iedexplorer"
     sbo_reference: str = "" # Path to SBO or SBOw attribute
     
+    # WINDOWS FIX: Keep ControlObjectClient alive between SELECT and OPERATE
+    control_client: any = None  # Stored client from SELECT phase
+    client_created_at: Optional[datetime] = None  # When client was created
+    
     def reset(self):
         self.state = ControlState.IDLE
         self.last_error = ""
+        self.control_client = None
+        self.client_created_at = None
 
     def update_from_ctl_model_int(self, val: int):
         try:

@@ -332,12 +332,27 @@ class DeviceTreeWidget(QWidget):
 
     def _setup_view(self):
         """Configures the TreeView appearance."""
+        # Core tree functionality - MUST be set before other settings
+        self.tree_view.setRootIsDecorated(True)  # Show branch lines and expand/collapse icons
+        self.tree_view.setItemsExpandable(True)  # Allow items to be expanded
+        self.tree_view.setExpandsOnDoubleClick(True)  # Double-click to expand
+        self.tree_view.setIndentation(20)  # Set proper indentation for hierarchy
+        self.tree_view.setAnimated(True)  # Smooth expand/collapse animation
+        
+        # Visual settings
         self.tree_view.setAlternatingRowColors(True)
+        self.tree_view.setUniformRowHeights(False)  # Allow variable row heights
+        
+        # Selection and editing
         self.tree_view.setSelectionBehavior(QTreeView.SelectRows)
         self.tree_view.setSelectionMode(QTreeView.ExtendedSelection)  # Enable Ctrl/Shift multi-selection
         self.tree_view.setEditTriggers(QTreeView.DoubleClicked | QTreeView.EditKeyPressed)
+        
+        # Header configuration
         self.tree_view.header().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.tree_view.header().setMinimumSectionSize(120)  # Make cells bigger by default
+        self.tree_view.header().setSectionsMovable(True)
+        self.tree_view.header().setStretchLastSection(True)
         
         # Context Menu
         self.tree_view.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -346,24 +361,22 @@ class DeviceTreeWidget(QWidget):
         # Double-click handler for status column
         self.tree_view.doubleClicked.connect(self._on_double_click)
         
-        header = self.tree_view.header()
-        header.setSectionsMovable(True)
-        header.setSectionResizeMode(QHeaderView.ResizeToContents)
-        header.setStretchLastSection(True)
-        
-        # Make cells bigger by default
-        self.tree_view.setStyleSheet("QTreeView::item { padding: 3px; }")
+        # NO stylesheet - use default Qt styling to ensure branch decorations work
+        # Any custom styling can hide the +/- icons
         
     def _setup_model(self, populate=True):
         """Initializes the model and optionally populates with existing devices."""
         self.model = QStandardItemModel()
-        # Column order (logical): Name, Status, Description, FC, Type
+        # Column order: Name, Status, Description, FC, Type
+        # Name MUST be first (column 0) for tree decorations to show
         self.model.setHorizontalHeaderLabels(["Name", "Status", "Description", "FC", "Type"])
         self.tree_view.setModel(self.model)
 
-        # Keep tree hierarchy on logical column 0, but show Status first visually
-        header = self.tree_view.header()
-        header.moveSection(header.visualIndex(1), 0)
+        # Do NOT move columns - tree decorations only appear on first visual column
+        # The tree hierarchy is in column 0 (Name), so it must stay first visually
+        
+        # Explicitly ensure the tree is configured properly
+        self.tree_view.reset()  # Reset view state
         
         self.folder_items.clear()
         self.device_items.clear()
@@ -430,10 +443,17 @@ class DeviceTreeWidget(QWidget):
                     parent.appendRow([name_item, status_item, desc_item, fc_item, type_item])
                     self.device_items[device.config.name] = name_item
                     
+                    # If device was added to a folder, expand the folder to show it
+                    if device.config.folder and parent != self.model.invisibleRootItem():
+                        self.tree_view.expand(parent.index())
+                    
                     # Add children if discovery happened
                     if device.root_node:
                         for child in device.root_node.children:
                             self._add_node_recursive(name_item, child)
+                        
+                        # Expand the device node to show its children
+                        self.tree_view.expand(name_item.index())
                 finally:
                     self._suppress_selection_changed = False
             
@@ -464,6 +484,7 @@ class DeviceTreeWidget(QWidget):
         
     def _refresh_device_node(self, device_name):
         """Refreshes a device node (re-adds children)."""
+        logger.info(f"Refreshing device '{device_name}'")
         item = self.device_items.get(device_name)
         if item:
             # 1. Capture current selection (if inside this device)
@@ -477,16 +498,21 @@ class DeviceTreeWidget(QWidget):
             
             # 2. Clear children
             if item.rowCount() > 0:
+                logger.info(f"  Clearing {item.rowCount()} existing children")
                 item.removeRows(0, item.rowCount())
             
             # 3. Re-populate
             device = self.device_manager.get_device(device_name)
             if device and device.root_node:
+                child_count = len(device.root_node.children)
+                logger.info(f"  Adding {child_count} children to '{device_name}'")
                 for child in device.root_node.children:
                     self._add_node_recursive(item, child)
             
-            # 4. Auto-expand
+            # 4. Auto-expand and update view
             self.tree_view.expand(item.index())
+            self.tree_view.update(item.index())  # Force view refresh
+            logger.info(f"  Expanded and refreshed device '{device_name}'")
             
             # 5. Restore selection?
             # If the user had the Device itself selected, re-select it.
@@ -530,6 +556,8 @@ class DeviceTreeWidget(QWidget):
         # Row layout: [Name, Status, Description, FC, Type]
         self.model.invisibleRootItem().appendRow([folder_item, QStandardItem(""), desc_item, QStandardItem(""), QStandardItem("")])
         self.folder_items[folder_name] = folder_item
+        
+        logger.info(f"Created folder '{folder_name}' in tree")
         return folder_item
 
     def _add_device_node(self, device):
@@ -538,6 +566,8 @@ class DeviceTreeWidget(QWidget):
         if self._batch_loading:
             self._pending_devices.append(device)
             return
+        
+        logger.info(f"Adding device '{device.config.name}' to tree (folder='{device.config.folder}', has_root_node={device.root_node is not None})")
         
         # Suppress selection events while programmatically adding device
         self._suppress_selection_changed = True
@@ -566,10 +596,34 @@ class DeviceTreeWidget(QWidget):
             parent.appendRow([name_item, status_item, desc_item, fc_item, type_item])
             self.device_items[device.config.name] = name_item
             
+            # If device was added to a folder, expand the folder to show it
+            if device.config.folder and parent != self.model.invisibleRootItem():
+                logger.info(f"  Expanding folder '{device.config.folder}' to show device")
+                self.tree_view.expand(parent.index())
+            
+            # Verify item was added
+            logger.info(f"  Device item has {name_item.rowCount()} rows (children)")
+            
             # Recursively add children if discovery happened
             if device.root_node:
+                child_count = len(device.root_node.children)
+                logger.info(f"  Adding {child_count} children to device '{device.config.name}'")
                 for child in device.root_node.children:
                     self._add_node_recursive(name_item, child)
+                
+                logger.info(f"  After adding children, device item has {name_item.rowCount()} rows")
+                
+                # Expand the device node to show its children
+                self.tree_view.expand(name_item.index())
+                logger.info(f"  Expanded device '{device.config.name}' to show children")
+                
+                # Force viewport update to ensure decorations appear
+                self.tree_view.viewport().update()
+            else:
+                logger.info(f"  Device '{device.config.name}' has no root_node yet")
+                
+            # Log tree state
+            logger.info(f"Tree now has {self.model.rowCount()} top-level items")
         finally:
             self._suppress_selection_changed = False
 
@@ -579,6 +633,9 @@ class DeviceTreeWidget(QWidget):
         item_name = QStandardItem(node.name)
         item_name.setEditable(True)
         item_name.setData(node, Qt.UserRole)
+        
+        # Ensure item is selectable and enabled
+        item_name.setFlags(item_name.flags() | Qt.ItemIsEnabled | Qt.ItemIsSelectable)
 
         # Col 1: Status (Empty for nodes)
         status_item = QStandardItem("")
@@ -616,6 +673,11 @@ class DeviceTreeWidget(QWidget):
         if hasattr(node, "signals") and node.signals:
             for sig in node.signals:
                 self._add_signal_node(item_name, sig)
+        
+        # If this item has children, make sure Qt knows it's expandable
+        if item_name.hasChildren():
+            # This shouldn't be necessary, but let's be explicit
+            pass
     
     def _add_signal_node(self, parent_item: QStandardItem, sig):
         """Adds a signal as a child row."""

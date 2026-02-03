@@ -25,7 +25,7 @@ def _detect_incompatible_system_libs() -> list:
 # in incompatible libraries and producing obscure symbol lookup errors.
 
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(levelname)s:%(name)s: %(message)s')
 
 def main():
     """

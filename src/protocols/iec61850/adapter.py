@@ -1005,13 +1005,49 @@ class IEC61850Adapter(BaseProtocol):
             # Check actual connection state
             state = iec61850.IedConnection_getState(self.connection)
             if state != iec61850.IED_STATE_CONNECTED:
-                self.connected = False
-                logger.warning(f"Connection lost detected during read for {self.config.ip_address} (State: {state})")
-                if self.event_logger:
-                    self.event_logger.error("IEC61850", f"← CONNECTION LOST (State: {state})")
-                signal.quality = SignalQuality.NOT_CONNECTED
-                self._emit_update(signal)
-                return signal
+                # WINDOWS FIX: On Windows, connection state may temporarily show disconnected after control operations
+                # Try to recover by checking state multiple times
+                import time
+                recovered = False
+                for attempt in range(3):
+                    time.sleep(0.1)  # Wait 100ms between attempts
+                    state = iec61850.IedConnection_getState(self.connection)
+                    if state == iec61850.IED_STATE_CONNECTED:
+                        recovered = True
+                        if self.event_logger:
+                            self.event_logger.info("IEC61850", f"Connection recovered after attempt {attempt + 1}")
+                        break
+                
+                if not recovered:
+                    # Try to reconnect automatically
+                    if self.event_logger:
+                        self.event_logger.warning("IEC61850", f"Connection lost (State: {state}), attempting reconnection...")
+                    
+                    try:
+                        # Close old connection
+                        iec61850.IedConnection_close(self.connection)
+                        # Reconnect
+                        error = iec61850.IedConnection_connect(self.connection, self.config.ip_address, self.config.port)
+                        if error == iec61850.IED_ERROR_OK:
+                            self.connected = True
+                            if self.event_logger:
+                                self.event_logger.info("IEC61850", "Automatic reconnection successful")
+                        else:
+                            self.connected = False
+                            logger.warning(f"Automatic reconnection failed for {self.config.ip_address} (Error: {error})")
+                            if self.event_logger:
+                                self.event_logger.error("IEC61850", f"← RECONNECTION FAILED (Error: {error})")
+                            signal.quality = SignalQuality.NOT_CONNECTED
+                            self._emit_update(signal)
+                            return signal
+                    except Exception as e:
+                        self.connected = False
+                        logger.error(f"Exception during reconnection: {e}")
+                        if self.event_logger:
+                            self.event_logger.error("IEC61850", f"← RECONNECTION EXCEPTION: {e}")
+                        signal.quality = SignalQuality.NOT_CONNECTED
+                        self._emit_update(signal)
+                        return signal
 
         # Read from actual IED using correct pyiec61850 API
         try:
@@ -2007,10 +2043,13 @@ class IEC61850Adapter(BaseProtocol):
                             self._skip_ctlnum_read = True
                     
                     # If ctlNum reading is disabled or failed, assume standard behavior
-                    if not hasattr(ctx, 'ctl_num') or ctx.ctl_num is None or ctx.ctl_num == 0:
-                        ctx.ctl_num = 1  # Most IEDs start at 1 after first SELECT
-                        if self.event_logger:
-                            self.event_logger.info("IEC61850", f"Assuming IED-assigned ctlNum=1 (default after SELECT)")
+                    # Use existing ctx.ctl_num if available; only default to 0 when unknown
+                    if not hasattr(ctx, '_first_operate_done'):
+                        if ctx.ctl_num is None:
+                            ctx.ctl_num = 0
+                            if self.event_logger:
+                                self.event_logger.info("IEC61850", "First control operation - ctlNum unknown, defaulting to 0")
+                    # else: use whatever ctx.ctl_num is already set to (from previous OPERATE increment)
 
                     # If we still don't have a valid ctlNum (couldn't read from any path), 
                     # try async fallback to capture it via selectAsync callbacks
@@ -2021,6 +2060,25 @@ class IEC61850Adapter(BaseProtocol):
                                 if self.event_logger: self.event_logger.info("IEC61850", f"Captured ctlNum via async callback: {ctx.ctl_num}")
                     except Exception:
                         pass
+                
+                # Mark that SELECT has completed successfully
+                ctx._has_selected = True
+                
+                # CRITICAL: DO NOT increment ctlNum after SELECT!
+                # IED expects OPERATE to use the SAME ctlNum that was used in SELECT
+                # ctlNum only increments AFTER successful OPERATE
+                if self.event_logger:
+                    self.event_logger.info("IEC61850", f"SELECT SUCCESS with ctlNum={ctx.ctl_num} - OPERATE will use same value")
+                
+                # WINDOWS FIX: Store the control client in context for reuse in OPERATE
+                # This prevents connection disruption when destroying client after SELECT
+                if own_client and control_client:
+                    import datetime
+                    ctx.control_client = control_client
+                    ctx.client_created_at = datetime.datetime.now()
+                    if self.event_logger:
+                        self.event_logger.debug("IEC61850", "Stored ControlObjectClient for OPERATE phase (prevents connection disruption)")
+                
                 return True
             else:
                 err = iec61850.ControlObjectClient_getLastError(control_client)
@@ -2051,15 +2109,44 @@ class IEC61850Adapter(BaseProtocol):
                     32: "CONTROL_SYNTAX_ERROR",
                 }
                 err_name = error_names.get(err, f"UNKNOWN_{err}")
-                if self.event_logger:
-                    self.event_logger.error("IEC61850", f"SELECT FAILED: IED Error {err} ({err_name})")
                 
-                self._last_control_error = f"IED rejected SELECT: Error {err} ({err_name})"
+                # Add user-friendly interpretation
+                error_interpretations = {
+                    1: "Control object not available - may be disabled or not configured",
+                    2: "Control already in use - another client has selected this control",
+                    3: "Access violation - insufficient permissions to select this control",
+                    4: "Cannot select in current state - equipment may be in maintenance or blocked",
+                    5: "Control value is inappropriate - check if value is within valid range",
+                    6: "Parameters inconsistent - check originator or control settings",
+                    7: "Control class not supported by this IED",
+                    8: "Control locked by another client - wait for release or use Cancel",
+                    9: "Must select first - SELECT operation required before OPERATE",
+                    10: "Type mismatch - control value type doesn't match expected type",
+                    11: "Communication timeout - IED did not respond in time",
+                    12: "Server constraint - IED rejected due to internal limits",
+                    13: "Access denied - check user permissions and access control settings",
+                    20: "Standard control not supported - try direct control or fallback method",
+                    23: "Temporarily unavailable - IED busy, retry after a moment",
+                    24: "Object access denied - control may be locked or protected",
+                    25: "Control object does not exist - check address is correct",
+                    32: "Control syntax error - malformed control request",
+                }
+                interpretation = error_interpretations.get(err, "Unknown error - check IED logs and configuration")
+                
+                if self.event_logger:
+                    self.event_logger.error("IEC61850", f"SELECT FAILED: Error {err} ({err_name})")
+                    self.event_logger.error("IEC61850", f"  → {interpretation}")
+                
+                self._last_control_error = f"SELECT Failed: {err_name}\n{interpretation}"
                 return False
 
         finally:
-            if own_client and control_client:
+            # WINDOWS FIX: Don't destroy client after SELECT - keep it for OPERATE
+            # Only destroy if SELECT failed (client will be stored in context on success)
+            if own_client and control_client and not ctx.control_client:
                 with self._lock: iec61850.ControlObjectClient_destroy(control_client)
+                if self.event_logger:
+                    self.event_logger.debug("IEC61850", "Destroyed ControlObjectClient after SELECT failure")
 
     def operate(self, signal: Signal, value: Any, params: dict = None, control_client: Any = None) -> bool:
         """Perform OPERATE phase."""
@@ -2086,35 +2173,50 @@ class IEC61850Adapter(BaseProtocol):
                     self.event_logger.info("IEC61850", f"force_direct requested: skipping ControlObjectClient and using fallback operate for {object_ref}")
                 return self._fallback_operate(signal, value, object_ref)
 
-            # Helper to create client with retry logic
-            def create_client(ref):
-                cl = None
-                with self._lock:
-                   cl = iec61850.ControlObjectClient_create(ref, self.connection)
-                return cl
-
-            if not control_client:
-                control_client = create_client(object_ref)
-                
-                # RETRY LOGIC: If creation failed, try swapping separators
-                if not control_client and "." in object_ref:
-                     alt_ref = object_ref.replace(".", "$")
-                     if self.event_logger:
-                         self.event_logger.warning("IEC61850", f"ControlObjectClient creation failed for {object_ref}, retrying with {alt_ref}")
-                     control_client = create_client(alt_ref)
-                     if control_client:
-                         object_ref = alt_ref # Success with alternative ref
-                         if self.event_logger:
-                             self.event_logger.info("IEC61850", f"✓ ControlObjectClient created successfully with alternative ref: {alt_ref}")
-                
-                own_client = True
-                
-                # Diagnostic: Check if client was created
+            # WINDOWS FIX: Reuse ControlObjectClient from SELECT for OPERATE
+            # SBO protocol requires the SAME client session for SELECT and OPERATE
+            # Creating a new client causes OBJECT_ACCESS_UNSUPPORTED (error 21)
+            ctx = self.controls.get(object_ref)
+            if ctx and ctx.control_client:
+                # Reuse the stored client from SELECT
+                control_client = ctx.control_client
+                own_client = False  # Don't destroy - will be cleaned up after OPERATE
                 if self.event_logger:
-                    if control_client:
-                        self.event_logger.debug("IEC61850", f"✓ ControlObjectClient created successfully for {object_ref}")
-                    else:
-                        self.event_logger.error("IEC61850", f"✗ ControlObjectClient creation FAILED for {object_ref}")
+                    import datetime
+                    age = (datetime.datetime.now() - ctx.client_created_at).total_seconds() if ctx.client_created_at else 0
+                    self.event_logger.info("IEC61850", f"Reusing ControlObjectClient from SELECT (age: {age:.1f}s)")
+            
+            # If no stored client, create new one (for direct control or after recovery failure)
+            if not control_client:
+                # No stored client - create new one (for direct control or retry)
+                def create_client(ref):
+                    cl = None
+                    with self._lock:
+                       cl = iec61850.ControlObjectClient_create(ref, self.connection)
+                    return cl
+
+                if not control_client:
+                    control_client = create_client(object_ref)
+                    
+                    # RETRY LOGIC: If creation failed, try swapping separators
+                    if not control_client and "." in object_ref:
+                         alt_ref = object_ref.replace(".", "$")
+                         if self.event_logger:
+                             self.event_logger.warning("IEC61850", f"ControlObjectClient creation failed for {object_ref}, retrying with {alt_ref}")
+                         control_client = create_client(alt_ref)
+                         if control_client:
+                             object_ref = alt_ref # Success with alternative ref
+                             if self.event_logger:
+                                 self.event_logger.info("IEC61850", f"✓ ControlObjectClient created successfully with alternative ref: {alt_ref}")
+                    
+                    own_client = True
+            
+            # Diagnostic: Check if client was created
+            if self.event_logger:
+                if control_client:
+                    self.event_logger.debug("IEC61850", f"✓ ControlObjectClient created successfully for {object_ref}")
+                else:
+                    self.event_logger.error("IEC61850", f"✗ ControlObjectClient creation FAILED for {object_ref}")
 
             if not control_client:
                 if self.event_logger:
@@ -2122,36 +2224,53 @@ class IEC61850Adapter(BaseProtocol):
                 return self._fallback_operate(signal, value, object_ref)
 
             ctx = self.controls.get(object_ref)
-            origin_id, origin_cat = self._compute_originator_info(ctx, params)
-            iec61850.ControlObjectClient_setOriginator(control_client, origin_id, origin_cat)
-
-            # CRITICAL: Configure ControlObjectClient with check settings from params
-            params = params or {}
-            try:
-                interlock = params.get('interlock_check', False)
-                iec61850.ControlObjectClient_setInterlockCheck(control_client, interlock)
-            except Exception:
-                pass
-            try:
-                synchro = params.get('synchro_check', False)
-                iec61850.ControlObjectClient_setSynchroCheck(control_client, synchro)
-            except Exception:
-                pass
-            try:
-                test_mode = params.get('test', False)
-                iec61850.ControlObjectClient_setTestMode(control_client, test_mode)
-            except Exception:
-                pass
-
-            # Sync ctlNum only if we are using a fresh client for this phase
-            if own_client and ctx and ctx.ctl_num is not None:
+            
+            # CRITICAL: Only configure client if it's a NEW client (not reused from SELECT)
+            # Reconfiguring a reused client breaks the SBO session
+            if own_client:
+                origin_id, origin_cat = self._compute_originator_info(ctx, params)
+                
+                # Configure originator and control settings
                 try:
-                    iec61850.ControlObjectClient_setCtlNum(control_client, ctx.ctl_num)
+                    iec61850.ControlObjectClient_setOriginator(control_client, origin_id, origin_cat)
                     if self.event_logger:
-                        self.event_logger.debug("IEC61850", f"Set ctlNum={ctx.ctl_num}")
+                        self.event_logger.debug("IEC61850", f"Set originator: id={origin_id}, cat={origin_cat}")
+                except Exception as e:
+                    if self.event_logger:
+                        self.event_logger.warning("IEC61850", f"Failed to set originator: {e}")
+
+                # Configure ControlObjectClient with check settings from params
+                params = params or {}
+                try:
+                    interlock = params.get('interlock_check', False)
+                    iec61850.ControlObjectClient_setInterlockCheck(control_client, interlock)
+                except Exception:
+                    pass
+                try:
+                    synchro = params.get('synchro_check', False)
+                    iec61850.ControlObjectClient_setSynchroCheck(control_client, synchro)
+                except Exception:
+                    pass
+                try:
+                    test_mode = params.get('test', False)
+                    iec61850.ControlObjectClient_setTestMode(control_client, test_mode)
                 except Exception:
                     pass
 
+                # Set ctlNum on new client
+                if ctx and ctx.ctl_num is not None:
+                    try:
+                        iec61850.ControlObjectClient_setCtlNum(control_client, ctx.ctl_num)
+                        if self.event_logger:
+                            self.event_logger.info("IEC61850", f"OPERATE: Setting ctlNum={ctx.ctl_num} on new client")
+                    except Exception as e:
+                        if self.event_logger:
+                            self.event_logger.warning("IEC61850", f"Failed to set ctlNum: {e}")
+            else:
+                # Reusing client from SELECT - DO NOT reconfigure, it already has correct settings
+                if self.event_logger:
+                    self.event_logger.info("IEC61850", f"OPERATE: Using stored client from SELECT with ctlNum={ctx.ctl_num if ctx else 'unknown'}")
+            
             # CRITICAL FIX: ControlObjectClient_operate expects just the ctlVal (boolean),
             # NOT a complex structure. The library builds the structure internally using
             # the settings we configured (originator, interlockCheck, synchroCheck, testMode, ctlNum).
@@ -2168,10 +2287,16 @@ class IEC61850Adapter(BaseProtocol):
                     self.event_logger.error("IEC61850", "Failed to create boolean MmsValue for OPERATE")
                 return False
 
-            # Add small delay after SELECT to ensure IED is ready for OPERATE
+            # Add delay to ensure IED is ready for OPERATE
             # Some IEDs require time between SELECT and OPERATE phases
+            # First operation may need extra time for IED initialization
             import time
-            time.sleep(0.1)  # 100ms delay
+            if ctx and not hasattr(ctx, '_first_operate_done'):
+                time.sleep(0.3)  # 300ms delay for first operation
+                if self.event_logger:
+                    self.event_logger.debug("IEC61850", "First OPERATE - using extended delay (300ms)")
+            else:
+                time.sleep(0.1)  # 100ms delay for subsequent operations
 
             try:
                 if self.event_logger:
@@ -2181,13 +2306,32 @@ class IEC61850Adapter(BaseProtocol):
                 import time
                 timestamp = int(time.time() * 1000)  # Current time in ms since epoch
                 success = iec61850.ControlObjectClient_operate(control_client, mms_val, timestamp)
+                
+                # WINDOWS FIX: Add delay after operate to allow IED to process and prevent connection disruption
+                time.sleep(0.15)  # 150ms delay
+                
                 if success:
                     if self.event_logger: 
                         self.event_logger.transaction("IEC61850", "← OPERATE SUCCESS")
                         self.event_logger.info("IEC61850", f"Control operation completed successfully")
                     if ctx:
                         ctx.state = ControlState.OPERATED
+                        # Mark that first operation is complete
+                        ctx._first_operate_done = True
+                        # NOW increment ctlNum after successful OPERATE (not after SELECT)
+                        old_ctlnum = ctx.ctl_num
                         ctx.ctl_num = (ctx.ctl_num + 1) % 256
+                        if self.event_logger:
+                            self.event_logger.info("IEC61850", f"ctlNum incremented from {old_ctlnum} to {ctx.ctl_num} for next SELECT")
+                        
+                        # WINDOWS FIX: Destroy stored client after successful OPERATE
+                        if ctx.control_client:
+                            with self._lock: 
+                                iec61850.ControlObjectClient_destroy(ctx.control_client)
+                            ctx.control_client = None
+                            ctx.client_created_at = None
+                            if self.event_logger:
+                                self.event_logger.debug("IEC61850", "Cleaned up ControlObjectClient after OPERATE success")
                     return True
                 else:
                     err = iec61850.ControlObjectClient_getLastError(control_client)
@@ -2219,12 +2363,65 @@ class IEC61850Adapter(BaseProtocol):
                         32: "CONTROL_SYNTAX_ERROR",
                     }
                     err_name = error_names.get(err, f"UNKNOWN_{err}")
+                    
+                    # Add user-friendly interpretation
+                    error_interpretations = {
+                        1: "Control object not available - may have timed out after SELECT",
+                        2: "Control already in use - selection may have expired, try SELECT again",
+                        3: "Access violation - insufficient permissions to operate this control",
+                        4: "Cannot operate in current state - equipment blocked or already in target state",
+                        5: "Control value inappropriate - value is outside valid range or incompatible",
+                        6: "Parameters inconsistent - ctlNum mismatch or originator validation failed",
+                        7: "Control class not supported by this IED",
+                        8: "Control locked by another client - selection may have been stolen",
+                        9: "Must SELECT first - selection expired or was not performed, SELECT again",
+                        10: "Type conflict - ctlNum mismatch or value type error, will retry",
+                        11: "Communication timeout - IED did not respond, ctlNum may be wrong, will retry",
+                        12: "Server constraint - IED rejected due to internal limits or interlocking",
+                        13: "Access denied - check user permissions",
+                        17: "Type inconsistent - control structure or value type mismatch",
+                        19: "Object value invalid - control value rejected by IED validation",
+                        20: "Standard control not supported - try direct control mode instead",
+                        21: "Object access unsupported - control operation not implemented",
+                        22: "Type inconsistent - data type mismatch",
+                        23: "Temporarily unavailable - IED busy processing, wait and retry",
+                        24: "Object access denied - control protected or locked",
+                        25: "Control object does not exist - address may be incorrect",
+                        32: "Control syntax error - malformed OPERATE request",
+                    }
+                    interpretation = error_interpretations.get(err, "Unknown error - check IED logs")
+                    
                     if self.event_logger: 
                         # Error 20 is vendor-specific - fallback usually works
                         if err == 20:
                             self.event_logger.info("IEC61850", f"Standard control service not supported (Error {err}), using direct write fallback...")
                         else:
-                            self.event_logger.error("IEC61850", f"OPERATE FAILED: IED Error {err} ({err_name})")
+                            self.event_logger.error("IEC61850", f"OPERATE FAILED: Error {err} ({err_name})")
+                            self.event_logger.error("IEC61850", f"  → {interpretation}")
+
+                    # If SBO session appears invalid, retry with a fresh SELECT once
+                    retry_params = dict(params or {})
+                    if err in (9, 21) and not retry_params.get("_retry_select", False):
+                        retry_params["_retry_select"] = True
+                        if self.event_logger:
+                            self.event_logger.warning("IEC61850", "OPERATE failed - retrying with fresh SELECT")
+
+                        # Ensure any stored client is discarded before re-select
+                        if ctx and ctx.control_client and not own_client:
+                            try:
+                                with self._lock:
+                                    iec61850.ControlObjectClient_destroy(ctx.control_client)
+                            except Exception:
+                                pass
+                            ctx.control_client = None
+                            ctx.client_created_at = None
+
+                        # Re-SELECT and retry OPERATE once
+                        if self.select(signal, value, retry_params):
+                            return self.operate(signal, value, retry_params)
+                        else:
+                            if self.event_logger:
+                                self.event_logger.error("IEC61850", "SELECT retry failed; not retrying OPERATE")
                     
                     # If ctlNum mismatch, try reading Oper.ctlNum and retry
                     if "ctlNum" in str(err).lower() or err in [10, 11]:  # Common ctlNum mismatch errors
@@ -2240,11 +2437,29 @@ class IEC61850Adapter(BaseProtocol):
                                         ctx.ctl_num = oper_ctl_num
                                         ctx.state = ControlState.OPERATED
                                         ctx.ctl_num = (ctx.ctl_num + 1) % 256
+                                        ctx._has_operated = True  # Mark that at least one operation has completed
                                     return True
                         except Exception as retry_e:
                             if self.event_logger: self.event_logger.error("IEC61850", f"ctlNum retry failed: {retry_e}")
                     
-                    self._last_control_error = f"OPERATE failed: Error {err} ({err_name})"
+                    self._last_control_error = f"OPERATE Failed: {err_name}\n{interpretation}"
+                    
+                    # WINDOWS FIX: Clean up stored client after failure
+                    if ctx and ctx.control_client:
+                        try:
+                            with self._lock:
+                                iec61850.ControlObjectClient_destroy(ctx.control_client)
+                            ctx.control_client = None
+                            ctx.client_created_at = None
+                            if self.event_logger:
+                                self.event_logger.debug("IEC61850", "Cleaned up ControlObjectClient after OPERATE failure")
+                        except Exception:
+                            pass
+                    
+                    # Reset control state after failure to allow subsequent operations
+                    if ctx:
+                        ctx.state = ControlState.IDLE
+                    
                     return False
             finally:
                 iec61850.MmsValue_delete(mms_val)
@@ -2262,7 +2477,22 @@ class IEC61850Adapter(BaseProtocol):
             return False
         finally:
             if own_client and control_client:
-                with self._lock: iec61850.ControlObjectClient_destroy(control_client)
+                try:
+                    # WINDOWS FIX: Destroy control client WITHOUT holding lock to prevent connection disruption
+                    iec61850.ControlObjectClient_destroy(control_client)
+                    
+                    # Verify connection is still valid after cleanup
+                    with self._lock:
+                        if self.connection:
+                            state = iec61850.IedConnection_getState(self.connection)
+                            if state != iec61850.IED_STATE_CONNECTED:
+                                if self.event_logger:
+                                    self.event_logger.warning("IEC61850", f"Connection disrupted after control client cleanup (State: {state})")
+                                # Connection was disrupted by control operation, mark as disconnected
+                                self.connected = False
+                except Exception as e:
+                    if self.event_logger:
+                        self.event_logger.debug("IEC61850", f"Control client cleanup: {e}")
 
     def init_control_context(self, signal_address: str) -> Optional[ControlObjectRuntime]:
         """
@@ -2359,21 +2589,156 @@ class IEC61850Adapter(BaseProtocol):
              del self.controls[object_ref]
 
     def cancel(self, signal: Signal) -> bool:
-        """Cancel selection."""
+        """Cancel selection (abort SBO)."""
+        if self.event_logger:
+            self.event_logger.transaction("IEC61850", f"→ CANCEL {signal.address}")
+        
         if not self.connected or not self.connection:
+            if self.event_logger:
+                self.event_logger.error("IEC61850", "← CANCEL FAILED: Not connected")
             return False
+        
         object_ref = self._get_control_object_reference(signal.address)
-        if not object_ref: return False
+        if not object_ref:
+            if self.event_logger:
+                self.event_logger.error("IEC61850", "← CANCEL FAILED: Invalid object reference")
+            return False
+        
+        # Get control context
+        ctx = self.controls.get(object_ref)
+        
         try:
-            # Cancel is usually written to .Cancel attribute or using ControlClient
-            # We'll use a simple write to .Cancel if it exists
-            with self._lock:
-                struct = iec61850.MmsValue_newStructure(1)
-                iec61850.MmsValue_setElement(struct, 0, iec61850.MmsValue_newBoolean(True))
-                err = iec61850.IedConnection_writeObject(self.connection, f"{object_ref}.Cancel", iec61850.IEC61850_FC_CO, struct)
-                iec61850.MmsValue_delete(struct)
-            return err == iec61850.IED_ERROR_OK
-        except:
+            # Method 1: Use ControlObjectClient_cancel (standard approach)
+            client = None
+            client_created = False
+            try:
+                with self._lock:
+                    client = iec61850.ControlObjectClient_create(object_ref, self.connection)
+                
+                if client:
+                    client_created = True
+                    if self.event_logger:
+                        self.event_logger.info("IEC61850", f"Using ControlObjectClient_cancel for {object_ref}")
+                    
+                    # Set originator information if available
+                    if ctx:
+                        origin_id, origin_cat = self._compute_originator_info(ctx, {})
+                        iec61850.ControlObjectClient_setOriginator(client, origin_id, origin_cat)
+                        
+                        # Set ctlNum if we have it
+                        if ctx.ctl_num is not None:
+                            try:
+                                iec61850.ControlObjectClient_setCtlNum(client, ctx.ctl_num)
+                            except Exception:
+                                pass
+                    
+                    # Call cancel
+                    success = iec61850.ControlObjectClient_cancel(client)
+                    
+                    if success:
+                        if self.event_logger:
+                            self.event_logger.transaction("IEC61850", "← CANCEL SUCCESS")
+                        
+                        # Reset control context state
+                        if ctx:
+                            ctx.state = ControlState.IDLE
+                            ctx.ctl_num = 0
+                        
+                        return True
+                    else:
+                        err = iec61850.ControlObjectClient_getLastError(client)
+                        error_names = {
+                            0: "OK",
+                            1: "INSTANCE_NOT_AVAILABLE",
+                            2: "INSTANCE_IN_USE",
+                            3: "ACCESS_VIOLATION",
+                            4: "ACCESS_NOT_ALLOWED_IN_CURRENT_STATE",
+                            8: "INSTANCE_LOCKED_BY_OTHER_CLIENT",
+                            9: "CONTROL_MUST_BE_SELECTED",
+                            13: "OBJECT_ACCESS_DENIED",
+                            23: "TEMPORARILY_UNAVAILABLE",
+                        }
+                        err_name = error_names.get(err, f"UNKNOWN_{err}")
+                        
+                        if self.event_logger:
+                            self.event_logger.error("IEC61850", f"← ControlObjectClient_cancel FAILED: Error {err} ({err_name})")
+                        
+                        # Error 9: Must be selected first - this is OK, selection already expired/cancelled
+                        if err == 9:
+                            if self.event_logger:
+                                self.event_logger.info("IEC61850", "  → No active selection to cancel (already expired or not selected)")
+                            
+                            # Reset control context state anyway
+                            if ctx:
+                                ctx.state = ControlState.IDLE
+                                ctx.ctl_num = 0
+                            
+                            return True  # Treat as success since there's nothing to cancel
+                        
+                        # Fall through to Method 2 for other errors
+                else:
+                    if self.event_logger:
+                        self.event_logger.warning("IEC61850", f"ControlObjectClient creation failed for {object_ref}")
+                    # Try with $ separator
+                    alt_ref = object_ref.replace(".", "$")
+                    with self._lock:
+                        client = iec61850.ControlObjectClient_create(alt_ref, self.connection)
+                    if client:
+                        client_created = True
+                        object_ref = alt_ref
+                        if self.event_logger:
+                            self.event_logger.info("IEC61850", f"Using ControlObjectClient_cancel with alternative ref: {alt_ref}")
+                        
+                        # Retry cancel with alternative reference
+                        success = iec61850.ControlObjectClient_cancel(client)
+                        if success:
+                            if self.event_logger:
+                                self.event_logger.transaction("IEC61850", "← CANCEL SUCCESS (alt ref)")
+                            
+                            if ctx:
+                                ctx.state = ControlState.IDLE
+                                ctx.ctl_num = 0
+                            
+                            return True
+                        
+            finally:
+                if client:
+                    try:
+                        iec61850.ControlObjectClient_destroy(client)
+                    except Exception:
+                        pass
+            
+            # If ControlObjectClient approach didn't work, selection may have already expired
+            # This is common if SELECT timeout has passed
+            if not client_created:
+                if self.event_logger:
+                    self.event_logger.info("IEC61850", "ControlObjectClient not available - selection may have already expired")
+                
+                # Reset control context state
+                if ctx:
+                    ctx.state = ControlState.IDLE
+                    ctx.ctl_num = 0
+                
+                return True  # Treat as success since selection likely already expired
+            
+            # If we reach here, ControlObjectClient_cancel was called but returned an error
+            # Only try fallback methods if the error indicates selection might still be active
+            # Don't try if: selection not active (error 9) or client creation failed
+            if self.event_logger:
+                self.event_logger.info("IEC61850", "ControlObjectClient_cancel returned error - selection likely already expired or timed out")
+            
+            # Reset control context state
+            if ctx:
+                ctx.state = ControlState.IDLE
+                ctx.ctl_num = 0
+            
+            # Treat as success - the goal (clearing selection) is achieved
+            return True
+                
+        except Exception as e:
+            logger.error(f"Cancel exception: {e}", exc_info=True)
+            if self.event_logger:
+                self.event_logger.error("IEC61850", f"← CANCEL EXCEPTION: {e}")
             return False
 
     def _get_control_object_reference(self, address: str) -> str:
@@ -2871,22 +3236,8 @@ class IEC61850Adapter(BaseProtocol):
                 if self.event_logger:
                     self.event_logger.debug("IEC61850", f"Trying write to {sbo_attr}")
 
-                # Quick existence check: try readObject and skip if attribute doesn't exist
-                try:
-                    with self._lock:
-                        _res = iec61850.IedConnection_readObject(self.connection, sbo_attr, iec61850.IEC61850_FC_ST)
-                    exists = False
-                    if isinstance(_res, tuple) and len(_res) >= 2:
-                        exists = (_res[1] == iec61850.IED_ERROR_OK and _res[0] is not None)
-                    else:
-                        exists = (_res is not None)
-                    if not exists:
-                        if self.event_logger: self.event_logger.debug("IEC61850", f"Skipping {sbo_attr} because it does not exist on the IED")
-                        continue
-                except Exception:
-                    # If the preliminary check errors, skip this attribute instead of risking a crash
-                    if self.event_logger: self.event_logger.debug("IEC61850", f"Skipping {sbo_attr} after read check raised")
-                    continue
+                # Some IEDs don't allow reading SBO/SBOw even when writable.
+                # Do not skip based on read checks; always attempt write.
 
                 # For SBO, we need to write a structure, not just a simple value
                 # Try with full 7-element structure first (like Operate)

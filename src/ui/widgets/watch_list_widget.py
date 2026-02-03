@@ -1,7 +1,7 @@
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, 
                                 QTableWidgetItem, QPushButton, QSpinBox, QLabel,
                                 QHeaderView, QFileDialog, QMessageBox)
-from PySide6.QtCore import Qt, Signal as QtSignal
+from PySide6.QtCore import Qt, Signal as QtSignal, QTimer
 from PySide6.QtGui import QBrush, QColor
 from src.core.watch_list_manager import WatchListManager, WatchedSignal
 import datetime
@@ -24,6 +24,13 @@ class WatchListWidget(QWidget):
         self.device_manager = device_manager
         self._open_control_dialogs = []
         
+        # Throttle UI updates for large watch lists
+        self._pending_row_updates = {}  # watch_id -> (signal, rtt_ms)
+        self._ui_update_timer = QTimer()
+        self._ui_update_timer.timeout.connect(self._process_pending_updates)
+        self._ui_update_timer.setInterval(50)  # Update UI every 50ms max
+        self._ui_update_timer.start()
+        
         self._setup_ui()
         self._connect_signals()
         
@@ -44,6 +51,10 @@ class WatchListWidget(QWidget):
         controls_layout.addWidget(self.interval_spinbox)
         
         controls_layout.addStretch()
+        
+        # Status label for large watch lists
+        self.status_label = QLabel("")
+        controls_layout.addWidget(self.status_label)
         
         # Clear button
         self.btn_clear = QPushButton("Clear All")
@@ -173,6 +184,7 @@ class WatchListWidget(QWidget):
         """Connect watch manager signals."""
         self.watch_manager.signal_updated.connect(self._on_signal_updated)
         self.watch_manager.watch_list_changed.connect(self._refresh_table)
+        self.watch_manager.polling_progress.connect(self._on_polling_progress)
         # Listen for variables (DeviceManager bridges core variable events to Qt signals)
         try:
             if hasattr(self, 'device_manager') and getattr(self.device_manager, 'variable_added', None):
@@ -303,7 +315,42 @@ class WatchListWidget(QWidget):
         self.table.item(row, 0).setData(Qt.UserRole, watched.watch_id)
     
     def _on_signal_updated(self, watch_id: str, signal: Signal, response_ms: int | None):
-        """Update a signal's display when its value changes."""
+        """
+        Handle signal update from WatchListManager.
+        Queue updates to prevent UI freeze with large watch lists.
+        """
+        # Store this update in pending queue instead of processing immediately
+        self._pending_row_updates[watch_id] = (signal, response_ms)
+    
+    def _process_pending_updates(self):
+        """Process all pending row updates at once (throttled)."""
+        if not self._pending_row_updates:
+            return
+        
+        # Disable sorting during batch update for performance
+        sorting_enabled = self.table.isSortingEnabled()
+        if sorting_enabled:
+            self.table.setSortingEnabled(False)
+        
+        # Temporarily block signals to reduce overhead
+        self.table.blockSignals(True)
+        
+        try:
+            # Process all pending updates
+            for watch_id, (signal, response_ms) in self._pending_row_updates.items():
+                self._update_table_row(watch_id, signal, response_ms)
+            
+        finally:
+            # Re-enable signals and sorting
+            self.table.blockSignals(False)
+            if sorting_enabled:
+                self.table.setSortingEnabled(True)
+            
+            # Clear pending updates
+            self._pending_row_updates.clear()
+    
+    def _update_table_row(self, watch_id: str, signal: Signal, response_ms: int | None):
+        """Update a single table row (called from batched processor)."""
         # Find the row
         for row in range(self.table.rowCount()):
             item = self.table.item(row, 0)
@@ -385,6 +432,13 @@ class WatchListWidget(QWidget):
     def _on_interval_changed(self, value: int):
         """Handle poll interval change."""
         self.watch_manager.set_poll_interval(value)
+    
+    def _on_polling_progress(self, current: int, total: int):
+        """Show polling progress for large watch lists."""
+        if total > 100:
+            self.status_label.setText(f"Polling: {current}/{total}")
+        else:
+            self.status_label.setText("")
     
     def _on_clear_clicked(self):
         """Handle clear all button."""

@@ -46,7 +46,11 @@ class ControlWorker(QObject):
                     self.success.emit(True, "SELECT successful - Ready to operate")
                 else:
                     error_msg = getattr(self.adapter, '_last_control_error', 'SELECT failed')
-                    self.success.emit(False, f"SELECT failed: {error_msg}")
+                    # Format multi-line error messages for better readability
+                    if '\\n' in error_msg:
+                        self.success.emit(False, error_msg)
+                    else:
+                        self.success.emit(False, f"SELECT failed: {error_msg}")
             
             elif self.operation == 'operate':
                 self.progress.emit("Sending OPERATE to IED...")
@@ -56,7 +60,11 @@ class ControlWorker(QObject):
                     self.success.emit(True, f"OPERATE successful - Control value: {self.value}")
                 else:
                     error_msg = getattr(self.adapter, '_last_control_error', 'OPERATE failed')
-                    self.success.emit(False, f"OPERATE failed: {error_msg}")
+                    # Format multi-line error messages for better readability
+                    if '\\n' in error_msg:
+                        self.success.emit(False, error_msg)
+                    else:
+                        self.success.emit(False, f"OPERATE failed: {error_msg}")
             else:
                 self.success.emit(False, f"Unknown operation: {self.operation}")
         
@@ -666,12 +674,32 @@ class ControlDialog(QDialog):
                     st_paths.extend([f"{xcb_ref}.stVal", f"{xcb_ref}$stVal"])
                 
                 from src.models.device_models import Signal
-                for st_path in st_paths:
-                    dummy = Signal(name="stVal", address=st_path)
-                    res = adapter.read_signal(dummy)
+                import time
+                
+                # WINDOWS FIX: Retry logic for reading after control operations
+                # Allow extra time for connection recovery after control operations
+                max_retries = 3
+                for retry in range(max_retries):
+                    # Check connection state before attempting read
+                    if not getattr(adapter, 'connected', False):
+                        logger.info(f"Control Dialog: Connection not ready, waiting... (retry {retry + 1}/{max_retries})")
+                        time.sleep(0.3)  # Wait 300ms for connection recovery
+                        continue
+                    
+                    for st_path in st_paths:
+                        dummy = Signal(name="stVal", address=st_path)
+                        res = adapter.read_signal(dummy)
+                        if res and res.value is not None:
+                            logger.info(f"Control Dialog: Live read successful, value={res.value}")
+                            break
+                    
                     if res and res.value is not None:
-                        logger.info(f"Control Dialog: Live read successful, value={res.value}")
                         break
+                    
+                    # If first attempt failed and we have retries left, wait and try again
+                    if retry < max_retries - 1:
+                        logger.info(f"Control Dialog: Retry {retry + 1}/{max_retries - 1} after delay")
+                        time.sleep(0.3)  # Wait 300ms before retry
 
                 # If read_signal failed, try a raw readObject fallback (some IEDs only respond via readObject)
                 if (not res) or (res.value is None):
@@ -863,6 +891,12 @@ class ControlDialog(QDialog):
             self._set_label_status(self.lbl_status, "success")
             self.selected = True
             self._sync_ui_from_context()
+            # Auto-refresh status after successful SELECT (matches user workflow)
+            try:
+                from PySide6.QtCore import QTimer
+                QTimer.singleShot(150, self._load_current_value)
+            except Exception:
+                pass
         else:
             self._set_label_status(self.lbl_status, "error")
             self.selected = False  # CRITICAL: SELECT failed, cannot operate
@@ -878,14 +912,41 @@ class ControlDialog(QDialog):
             self._set_label_status(self.lbl_status, "success")
             self.selected = False  # Reset after successful operate
             self._sync_ui_from_context()
+            
             # Reload current value to verify
             try:
                 self._load_current_value()
             except:
                 pass
+            
+            # Auto-toggle control value to opposite for easy toggle operation
+            try:
+                if isinstance(self.input_widget, QComboBox) and self.input_widget.count() == 2:
+                    # Toggle between index 0 (False/Off) and 1 (True/On)
+                    current_index = self.input_widget.currentIndex()
+                    new_index = 1 - current_index  # Toggle: 0→1, 1→0
+                    self.input_widget.setCurrentIndex(new_index)
+                    if self.event_logger:
+                        logger.info(f"Auto-toggled control value from {current_index} to {new_index} for easy next operation")
+            except Exception as e:
+                logger.debug(f"Failed to auto-toggle control value: {e}")
         else:
             self._set_label_status(self.lbl_status, "error")
-            # Keep selected state - user can retry OPERATE or ABORT
+            # WINDOWS FIX: Reset selected state after failed OPERATE
+            # The IED's control context is likely reset after failure, requiring a new SELECT
+            self.selected = False
+            
+            # Reset control context state in adapter
+            try:
+                adapter = self._get_adapter()
+                if adapter:
+                    object_ref = adapter._get_control_object_reference(self.signal.address)
+                    ctx = adapter.controls.get(object_ref)
+                    if ctx:
+                        from src.models.device_models import ControlState
+                        ctx.state = ControlState.IDLE
+            except Exception as e:
+                logger.debug(f"Failed to reset control context: {e}")
         
         # Re-enable buttons with correct state
         self._update_button_states()
@@ -897,9 +958,14 @@ class ControlDialog(QDialog):
                     self._worker.cancel()
                 except Exception:
                     pass
-            if self._thread and self._thread.isRunning():
-                self._thread.quit()
-                self._thread.wait(2000)
+            if self._thread:
+                try:
+                    if self._thread.isRunning():
+                        self._thread.quit()
+                        self._thread.wait(2000)
+                except RuntimeError:
+                    # C++ object already deleted
+                    pass
         finally:
             self._worker = None
             self._thread = None
@@ -977,22 +1043,59 @@ class ControlDialog(QDialog):
         """Submit Cancel command to deselect."""
         try:
             adapter = self._get_adapter()
-            if not adapter: return
+            if not adapter:
+                self.lbl_status.setText("Error: Adapter not available")
+                self._set_label_status(self.lbl_status, "error")
+                return
             
-            self.lbl_status.setText("Aborting Selection...")
+            # Disable buttons during operation
+            self.btn_abort.setEnabled(False)
+            self.btn_select.setEnabled(False)
+            self.btn_operate.setEnabled(False)
+            
+            self.lbl_status.setText("Sending CANCEL to IED...")
             self._set_label_status(self.lbl_status, "info")
             QApplication.processEvents()
             
-            if adapter.cancel(self.signal):
-                self.lbl_status.setText("Selection Aborted Successfully")
+            result = adapter.cancel(self.signal)
+            
+            if result:
+                self.lbl_status.setText("Cancel Successful - Selection Aborted")
                 self._set_label_status(self.lbl_status, "success")
                 self.selected = False
+                
+                # Reset control context state
+                try:
+                    object_ref = adapter._get_control_object_reference(self.signal.address)
+                    ctx = adapter.controls.get(object_ref)
+                    if ctx:
+                        from src.models.device_models import ControlState
+                        ctx.state = ControlState.IDLE
+                except Exception:
+                    pass
+                
                 self._sync_ui_from_context()
             else:
-                self.lbl_status.setText("Abort Failed")
+                # Get detailed error from adapter
+                error_msg = getattr(adapter, '_last_control_error', 'Cancel operation failed')
+                self.lbl_status.setText(f"Cancel Failed: {error_msg}")
                 self._set_label_status(self.lbl_status, "error")
+                
+                # Some IEDs don't support Cancel - suggest workaround
+                if "not supported" in error_msg.lower() or "OBJECT_DOES_NOT_EXIST" in error_msg:
+                    self.lbl_status.setText(
+                        "Cancel Failed: Not supported by this IED\\n"
+                        "→ Close dialog to discard selection, or perform new SELECT"
+                    )
+            
+            # Re-enable buttons
+            self._update_button_states()
+            
         except Exception as e:
-            self.lbl_status.setText(f"Abort Error: {e}")
+            logger.error(f"Abort error: {e}", exc_info=True)
+            self.lbl_status.setText(f"Cancel Exception: {str(e)}")
+            self._set_label_status(self.lbl_status, "error")
+            self._update_button_states()
 
     def _on_cancel(self):
         # Deprecated: use btn_close or reject() directly
