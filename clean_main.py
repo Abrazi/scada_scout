@@ -5,7 +5,7 @@ import os
 os.environ.setdefault('QT_LOGGING_RULES', '*.debug=false;qt.qpa.*=false')
 
 # Ensure src is in python path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+# sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import logging
 import ctypes
@@ -171,4 +171,4 @@ def main():
         return 1
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

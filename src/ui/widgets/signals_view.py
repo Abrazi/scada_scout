@@ -715,6 +715,7 @@ class SignalsViewWidget(QWidget):
         self.chart.createDefaultAxes()
         
         self.chart_view = QChartView(self.chart)
+        # self.chart_view = QWidget()
         self.chart_view.setRenderHint(QPainter.Antialiasing)
         
         layout.addWidget(self.chart_view)

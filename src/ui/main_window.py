@@ -638,6 +638,7 @@ class MainWindow(QMainWindow):
         self.dock_left.setMaximumWidth(600)
         
         self.device_tree = DeviceTreeWidget(self.device_manager, self.watch_list_manager)
+        # self.device_tree = QLabel("Device Tree Disabled")
         self.device_tree.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.dock_left.setWidget(self.device_tree)
         self.addDockWidget(Qt.LeftDockWidgetArea, self.dock_left)
@@ -699,6 +700,7 @@ class MainWindow(QMainWindow):
         self.modbus_slave_widget = ModbusSlaveWidget(
             event_logger=self.event_logger
         )
+        # self.modbus_slave_widget = QWidget()
         self.modbus_slave_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.dock_modbus_slave.setWidget(self.modbus_slave_widget)
         self.addDockWidget(Qt.BottomDockWidgetArea, self.dock_modbus_slave)

@@ -11,6 +11,62 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+class DraggableTreeView(QTreeView):
+    def __init__(self, owner, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._owner = owner
+
+    def startDrag(self, supportedActions):
+        indexes = self.selectionModel().selectedIndexes()
+        # Use only column-0 indexes to avoid duplicates
+        seen = set()
+        items = []
+        for idx in indexes:
+            if idx.column() != 0:
+                continue
+            # Avoid processing the same index twice
+            key = (idx.row(), idx.parent())
+            if key in seen:
+                continue
+            seen.add(key)
+
+            item = self.model().itemFromIndex(idx)
+            if not item:
+                continue
+            data = item.data(Qt.UserRole)
+            # Use _owner to access DeviceTreeWidget methods
+            device_name = self._owner._find_device_for_item(item)
+
+            if data and hasattr(data, 'address'):
+                unique_address = getattr(data, 'unique_address', '')
+                if not unique_address and device_name and getattr(data, 'address', ''):
+                    unique_address = f"{device_name}::{getattr(data, 'address', '')}"
+                items.append({
+                    'device': device_name,
+                    'address': getattr(data, 'address', ''),
+                    'signal_name': getattr(data, 'name', ''),
+                    'unique_address': unique_address
+                })
+            else:
+                # For non-signal items, include node identifier path
+                items.append({
+                    'device': device_name,
+                    'node_name': item.text(),
+                    'type': 'node'
+                })
+
+        if not items:
+            return
+
+        mime = QMimeData()
+        payload = json.dumps(items)
+        mime.setData('application/x-scadascout-signals', QByteArray(payload.encode('utf-8')))
+        mime.setText(payload)
+
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        drag.exec(Qt.CopyAction)
+
 class DeviceTreeWidget(QWidget):
     """
     Widget containing the Device Tree View.
@@ -27,12 +83,7 @@ class DeviceTreeWidget(QWidget):
         super().__init__(parent)
         self.device_manager = device_manager
         self.watch_list_manager = watch_list_manager
-        self._open_control_dialogs = []
-        # Suppress selection events triggered programmatically (e.g., refresh/filter)
-        self._suppress_selection_changed = False
-        # Batch loading mode for bulk device additions
-        self._batch_loading = False
-        self._pending_devices = []
+        
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(0, 0, 0, 0)
         
@@ -53,78 +104,23 @@ class DeviceTreeWidget(QWidget):
         filter_layout.addWidget(self.lbl_filter_count)
         self.layout.addLayout(filter_layout)
         
-        # Small subclass to provide custom drag mime payload
-        class DraggableTreeView(QTreeView):
-            def __init__(self, owner, *args, **kwargs):
-                super().__init__(*args, **kwargs)
-                self._owner = owner
-
-            def startDrag(self, supportedActions):
-                indexes = self.selectionModel().selectedIndexes()
-                # Use only column-0 indexes to avoid duplicates
-                seen = set()
-                items = []
-                for idx in indexes:
-                    if idx.column() != 0:
-                        continue
-                    # Avoid processing the same index twice
-                    key = (idx.row(), idx.parent())
-                    if key in seen:
-                        continue
-                    seen.add(key)
-
-                    item = self.model().itemFromIndex(idx)
-                    if not item:
-                        continue
-                    data = item.data(Qt.UserRole)
-                    device_name = self._owner._find_device_for_item(item)
-
-                    if data and hasattr(data, 'address'):
-                        unique_address = getattr(data, 'unique_address', '')
-                        if not unique_address and device_name and getattr(data, 'address', ''):
-                            unique_address = f"{device_name}::{getattr(data, 'address', '')}"
-                        items.append({
-                            'device': device_name,
-                            'address': getattr(data, 'address', ''),
-                            'signal_name': getattr(data, 'name', ''),
-                            'unique_address': unique_address
-                        })
-                    else:
-                        # For non-signal items, include node identifier path
-                        items.append({
-                            'device': device_name,
-                            'node_name': item.text(),
-                            'type': 'node'
-                        })
-
-                if not items:
-                    return
-
-                mime = QMimeData()
-                payload = json.dumps(items)
-                mime.setData('application/x-scadascout-signals', QByteArray(payload.encode('utf-8')))
-                mime.setText(payload)
-
-                drag = QDrag(self)
-                drag.setMimeData(mime)
-                drag.exec(Qt.CopyAction)
-
+        # from PySide6.QtWidgets import QTreeView
+        # self.tree_view = QTreeView()
         self.tree_view = DraggableTreeView(self)
         self.layout.addWidget(self.tree_view)
         
+        # Initialize attributes needed by methods
+        self._open_control_dialogs = []
+        self._suppress_selection_changed = False
+        self._batch_loading = False
+        self._pending_devices = []
+        
         self._setup_view()
-        self.folder_items = {}  # folder_name -> QStandardItem
-        self.device_items = {}  # device_name -> QStandardItem 
+        
+        self.folder_items = {}
+        self.device_items = {}
         self._setup_model()
         self._connect_signals()
-
-    def clear(self):
-        """Clears all devices and folders from the tree."""
-        self._setup_model(populate=False)
-
-    def add_device(self, device):
-        """Public method to add a device node to the tree."""
-        self._add_device_node(device)
         
         # Connect batch load signals
         self.device_manager.batch_load_started.connect(self.start_batch_load)
@@ -134,10 +130,18 @@ class DeviceTreeWidget(QWidget):
         # Selection and Editing
         self.tree_view.selectionModel().selectionChanged.connect(self._on_selection_changed)
         self.model.itemChanged.connect(self._on_item_changed)
-
+        
         # Filter tracking
         self._filter_matches = []
         self._filter_match_index = -1
+
+    def clear(self):
+        """Clears all devices and folders from the tree."""
+        self._setup_model(populate=False)
+
+    def add_device(self, device):
+        """Public method to add a device node to the tree."""
+        self._add_device_node(device)
 
     def keyPressEvent(self, event):
         """Handle keyboard shortcuts."""
@@ -453,6 +457,7 @@ class DeviceTreeWidget(QWidget):
         # Live signal updates (device_name, Signal)
         try:
             self.device_manager.signal_updated.connect(self._on_signal_updated)
+            # pass
         except Exception:
             # Older versions may not have the signal; ignore
             pass
