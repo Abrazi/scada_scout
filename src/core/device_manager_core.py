@@ -641,6 +641,15 @@ class DeviceManagerCore(EventEmitter):
         elif config.device_type == DeviceType.MODBUS_SERVER:
             from src.protocols.modbus.server_adapter import ModbusServerAdapter
             return ModbusServerAdapter(config, event_logger=self.event_logger)
+        elif config.device_type == DeviceType.MODBUS_RTU_MASTER:
+            from src.protocols.modbus.rtu.master_adapter import ModbusRTUMasterAdapter
+            return ModbusRTUMasterAdapter(config, event_logger=self.event_logger)
+        elif config.device_type == DeviceType.MODBUS_RTU_SLAVE:
+            from src.protocols.modbus.rtu.slave_adapter import ModbusRTUSlaveAdapter
+            return ModbusRTUSlaveAdapter(config, event_logger=self.event_logger, simulation=False)
+        elif config.device_type == DeviceType.MODBUS_RTU_SIMULATOR:
+            from src.protocols.modbus.rtu.slave_adapter import ModbusRTUSlaveAdapter
+            return ModbusRTUSlaveAdapter(config, event_logger=self.event_logger, simulation=True)
         # OPC (opt-in): adapters are guarded and will raise a clear error if
         # optional dependencies are missing. This keeps the core non-invasive.
         elif config.device_type == DeviceType.OPC_UA_CLIENT:

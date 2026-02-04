@@ -1081,48 +1081,48 @@ GeneratorController.prototype.tick = function () {
 
         this.updateSimulationDynamics(); // Process simulation physics and ramping
 
-        // Read simulation fault control flags from Modbus Register R950
-        // R950 Bit Assignments:
+        // Read simulation fault control flags from Modbus Register R095
+        // R095 Bit Assignments:
         // Bit 0: SimulateFailToStart
         // Bit 1: FailRampUp
-        // Bit 2: FailRampDownR950
+        // Bit 2: FailRampDownR095
         // Bit 3: FailStartTime
         // Bit 4: ResetFaultCMD
-        var R950_Value = GetTagValue(this.path + "R950");
+        var R095_Value = GetTagValue(this.path + "R095");
 
-        var newSimulateFailToStart = ((R950_Value >> 0) & 1) === 1;
+        var newSimulateFailToStart = ((R095_Value >> 0) & 1) === 1;
         if (this.SimulateFailToStart !== newSimulateFailToStart) {
-            this.log(4, "VARIABLE CHANGE: " + this.id + ".SimulateFailToStart (from R950, Bit 0) changed from " + this.SimulateFailToStart + " to " + newSimulateFailToStart);
+            this.log(4, "VARIABLE CHANGE: " + this.id + ".SimulateFailToStart (from R095, Bit 0) changed from " + this.SimulateFailToStart + " to " + newSimulateFailToStart);
             this.SimulateFailToStart = newSimulateFailToStart;
         }
 
-        var newFailRampUp = ((R950_Value >> 1) & 1) === 1;
+        var newFailRampUp = ((R095_Value >> 1) & 1) === 1;
         if (this.FailRampUp !== newFailRampUp) {
-            this.log(4, "VARIABLE CHANGE: " + this.id + ".FailRampUp (from R950, Bit 1) changed from " + this.FailRampUp + " to " + newFailRampUp);
+            this.log(4, "VARIABLE CHANGE: " + this.id + ".FailRampUp (from R095, Bit 1) changed from " + this.FailRampUp + " to " + newFailRampUp);
             this.FailRampUp = newFailRampUp;
         }
 
-        var newFailRampDown = ((R950_Value >> 2) & 1) === 1;
+        var newFailRampDown = ((R095_Value >> 2) & 1) === 1;
         if (this.FailRampDown !== newFailRampDown) {
-            this.log(4, "VARIABLE CHANGE: " + this.id + ".FailRampDown (from R950, Bit 2) changed from " + this.FailRampDown + " to " + newFailRampDown);
+            this.log(4, "VARIABLE CHANGE: " + this.id + ".FailRampDown (from R095, Bit 2) changed from " + this.FailRampDown + " to " + newFailRampDown);
             this.FailRampDown = newFailRampDown;
         }
 
-        var newFailStartTime = ((R950_Value >> 3) & 1) === 1;
+        var newFailStartTime = ((R095_Value >> 3) & 1) === 1;
         if (this.FailStartTime !== newFailStartTime) {
-            this.log(4, "VARIABLE CHANGE: " + this.id + ".FailStartTime (from R950, Bit 3) changed from " + this.FailStartTime + " to " + newFailStartTime);
+            this.log(4, "VARIABLE CHANGE: " + this.id + ".FailStartTime (from R095, Bit 3) changed from " + this.FailStartTime + " to " + newFailStartTime);
             this.FailStartTime = newFailStartTime;
         }
 
-        var resetFaultCMD = ((R950_Value >> 4) & 1) === 1; // Renamed to avoid conflict if ResetFault was a class property
+        var resetFaultCMD = ((R095_Value >> 4) & 1) === 1; // Renamed to avoid conflict if ResetFault was a class property
         if (resetFaultCMD) {
-            this.log(4, "COMMAND: " + this.id + ".resetFaultCMD (from R950, Bit 4) is active (1)");
+            this.log(4, "COMMAND: " + this.id + ".resetFaultCMD (from R095, Bit 4) is active (1)");
             if (this.faultDetected) { // Only try to clear if a fault is detected
                 this.faultDetected = false; // Clear the fault flag
                 FireTrigger(this.sm, triggers.FAULT_CLEARED); // Trigger fault cleared transition
-                this.log(2, "FAULT CLEARED for " + this.id + " via R950 command. Triggered FAULT_CLEARED.");
+                this.log(2, "FAULT CLEARED for " + this.id + " via R095 command. Triggered FAULT_CLEARED.");
             } else {
-                this.log(1, "INFO: " + this.id + ".resetFaultCMD (from R950, Bit 4) is active, but no fault was detected.");
+                this.log(1, "INFO: " + this.id + ".resetFaultCMD (from R095, Bit 4) is active, but no fault was detected.");
             }
         }
 

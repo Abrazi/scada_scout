@@ -9,6 +9,9 @@ class DeviceType(Enum):
     IEC61850_SERVER = "IEC 61850 Simulator (Server)"
     MODBUS_TCP = "Modbus TCP"
     MODBUS_SERVER = "Modbus Slave Server"
+    MODBUS_RTU_MASTER = "Modbus RTU Master"
+    MODBUS_RTU_SLAVE = "Modbus RTU Slave"
+    MODBUS_RTU_SIMULATOR = "Modbus RTU Simulator"
     OPC_UA_CLIENT = "OPC UA Client"
     OPC_UA_SERVER = "OPC UA Server (Simulator)"
     UNKNOWN = "Unknown"
@@ -262,12 +265,23 @@ class DeviceConfig:
     polling_enabled: bool = False
     poll_interval: float = 1.0  # seconds
     
-    # Modbus-specific parameters
+    # Modbus TCP-specific parameters
     modbus_unit_id: int = 1
     modbus_timeout: float = 3.0
     modbus_register_maps: List[ModbusRegisterMap] = field(default_factory=list)
     modbus_slave_mappings: List[ModbusSignalMapping] = field(default_factory=list)
     modbus_slave_blocks: List[SlaveRegisterBlock] = field(default_factory=list)
+    
+    # Modbus RTU-specific parameters
+    rtu_transport: str = "serial"  # "serial" or "rtu_over_tcp"
+    rtu_slave_address: int = 1
+    serial_port: str = ""  # e.g., "COM3", "/dev/ttyUSB0"
+    serial_baudrate: int = 9600
+    serial_bytesize: int = 8
+    serial_parity: str = 'N'  # N, E, O, M, S
+    serial_stopbits: float = 1.0  # 1, 1.5, 2
+    serial_timeout: float = 1.0
+    rtu_simulator_config: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -287,7 +301,17 @@ class DeviceConfig:
             'modbus_timeout': self.modbus_timeout,
             'modbus_register_maps': [rm.to_dict() for rm in self.modbus_register_maps],
             'modbus_slave_mappings': [sm.to_dict() for sm in self.modbus_slave_mappings],
-            'modbus_slave_blocks': [sb.to_dict() for sb in self.modbus_slave_blocks]
+            'modbus_slave_blocks': [sb.to_dict() for sb in self.modbus_slave_blocks],
+            # RTU fields
+            'rtu_transport': self.rtu_transport,
+            'rtu_slave_address': self.rtu_slave_address,
+            'serial_port': self.serial_port,
+            'serial_baudrate': self.serial_baudrate,
+            'serial_bytesize': self.serial_bytesize,
+            'serial_parity': self.serial_parity,
+            'serial_stopbits': self.serial_stopbits,
+            'serial_timeout': self.serial_timeout,
+            'rtu_simulator_config': self.rtu_simulator_config
         }
 
     @classmethod
@@ -313,7 +337,17 @@ class DeviceConfig:
             polling_enabled=data.get('polling_enabled', False),
             poll_interval=data.get('poll_interval', 1.0),
             modbus_unit_id=data.get('modbus_unit_id', 1),
-            modbus_timeout=data.get('modbus_timeout', 3.0)
+            modbus_timeout=data.get('modbus_timeout', 3.0),
+            # RTU fields
+            rtu_transport=data.get('rtu_transport', 'serial'),
+            rtu_slave_address=data.get('rtu_slave_address', 1),
+            serial_port=data.get('serial_port', ''),
+            serial_baudrate=data.get('serial_baudrate', 9600),
+            serial_bytesize=data.get('serial_bytesize', 8),
+            serial_parity=data.get('serial_parity', 'N'),
+            serial_stopbits=data.get('serial_stopbits', 1.0),
+            serial_timeout=data.get('serial_timeout', 1.0),
+            rtu_simulator_config=data.get('rtu_simulator_config')
         )
         
         # Load nested objects
