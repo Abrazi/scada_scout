@@ -2,7 +2,7 @@
    PLC PROGRAM: PRG_GPS03GPC02UPM01MCB01
    IED: GPS03GPC02UPM01MCB01
    Device: GPS03GPC02UPM01MCB01
-   Generated: 2026-02-05 10:23:38
+   Generated: 2026-02-05 10:48:48
    
    This program runs cyclically (default 100ms) and has access to all
    data points of the associated IEC 61850 device. Users can add custom

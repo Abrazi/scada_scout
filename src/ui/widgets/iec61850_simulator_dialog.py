@@ -4,7 +4,7 @@ from PySide6.QtWidgets import (
     QLineEdit, QComboBox, QSpinBox, QListWidget
 )
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtGui import QGuiApplication, QColor
 from typing import List
 import os
 import tempfile
@@ -72,7 +72,82 @@ class IEC61850SimulatorDialog(QDialog):
 
         self.scd_path = None
         self.parsed_ieds = []
+        self.system_ips = []  # Cache of available system IPs
+        self._load_system_ips()
 
+    def _load_system_ips(self):
+        """Load available IP addresses from the system"""
+        try:
+            from src.utils.network_utils import NetworkUtils
+            interfaces = NetworkUtils.get_network_interfaces()
+            self.system_ips = sorted({iface.ip_address for iface in interfaces})
+            logger.info(f"Loaded {len(self.system_ips)} system IPs: {', '.join(self.system_ips)}")
+        except Exception as e:
+            logger.warning(f"Could not load system IPs: {e}")
+            self.system_ips = ["127.0.0.1"]
+    
+    def _is_ip_available(self, ip: str) -> bool:
+        """Check if an IP address is available on the system"""
+        return ip in self.system_ips
+    
+    def _create_ip_combo(self, scd_ip: str) -> QComboBox:
+        """Create a combo box with system IPs and the SCD IP, with color coding"""
+        combo = QComboBox()
+        combo.setEditable(True)
+        
+        # Add system IPs first
+        for ip in self.system_ips:
+            combo.addItem(f"✓ {ip}", ip)  # Checkmark for available IPs
+        
+        # Add SCD IP if not already in list
+        if scd_ip and scd_ip not in self.system_ips:
+            combo.addItem(f"⚠ {scd_ip} (not configured)", scd_ip)
+            combo.setCurrentText(scd_ip)  # Select the SCD IP by default
+        elif scd_ip:
+            # Select the matching system IP
+            index = combo.findData(scd_ip)
+            if index >= 0:
+                combo.setCurrentIndex(index)
+        
+        # Color code the combo box
+        self._update_combo_color(combo)
+        
+        # Update color when selection changes
+        combo.currentTextChanged.connect(lambda: self._update_combo_color(combo))
+        combo.editTextChanged.connect(lambda: self._update_combo_color(combo))
+        
+        return combo
+    
+    def _update_combo_color(self, combo: QComboBox):
+        """Update combo box background color based on IP availability"""
+        text = combo.currentText().strip()
+        # Remove prefix if present
+        if text.startswith("✓ "):
+            ip = text[2:].split()[0]  # Get first word after checkmark
+        elif text.startswith("⚠ "):
+            ip = text[2:].split()[0]  # Get first word after warning
+        else:
+            # Extract IP from various formats
+            if ' - ' in text:
+                ip = text.split(' - ')[0].strip()
+            elif ' (' in text:
+                ip = text.split(' (')[0].strip()
+            else:
+                ip = text
+        
+        if self._is_ip_available(ip):
+            combo.setStyleSheet("QComboBox { background-color: #d4edda; color: #155724; }")
+        else:
+            combo.setStyleSheet("QComboBox { background-color: #f8d7da; color: #721c24; }")
+    
+    def _is_valid_ip_format(self, ip: str) -> bool:
+        """Basic IP format validation"""
+        try:
+            parts = ip.split('.')
+            return len(parts) == 4 and all(0 <= int(p) <= 255 for p in parts)
+        except (ValueError, AttributeError):
+            return False
+    
     def _browse_file(self):
         filter_str = ("SCL Files (*.scd *.cid *.icd *.iid *.xml);;"
                  "All Supported Files (*.scd *.cid *.icd *.iid *.xml *.zip *.rar *.sz *.7z *.tar *.tar.gz *.tgz);;"
@@ -286,25 +361,51 @@ class IEC61850SimulatorDialog(QDialog):
             ips = ied.get('ips', [])
 
             if not ips:
-                ip_edit = QLineEdit("127.0.0.1")
-                self.table.setCellWidget(row, 1, ip_edit)
+                # No IPs in SCD - show system IPs dropdown with default
+                ip_combo = self._create_ip_combo("127.0.0.1")
+                self.table.setCellWidget(row, 1, ip_combo)
                 self.table.setItem(row, 3, QTableWidgetItem("N/A"))
                 port_val = 102
             elif len(ips) == 1:
+                # Single IP - create combo with system IPs + this IP
                 ip_info = ips[0]
-                ip_edit = QLineEdit(ip_info.get('ip', '127.0.0.1'))
-                self.table.setCellWidget(row, 1, ip_edit)
-                self.table.setItem(row, 3, QTableWidgetItem(f"{ip_info.get('ap', '')} ({ip_info.get('subnetwork', '')})"))
+                scd_ip = ip_info.get('ip', '127.0.0.1')
+                ip_combo = self._create_ip_combo(scd_ip)
+                self.table.setCellWidget(row, 1, ip_combo)
+                ap_text = f"{ip_info.get('ap', '')} ({ip_info.get('subnetwork', '')})"
+                self.table.setItem(row, 3, QTableWidgetItem(ap_text))
                 port_val = ip_info.get('port', 102)
             else:
+                # Multiple IPs in SCD - create combo with all SCD IPs + system IPs
                 combo = QComboBox()
                 combo.setEditable(True)
+                
+                # Add SCD IPs first (with AP info)
                 for ip_info in ips:
-                    desc = f"{ip_info['ip']} - {ip_info['ap']} ({ip_info['subnetwork']})"
+                    scd_ip = ip_info['ip']
+                    ap_name = ip_info.get('ap', '')
+                    subnet = ip_info.get('subnetwork', '')
+                    if self._is_ip_available(scd_ip):
+                        desc = f"✓ {scd_ip} - {ap_name} ({subnet})"
+                    else:
+                        desc = f"⚠ {scd_ip} - {ap_name} ({subnet})"
                     combo.addItem(desc, ip_info)
+                
+                # Add separator
+                combo.insertSeparator(combo.count())
+                
+                # Add system IPs
+                for ip in self.system_ips:
+                    if not any(ip == ip_info['ip'] for ip_info in ips):
+                        combo.addItem(f"✓ {ip} (system)", {'ip': ip, 'port': 102})
+                
                 combo.setCurrentIndex(0)
+                self._update_combo_color(combo)
+                combo.currentTextChanged.connect(lambda: self._update_combo_color(combo))
+                combo.editTextChanged.connect(lambda: self._update_combo_color(combo))
+                
                 self.table.setCellWidget(row, 1, combo)
-                self.table.setItem(row, 3, QTableWidgetItem("Multiple (Select IP)"))
+                self.table.setItem(row, 3, QTableWidgetItem("Multiple (Select IP/AP)"))
                 port_val = ips[0].get('port', 102)
 
             # Port
@@ -387,16 +488,32 @@ class IEC61850SimulatorDialog(QDialog):
                 if isinstance(ip_widget, QComboBox):
                     # For editable ComboBox, use currentText to get potentially edited value
                     text = ip_widget.currentText().strip()
-                    # Extract IP from format "10.0.0.1 - AP1 (Subnet1)" or just "10.0.0.1"
+                    
+                    # Remove prefix symbols (✓ or ⚠)
+                    if text.startswith("✓ "):
+                        text = text[2:]
+                    elif text.startswith("⚠ "):
+                        text = text[2:]
+                    
+                    # Extract IP from various formats:
+                    # "10.0.0.1 - AP1 (Subnet1)"
+                    # "10.0.0.1 (not configured)"
+                    # "10.0.0.1 (system)"
+                    # "10.0.0.1"
                     if ' - ' in text:
                         ip = text.split(' - ')[0].strip()
+                    elif ' (' in text:
+                        ip = text.split(' (')[0].strip()
                     else:
-                        ip = text
-                    # Fallback to original data if parsing failed
-                    if not ip:
+                        ip = text.strip()
+                    
+                    # Fallback to original data if parsing failed or IP is empty
+                    if not ip or not self._is_valid_ip_format(ip):
                         data = ip_widget.currentData()
                         if isinstance(data, dict) and data.get('ip'):
                             ip = data['ip']
+                        elif not ip:
+                            ip = "127.0.0.1"
                 elif isinstance(ip_widget, QLineEdit):
                     ip = ip_widget.text().strip() or "127.0.0.1"
 

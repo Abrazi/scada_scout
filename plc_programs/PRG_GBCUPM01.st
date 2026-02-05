@@ -2,7 +2,7 @@
    PLC PROGRAM: PRG_GBCUPM01
    IED: GBCUPM01
    Device: GBCUPM01
-   Generated: 2026-02-05 10:23:40
+   Generated: 2026-02-05 10:55:39
    
    This program runs cyclically (default 100ms) and has access to all
    data points of the associated IEC 61850 device. Users can add custom

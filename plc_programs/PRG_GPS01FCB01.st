@@ -2,7 +2,7 @@
    PLC PROGRAM: PRG_GPS01FCB01
    IED: GPS01FCB01
    Device: GPS01FCB01
-   Generated: 2026-02-05 10:23:39
+   Generated: 2026-02-05 10:51:08
    
    This program runs cyclically (default 100ms) and has access to all
    data points of the associated IEC 61850 device. Users can add custom

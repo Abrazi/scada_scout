@@ -48,9 +48,14 @@ class SimulateIEDDialog(QDialog):
         self.txt_ip = QLineEdit("0.0.0.0")  # Listen on all interfaces by default
         self.txt_ip.setPlaceholderText("0.0.0.0 (all interfaces)")
         self.txt_ip.setToolTip(
-            "0.0.0.0 = Listen on all network interfaces (recommended)\n"
-            "127.0.0.1 = Localhost only (not accessible from network)\n"
-            "Specific IP = Bind to that interface only"
+            "Binding Options:\n"
+            "• 0.0.0.0 = Listen on all network interfaces (recommended for network access)\n"
+            "• 127.0.0.1 = Localhost only (not accessible from network)\n"
+            "• Specific IP = Bind to that interface only (allows multiple servers on different IPs)\n\n"
+            "Multiple Servers:\n"
+            "You can run multiple IEC 61850 servers simultaneously by assigning each a unique\n"
+            "IP address (must be configured on your network interfaces). Each server will be\n"
+            "accessible by its configured IP address on the network."
         )
         config_layout.addRow("Listen IP:", self.txt_ip)
         

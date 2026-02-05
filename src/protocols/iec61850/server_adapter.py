@@ -17,6 +17,13 @@ class IEC61850ServerAdapter(BaseProtocol):
     """
     IEC 61850 server simulator backed by libiec61850.
     Loads a model from SCD and starts an MMS server on the configured IP/port.
+    
+    IP Binding Behavior:
+    - config.ip_address = "0.0.0.0": Binds to all network interfaces (default)
+    - config.ip_address = specific IP: Binds only to that IP address
+    
+    This allows multiple IEC 61850 servers to run simultaneously, each on a
+    different IP address, making them accessible by their configured IPs on the network.
     """
 
     def __init__(self, config: DeviceConfig, event_logger=None):
@@ -127,22 +134,41 @@ class IEC61850ServerAdapter(BaseProtocol):
                 raise RuntimeError("Failed to create IED server from model")
 
             # Configure server settings
-            try:
-                # For IEC 61850 servers, ALWAYS bind to 0.0.0.0 (all interfaces)
-                # The config.ip_address represents the advertised IP, not the bind address
-                # This prevents WinError 10049 on Windows when the specific IP isn't available
-                bind_ip = "0.0.0.0"
+            # Determine bind IP from configuration
+            # - If config.ip_address is "0.0.0.0" or not set: bind to all interfaces
+            # - Otherwise: bind to the specific IP (allows multiple servers on different IPs)
+            bind_ip = self.config.ip_address if self.config.ip_address and self.config.ip_address != "0.0.0.0" else "0.0.0.0"
+            
+            if bind_ip == "0.0.0.0":
                 logger.info(f"Server will listen on all interfaces (0.0.0.0)")
-                
-                # Note: IedServer_setLocalIpAddress may be used for specific scenarios
-                # but for standard operation, omitting it or using 0.0.0.0 works best
+            else:
+                logger.info(f"Server will listen on specific IP: {bind_ip}")
+                # Verify IP is available on this system
                 try:
-                    lib.IedServer_setLocalIpAddress(self.server, bind_ip.encode("utf-8"))
-                    logger.debug(f"Set local IP address to: {bind_ip}")
+                    from src.utils.network_utils import NetworkUtils
+                    interfaces = NetworkUtils.get_network_interfaces()
+                    local_ips = {iface.ip_address for iface in interfaces}
+                    if bind_ip not in local_ips:
+                        warning_msg = (
+                            f"⚠️ IP {bind_ip} is not configured on this system.\n"
+                            f"   Available IPs: {', '.join(sorted(local_ips))}\n"
+                            f"   Falling back to 0.0.0.0 (all interfaces)"
+                        )
+                        logger.warning(warning_msg)
+                        if self.event_logger:
+                            self.event_logger.warning("IEC61850Server", warning_msg)
+                        bind_ip = "0.0.0.0"
                 except Exception as e:
-                    logger.debug(f"Could not set local IP address (not critical): {e}")
+                    logger.warning(f"Could not verify IP address, falling back to 0.0.0.0: {e}")
+                    bind_ip = "0.0.0.0"
+            
+            # Set local IP address for single-access-point mode
+            # Note: For multiple servers, we'll use IedServer_addAccessPoint instead
+            try:
+                lib.IedServer_setLocalIpAddress(self.server, bind_ip.encode("utf-8"))
+                logger.debug(f"Set local IP address to: {bind_ip}")
             except Exception as e:
-                logger.warning(f"Could not configure server IP settings: {e}")
+                logger.debug(f"Could not set local IP address (not critical): {e}")
 
             try:
                 # Set server identity
@@ -229,20 +255,20 @@ class IEC61850ServerAdapter(BaseProtocol):
             if not self.model:
                 raise RuntimeError("Cannot start server: model is NULL")
             
-            # Check if port is available
+            # Check if port is available on the bind IP
             import socket
             try:
                 test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 test_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                test_sock.bind(("0.0.0.0", int(self.config.port)))
+                test_sock.bind((bind_ip, int(self.config.port)))
                 test_sock.close()
-                logger.debug(f"Port {self.config.port} is available for binding")
+                logger.debug(f"Port {self.config.port} is available on {bind_ip}")
             except OSError as e:
-                logger.warning(f"Port {self.config.port} may be in use or unavailable: {e}")
+                logger.warning(f"Port {self.config.port} may be in use on {bind_ip}: {e}")
                 if self.event_logger:
-                    self.event_logger.warning("IEC61850Server", f"⚠️ Port {self.config.port} may already be in use")
+                    self.event_logger.warning("IEC61850Server", f"⚠️ Port {self.config.port} may already be in use on {bind_ip}")
 
-            logger.info(f"Starting IEC61850 server on 0.0.0.0:{self.config.port}")
+            logger.info(f"Starting IEC61850 server on {bind_ip}:{self.config.port}")
             start_result = lib.IedServer_start(self.server, int(self.config.port))
 
             # Some libiec61850 builds return void; check isRunning if so
@@ -267,7 +293,10 @@ class IEC61850ServerAdapter(BaseProtocol):
                     logger.info("IEC61850 server started successfully")
                     if self.event_logger:
                         # Show actual binding info
-                        bind_info = f"0.0.0.0:{self.config.port} (accessible on all network interfaces)"
+                        if bind_ip == "0.0.0.0":
+                            bind_info = f"0.0.0.0:{self.config.port} (accessible on all network interfaces)"
+                        else:
+                            bind_info = f"{bind_ip}:{self.config.port}"
                         self.event_logger.info(
                             "IEC61850Server",
                             f"✅ Started IEC 61850 server '{self.ied_name}' on {bind_info}"
@@ -301,7 +330,10 @@ class IEC61850ServerAdapter(BaseProtocol):
 
                 if self.event_logger:
                     # Show actual binding info
-                    bind_info = f"0.0.0.0:{self.config.port} (accessible on all network interfaces)"
+                    if bind_ip == "0.0.0.0":
+                        bind_info = f"0.0.0.0:{self.config.port} (accessible on all network interfaces)"
+                    else:
+                        bind_info = f"{bind_ip}:{self.config.port}"
                     self.event_logger.info(
                         "IEC61850Server",
                         f"✅ Started IEC 61850 server '{self.ied_name}' on {bind_info}"

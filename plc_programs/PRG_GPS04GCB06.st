@@ -2,7 +2,7 @@
    PLC PROGRAM: PRG_GPS04GCB06
    IED: GPS04GCB06
    Device: GPS04GCB06
-   Generated: 2026-02-05 10:23:39
+   Generated: 2026-02-05 10:53:41
    
    This program runs cyclically (default 100ms) and has access to all
    data points of the associated IEC 61850 device. Users can add custom

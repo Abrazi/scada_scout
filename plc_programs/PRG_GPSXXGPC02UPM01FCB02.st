@@ -2,7 +2,7 @@
    PLC PROGRAM: PRG_GPSXXGPC02UPM01FCB02
    IED: GPSXXGPC02UPM01FCB02
    Device: GPSXXGPC02UPM01FCB02
-   Generated: 2026-02-05 10:23:39
+   Generated: 2026-02-05 10:50:19
    
    This program runs cyclically (default 100ms) and has access to all
    data points of the associated IEC 61850 device. Users can add custom

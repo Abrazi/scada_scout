@@ -191,6 +191,7 @@ class IEDProjectOrchestrator:
             device_type=DeviceType.IEC61850_SERVER,
             ip_address=ied.network_config.ip_address,
             port=ied.network_config.port,
+            scd_file_path=self.current_scd_path,  # Required for server adapter
             protocol_params={
                 'ied_name': ied.name,
                 'scd_file_path': self.current_scd_path
@@ -354,6 +355,7 @@ class IEDProjectOrchestrator:
             device_type=DeviceType.IEC61850_SERVER,
             ip_address=dev_config.ip_address,
             port=dev_config.port,
+            scd_file_path=self.current_scd_path,  # Required for server adapter
             protocol_params={
                 'ied_name': dev_config.ied_name,
                 'scd_file_path': self.current_scd_path
