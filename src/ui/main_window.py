@@ -271,6 +271,14 @@ class MainWindow(QMainWindow):
         iec_simulator_action.triggered.connect(self._show_iec61850_simulator_dialog)
         conn_menu.addAction(iec_simulator_action)
         
+        conn_menu.addSeparator()
+        
+        # IED Project Manager
+        ied_project_action = QAction("📦 &IED Project Manager...", self)
+        ied_project_action.setStatusTip("Load SCD files and create IED servers with PLC programs")
+        ied_project_action.triggered.connect(self._show_ied_project_dialog)
+        conn_menu.addAction(ied_project_action)
+        
         # View Menu
         self.view_menu = menu_bar.addMenu("&View")
         
@@ -1774,6 +1782,20 @@ QTabBar::tab {{ padding: {widget_padding + 2}px {button_padding + 8}px; font-siz
                 "Simulator Started", 
                 f"Successfully started {len(configs)} IEC 61850 simulated IEDs.\nCheck the Device Explorer for status."
             )
+    
+    def _show_ied_project_dialog(self):
+        """Open IED Project Manager dialog for SCD-based device instantiation"""
+        from src.ui.dialogs.ied_project_dialog import IEDProjectDialog
+        from src.core.ied_project_orchestrator import IEDProjectOrchestrator
+        from PySide6.QtWidgets import QDialog
+        
+        # Create orchestrator if not exists
+        if not hasattr(self, '_ied_orchestrator'):
+            self._ied_orchestrator = IEDProjectOrchestrator(self.device_manager)
+        
+        dialog = IEDProjectDialog(self._ied_orchestrator, self)
+        dialog.exec()
+
 
     def _connect_project_signals(self):
         """Connect project manager signals for UI feedback."""

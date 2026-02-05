@@ -2,7 +2,7 @@ import logging
 import json
 import os
 import threading
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, TYPE_CHECKING
 
 from src.core.events import EventEmitter
 from src.models.device_models import Device, DeviceConfig, DeviceType, Node, Signal, SignalQuality
@@ -10,6 +10,9 @@ from src.protocols.base_protocol import BaseProtocol
 from src.core.subscription_manager import IECSubscriptionManager
 from src.core.script_tag_manager import ScriptTagManager
 from src.core.variable_manager import VariableManager
+
+if TYPE_CHECKING:
+    from src.core.event_logger import EventLogger
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +26,7 @@ class DeviceManagerCore(EventEmitter):
         super().__init__()
         self._devices: Dict[str, Device] = {}
         self._protocols: Dict[str, BaseProtocol] = {}
-        self.event_logger = None 
+        self.event_logger: Optional['EventLogger'] = None 
         self.protocol_workers: Dict[str, object] = {}
         self.config_path = config_path
         self.folder_descriptions: Dict[str, str] = {} # folder_name -> description
