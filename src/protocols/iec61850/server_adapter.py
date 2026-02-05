@@ -41,6 +41,25 @@ class IEC61850ServerAdapter(BaseProtocol):
 
         self._sbo_state = {}
         self._sbo_select_timeout_ms = 30000
+        self._cdc_control_dos = set()
+
+    @staticmethod
+    def _find_available_ports(bind_ip: str, start_port: int = 10002, count: int = 3) -> list:
+        """Find available ports starting from start_port"""
+        import socket
+        available = []
+        port = start_port
+        while len(available) < count and port < 65535:
+            try:
+                test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                test_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                test_sock.bind((bind_ip, port))
+                test_sock.close()
+                available.append(port)
+            except OSError:
+                pass
+            port += 100  # Try ports in increments of 100
+        return available
 
     def connect(self) -> bool:
         if not self.config.scd_file_path:
@@ -264,9 +283,69 @@ class IEC61850ServerAdapter(BaseProtocol):
                 test_sock.close()
                 logger.debug(f"Port {self.config.port} is available on {bind_ip}")
             except OSError as e:
-                logger.warning(f"Port {self.config.port} may be in use on {bind_ip}: {e}")
-                if self.event_logger:
-                    self.event_logger.warning("IEC61850Server", f"⚠️ Port {self.config.port} may already be in use on {bind_ip}")
+                error_code = getattr(e, 'winerror', None) or getattr(e, 'errno', None)
+                
+                # Try to suggest available ports
+                available_ports = self._find_available_ports(bind_ip)
+                port_suggestion = f"\n   Suggested available ports: {', '.join(map(str, available_ports))}" if available_ports else ""
+                
+                # WinError 10013 = Access forbidden (port excluded/restricted by Windows)
+                if error_code == 10013:
+                    error_msg = (
+                        f"❌ Port {self.config.port} is restricted by Windows.\n"
+                        f"   This port is in a reserved/excluded range.\n"
+                        f"   \n"
+                        f"   Solutions:\n"
+                        f"   1. Use a different port{port_suggestion}\n"
+                        f"   2. Check excluded ports: netsh interface ipv4 show excludedportrange protocol=tcp\n"
+                        f"   3. Remove exclusion (admin): netsh int ipv4 delete excludedportrange protocol=tcp startport={self.config.port} numberofports=1"
+                    )
+                    logger.error(error_msg)
+                    if self.event_logger:
+                        self.event_logger.error("IEC61850Server", error_msg)
+                    raise RuntimeError(f"Port {self.config.port} is restricted by Windows (WinError 10013)")
+                
+                # WinError 10048 or EADDRINUSE = Port already in use
+                elif error_code in (10048, 48, 98):  # Windows, macOS, Linux codes
+                    error_msg = (
+                        f"❌ Port {self.config.port} is already in use on {bind_ip}.\n"
+                        f"   Another application is using this port.\n"
+                        f"   \n"
+                        f"   Solutions:\n"
+                        f"   1. Use a different port{port_suggestion}\n"
+                        f"   2. Stop the other application using this port\n"
+                        f"   3. Check what's using it: netstat -ano | findstr :{self.config.port}"
+                    )
+                    logger.error(error_msg)
+                    if self.event_logger:
+                        self.event_logger.error("IEC61850Server", error_msg)
+                    raise RuntimeError(f"Port {self.config.port} is already in use")
+                
+                # WinError 10049 = IP address not valid in this context
+                elif error_code == 10049:
+                    error_msg = (
+                        f"❌ Cannot bind to {bind_ip}:{self.config.port}\n"
+                        f"   The IP address is not configured on this system.\n"
+                        f"   \n"
+                        f"   Solutions:\n"
+                        f"   1. Use 0.0.0.0 to listen on all interfaces\n"
+                        f"   2. Configure the IP address on your network adapter\n"
+                        f"   3. Use 'Check/Configure IPs' in the simulator dialog"
+                    )
+                    logger.error(error_msg)
+                    if self.event_logger:
+                        self.event_logger.error("IEC61850Server", error_msg)
+                    raise RuntimeError(f"IP address {bind_ip} not available")
+                
+                # Generic error - log but continue (might still work)
+                else:
+                    logger.warning(f"Port check warning for {bind_ip}:{self.config.port}: {e}")
+                    if self.event_logger:
+                        self.event_logger.warning("IEC61850Server", 
+                            f"⚠️ Port {self.config.port} may have issues on {bind_ip}\n"
+                            f"   Error: {e}\n"
+                            f"   Will attempt to start server anyway..."
+                        )
 
             logger.info(f"Starting IEC61850 server on {bind_ip}:{self.config.port}")
             start_result = lib.IedServer_start(self.server, int(self.config.port))
@@ -687,6 +766,15 @@ class IEC61850ServerAdapter(BaseProtocol):
                         continue
                     ln_nodes[(ld_inst, ln_node.name)] = lnode
                     ln_created += 1
+            
+            # Pre-create control DOs based on SCD definitions (before processing signals)
+            # This ensures control objects exist with proper control options
+            self._cdc_control_dos = set()
+            control_dos_created = self._create_control_data_objects(ld_nodes, ln_nodes, do_nodes, root.name)
+            if control_dos_created > 0:
+                logger.info(f"Pre-created {control_dos_created} control Data Objects from SCD")
+            else:
+                logger.debug("No control Data Objects pre-created (may not have any, or pre-creation failed)")
 
             created_attrs = 0
             processed = 0
@@ -727,20 +815,35 @@ class IEC61850ServerAdapter(BaseProtocol):
 
                 parent = ctypes.cast(lnode, ctypes.POINTER(lib.ModelNode))
                 current_path = []
-                for do_name in do_path:
+                for i, do_name in enumerate(do_path):
                     current_path.append(do_name)
                     key = (addr_ld_norm, ln_name, ".".join(current_path))
                     if key in do_nodes:
                         parent = do_nodes[key]
                         continue
 
-                    new_do = lib.DataObject_create(do_name.encode("utf-8"), parent, 0)
+                    # Determine if this is a control DO - check if it's the last in path (before DA)
+                    # and if the signal description indicates a control CDC
+                    is_control_do = (i == len(do_path) - 1) and self._is_control_cdc(signal.description or "")
+                    control_options = 0
+                    
+                    if is_control_do:
+                        # Get control model from SCD if available
+                        # Signal description may contain control info
+                        control_options = self._get_control_options_for_signal(signal, addr_ld_norm, ln_name, do_name)
+                    
+                    new_do = lib.DataObject_create(do_name.encode("utf-8"), parent, control_options if is_control_do else 0)
                     if not new_do:
                         break
                     parent = ctypes.cast(new_do, ctypes.POINTER(lib.ModelNode))
                     do_nodes[key] = parent
 
                 if not parent:
+                    continue
+
+                # Skip DA creation for CDC-created control DOs (they already include standard children)
+                do_key = (addr_ld_norm, ln_name, ".".join(do_path))
+                if do_key in self._cdc_control_dos:
                     continue
 
                 fc, btype = self._parse_signal_meta(signal)
@@ -797,6 +900,195 @@ class IEC61850ServerAdapter(BaseProtocol):
             yield sig
         for child in node.children:
             yield from self._iter_signals(child)
+    
+    def _is_control_cdc(self, description: str) -> bool:
+        """Check if the description indicates a control CDC type"""
+        control_cdcs = ["DPC", "SPC", "INC", "ENC", "BSC", "APC", "BAC", "ISC"]
+        desc_upper = description.upper()
+        return any(cdc in desc_upper for cdc in control_cdcs)
+    
+    def _create_control_data_objects(self, ld_nodes: dict, ln_nodes: dict, do_nodes: dict, ied_name: str) -> int:
+        """Pre-create all control Data Objects from SCD with proper control options"""
+        created = 0
+        try:
+            if not self.config.scd_file_path:
+                logger.debug("No SCD file path, skipping control DO pre-creation")
+                return 0
+            
+            logger.debug(f"Pre-creating control DOs from {self.config.scd_file_path}")
+            logger.debug(f"Available LDs: {list(ld_nodes.keys())}")
+            logger.debug(f"Available LNs: {list(ln_nodes.keys())}")
+            
+            tree = ET.parse(self.config.scd_file_path)
+            root = tree.getroot()
+            
+            ns_uri = None
+            if "}" in root.tag:
+                ns_uri = root.tag.split("}")[0].strip("{")
+            
+            def _ns(tag: str) -> str:
+                return f"{{{ns_uri}}}{tag}" if ns_uri else tag
+            
+            # Find target IED
+            found_ied = False
+            for ied in root.findall(f".//{_ns('IED')}"):
+                if ied.get("name") != self.ied_name:
+                    continue
+                
+                found_ied = True
+                logger.debug(f"Found IED: {self.ied_name}")
+                
+                for ldevice in ied.findall(f".//{_ns('LDevice')}"):
+                    ld_inst = ldevice.get("inst", "LD0")
+                    ld_inst_norm = self._strip_ied_prefix(ied_name, ld_inst) or ld_inst
+                    
+                    logger.debug(f"Processing LDevice: {ld_inst} -> {ld_inst_norm}")
+                    
+                    for ln in ldevice.findall(f".//{_ns('LN')}") + ldevice.findall(f".//{_ns('LN0')}"):
+                        prefix = ln.get("prefix", "")
+                        lnClass = ln.get("lnClass", "")
+                        inst = ln.get("inst", "")
+                        full_ln_name = f"{prefix}{lnClass}{inst}"
+                        
+                        # Get the LogicalNode pointer
+                        lnode = ln_nodes.get((ld_inst_norm, full_ln_name))
+                        if not lnode:
+                            logger.debug(f"LN not found in ln_nodes: ({ld_inst_norm}, {full_ln_name})")
+                            continue
+                        
+                        # Find all DOIs with ctlModel
+                        for doi in ln.findall(f"{_ns('DOI')}"):
+                            do_name = doi.get("name")
+                            if not do_name:
+                                continue
+                            
+                            # Check if this DOI has a ctlModel
+                            ctl_model = None
+                            for dai in doi.findall(f"{_ns('DAI')}"):
+                                if dai.get("name") == "ctlModel":
+                                    val = dai.find(f"{_ns('Val')}")
+                                    if val is not None and val.text:
+                                        ctl_model = val.text.strip()
+                                        logger.debug(f"Found ctlModel={ctl_model} for {ld_inst_norm}/{full_ln_name}.{do_name}")
+                                    break
+                            
+                            # Skip if not a control or status-only
+                            if not ctl_model:
+                                continue
+                            
+                            if "status" in ctl_model.lower():
+                                logger.debug(f"Skipping status-only control: {ld_inst_norm}/{full_ln_name}.{do_name}")
+                                continue
+                            
+                            # Map control model to libiec61850 constant
+                            control_options = self._map_ctl_model(ctl_model)
+                            if control_options is None:
+                                logger.warning(f"Failed to map ctlModel '{ctl_model}' for {ld_inst_norm}/{full_ln_name}.{do_name}")
+                                control_options = 0
+                            
+                            # Create the control DataObject
+                            key = (ld_inst_norm, full_ln_name, do_name)
+                            if key not in do_nodes:
+                                parent = ctypes.cast(lnode, ctypes.POINTER(lib.ModelNode))
+                                new_do = None
+
+                                # Prefer CDC-specific creation for known control types to get proper structure
+                                # CSWI.Pos is DPC (double point control)
+                                if lnClass == "CSWI" and do_name == "Pos" and hasattr(lib, "CDC_DPC_create"):
+                                    try:
+                                        new_do = lib.CDC_DPC_create(
+                                            do_name.encode("utf-8"),
+                                            parent,
+                                            0,
+                                            control_options,
+                                        )
+                                        if new_do:
+                                            self._cdc_control_dos.add(key)
+                                    except Exception as e:
+                                        logger.debug(f"CDC_DPC_create failed for {ld_inst_norm}/{full_ln_name}.{do_name}: {e}")
+
+                                # Fallback to generic DataObject_create
+                                if not new_do:
+                                    new_do = lib.DataObject_create(do_name.encode("utf-8"), parent, control_options)
+                                if new_do:
+                                    do_nodes[key] = ctypes.cast(new_do, ctypes.POINTER(lib.ModelNode))
+                                    created += 1
+                                    logger.info(f"✓ Created control DO: {ld_inst_norm}/{full_ln_name}.{do_name} with ctlModel={ctl_model} (options={control_options})")
+                                else:
+                                    logger.warning(f"DataObject_create returned NULL for {ld_inst_norm}/{full_ln_name}.{do_name}")
+                            else:
+                                logger.debug(f"Control DO already exists: {key}")
+            
+            if not found_ied:
+                logger.warning(f"IED '{self.ied_name}' not found in SCD")
+            
+            return created
+            
+        except Exception as e:
+            logger.warning(f"Failed to pre-create control DOs: {e}", exc_info=True)
+            return created
+    
+    def _get_control_options_for_signal(self, signal: Signal, ld_inst: str, ln_name: str, do_name: str) -> int:
+        """Get control options by parsing SCD file for this specific DO"""
+        try:
+            if not self.config.scd_file_path:
+                return 0
+            
+            # Build the object reference to search for
+            ref = f"{ld_inst}/{ln_name}.{do_name}"
+            
+            # Parse SCD to find ctlModel for this DO
+            tree = ET.parse(self.config.scd_file_path)
+            root = tree.getroot()
+            
+            ns_uri = None
+            if "}" in root.tag:
+                ns_uri = root.tag.split("}")[0].strip("{")
+            
+            def _ns(tag: str) -> str:
+                return f"{{{ns_uri}}}{tag}" if ns_uri else tag
+            
+            # Find the IED and logical device
+            for ied in root.findall(f".//{_ns('IED')}"):
+                if ied.get("name") != self.ied_name:
+                    continue
+                
+                for ldevice in ied.findall(f".//{_ns('LDevice')}"):
+                    if ldevice.get("inst") != ld_inst:
+                        continue
+                    
+                    for ln in ldevice.findall(f".//{_ns('LN')}") + ldevice.findall(f".//{_ns('LN0')}"):
+                        # Match by combining prefix + lnClass + inst
+                        prefix = ln.get("prefix", "")
+                        lnClass = ln.get("lnClass", "")
+                        inst = ln.get("inst", "")
+                        full_ln_name = f"{prefix}{lnClass}{inst}"
+                        
+                        if full_ln_name != ln_name:
+                            continue
+                        
+                        # Find the DO
+                        for doi in ln.findall(f"{_ns('DOI')}"):
+                            if doi.get("name") != do_name:
+                                continue
+                            
+                            # Look for ctlModel DAI
+                            for dai in doi.findall(f"{_ns('DAI')}"):
+                                if dai.get("name") == "ctlModel":
+                                    val = dai.find(f"{_ns('Val')}")
+                                    if val is not None and val.text:
+                                        ctl_model = val.text.strip()
+                                        mapped = self._map_ctl_model(ctl_model)
+                                        if mapped is not None:
+                                            logger.debug(f"Found ctlModel={ctl_model} for {ref}, using control option={mapped}")
+                                            return mapped
+            
+            # No control model found, return default (status-only)
+            return 0
+            
+        except Exception as e:
+            logger.debug(f"Failed to get control options for {ld_inst}/{ln_name}.{do_name}: {e}")
+            return 0
 
     def _parse_signal_meta(self, signal: Signal) -> tuple[str, str]:
         fc = signal.fc
@@ -871,12 +1163,84 @@ class IEC61850ServerAdapter(BaseProtocol):
 
         sbo_controls = self._find_sbo_control_objects(self.config.scd_file_path, self.ied_name)
         if not sbo_controls:
+            logger.debug("No SBO control objects found in SCD")
             return
 
+        logger.info(f"Found {len(sbo_controls)} SBO control objects in SCD: {[ref for ref, _ in sbo_controls]}")
+
         for ref, ctl_model in sbo_controls:
-            model_node = lib.IedModel_getModelNodeByObjectReference(self.model, ref.encode("utf-8"))
+            # Try multiple reference formats (model might use different naming)
+            # IEC 61850 control objects are typically addressed as LD/LN$CO$DO
+            variations = [
+                ref,  # Original: CTRL/DCCSWI1.Pos
+                ref.replace("/", "$"),  # CTRL$DCCSWI1.Pos
+                ref.replace(".", "$"),  # CTRL/DCCSWI1$Pos
+                ref.replace("/", "$").replace(".", "$"),  # CTRL$DCCSWI1$Pos
+            ]
+
+            # Add CO-functional-constraint variants
+            try:
+                ld_part, ln_do = ref.split("/", 1)
+                ln_part, do_part = ln_do.split(".", 1)
+                variations.extend([
+                    f"{ld_part}/{ln_part}$CO${do_part}",
+                    f"{ld_part}${ln_part}$CO${do_part}",
+                ])
+            except ValueError:
+                pass
+
+            # Add IED-prefixed variants (some models include IED name in reference)
+            ied_prefix = (self.ied_name or "").strip()
+            if ied_prefix:
+                variations.extend([f"{ied_prefix}/{v}" for v in variations])
+
+            def _resolve_data_object(node: ctypes.POINTER(lib.ModelNode)):
+                if not node:
+                    return None
+                try:
+                    node_type = lib.ModelNode_getType(node)
+                except Exception:
+                    return None
+
+                # If already a DataObject, return
+                if node_type == lib.DataObjectModelType:
+                    return node
+
+                # If DataAttribute, climb to parent
+                if node_type == lib.DataAttributeModelType:
+                    try:
+                        parent = lib.ModelNode_getParent(node)
+                        if parent and lib.ModelNode_getType(parent) == lib.DataObjectModelType:
+                            return parent
+                    except Exception:
+                        return None
+
+                return None
+
+            model_node = None
+            found_ref = None
+            for variant in variations:
+                # Try full object reference lookup
+                model_node = lib.IedModel_getModelNodeByObjectReference(self.model, variant.encode("utf-8"))
+                data_object_node = _resolve_data_object(model_node)
+                if data_object_node:
+                    found_ref = variant
+                    model_node = data_object_node
+                    logger.debug(f"Found control object with reference: {variant}")
+                    break
+
+                # Try short object reference lookup (if available)
+                if hasattr(lib, "IedModel_getModelNodeByShortObjectReference"):
+                    model_node = lib.IedModel_getModelNodeByShortObjectReference(self.model, variant.encode("utf-8"))
+                    data_object_node = _resolve_data_object(model_node)
+                    if data_object_node:
+                        found_ref = variant
+                        model_node = data_object_node
+                        logger.debug(f"Found control object with short reference: {variant}")
+                        break
+
             if not model_node:
-                logger.warning(f"SBO control object not found in model: {ref}")
+                logger.warning(f"SBO control object not found in model (tried {len(variations)} formats): {ref}")
                 continue
 
             data_object = ctypes.cast(model_node, ctypes.POINTER(lib.DataObject))
@@ -890,6 +1254,14 @@ class IEC61850ServerAdapter(BaseProtocol):
                     lib.IedServer_updateCtlModel(self.server, data_object, ctl_model_value)
                 except Exception as e:
                     logger.warning(f"Failed to set ctlModel for {ref}: {e}")
+
+                # Also update the ctlModel DA value so clients see the correct numeric value
+                try:
+                    ctl_attr = self._get_child_attribute(data_object, "ctlModel")
+                    if ctl_attr is not None and hasattr(lib, "IedServer_updateUnsignedAttributeValue"):
+                        lib.IedServer_updateUnsignedAttributeValue(self.server, ctl_attr, int(ctl_model_value))
+                except Exception as e:
+                    logger.debug(f"Failed to update ctlModel DA for {ref}: {e}")
 
             control_ctx = {
                 "ref": ref,
@@ -913,7 +1285,13 @@ class IEC61850ServerAdapter(BaseProtocol):
             self._control_handler_params.append(param)
             self._control_handler_ptrs.append(p_obj)  # Keep pointer alive
 
-            logger.info(f"Registered SBO handlers for {ref}")
+            logger.info(f"✓ Registered SBO handlers for {found_ref} (ctlModel={ctl_model})")
+
+        registered_count = len(self._control_handlers)
+        if registered_count > 0:
+            logger.info(f"Successfully registered {registered_count} SBO control handlers")
+        else:
+            logger.warning(f"No SBO control handlers were registered (found {len(sbo_controls)} candidates)")
 
     def _find_sbo_control_objects(self, scd_path: str, ied_name: str) -> list[tuple[str, str]]:
         """Find control DOs with SBO control model in the SCD and return object references."""
