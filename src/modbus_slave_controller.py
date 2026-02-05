@@ -109,6 +109,7 @@ class GeneratorController:
 
         self.FCB1 = True
         self.FCB2 = False
+        self.previousR192 = 0  # Track R192 to detect actual changes
 
         self.SSL = {
             'SSL425_ServiceSWOff': False,
@@ -481,7 +482,11 @@ class GeneratorController:
 
             R192 = datastore.getValues(3, self.register_base + 192, count=1)
             if isinstance(R192, list):
-                self.parse_R192(R192[0])
+                current_R192 = R192[0]
+                if current_R192 != self.previousR192:
+                    logger.info(f"[{self.id}] R192 changed: {self.previousR192} -> {current_R192}")
+                    self.parse_R192(current_R192)
+                    self.previousR192 = current_R192
 
             self.validate_ssl_flags()
             self.update_state()
@@ -638,6 +643,9 @@ class IndividualModbusServer:
             hr=hr,
             ir=ModbusSequentialDataBlock(0, [0] * num_registers)
         )
+        # Initialize command registers to 0
+        store.setValues(3, 95, [0])   # R095 - Fault simulation flags
+        store.setValues(3, 192, [0])  # R192 - Command word
         return store
     
     async def _run_server_async(self):
