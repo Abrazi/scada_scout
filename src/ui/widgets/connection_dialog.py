@@ -85,6 +85,15 @@ class ConnectionDialog(QDialog):
         self.type_input.addItem(DeviceType.IEC104_RTU.value, DeviceType.IEC104_RTU)
         self.type_input.addItem(DeviceType.MODBUS_TCP.value, DeviceType.MODBUS_TCP)
         self.type_input.addItem(DeviceType.MODBUS_SERVER.value, DeviceType.MODBUS_SERVER)
+        
+        # Modbus RTU options
+        try:
+            self.type_input.addItem(DeviceType.MODBUS_RTU_MASTER.value, DeviceType.MODBUS_RTU_MASTER)
+            self.type_input.addItem(DeviceType.MODBUS_RTU_SLAVE.value, DeviceType.MODBUS_RTU_SLAVE)
+            self.type_input.addItem(DeviceType.MODBUS_RTU_SIMULATOR.value, DeviceType.MODBUS_RTU_SIMULATOR)
+        except Exception:
+            pass  # RTU types not available
+        
         # OPC (opt-in) — appears in the Connect dialog so users can add OPC UA devices
         from src.models.device_models import DeviceType as _DT
         try:
@@ -131,6 +140,46 @@ class ConnectionDialog(QDialog):
         self.unit_id_input.setRange(1, 255)
         self.unit_id_input.setValue(1)
         self.unit_id_label = QLabel("Slave ID (Unit ID):")
+        
+        # Modbus RTU Serial Configuration
+        self.serial_port_combo = QComboBox()
+        self.serial_port_combo.setEditable(True)
+        self.serial_port_combo.setPlaceholderText("Select or enter port...")
+        self.refresh_ports_btn = QPushButton("🔄 Refresh")
+        self.refresh_ports_btn.setMaximumWidth(100)
+        self.refresh_ports_btn.clicked.connect(self._refresh_serial_ports)
+        
+        self.serial_port_layout = QHBoxLayout()
+        self.serial_port_layout.addWidget(self.serial_port_combo)
+        self.serial_port_layout.addWidget(self.refresh_ports_btn)
+        self.serial_port_label = QLabel("Serial Port:")
+        
+        self.baud_rate_combo = QComboBox()
+        self.baud_rate_combo.addItems(["9600", "19200", "38400", "57600", "115200"])
+        self.baud_rate_combo.setCurrentText("9600")
+        self.baud_rate_combo.setEditable(True)
+        self.baud_rate_label = QLabel("Baud Rate:")
+        
+        self.data_bits_combo = QComboBox()
+        self.data_bits_combo.addItems(["7", "8"])
+        self.data_bits_combo.setCurrentText("8")
+        self.data_bits_label = QLabel("Data Bits:")
+        
+        self.parity_combo = QComboBox()
+        self.parity_combo.addItems(["None (N)", "Even (E)", "Odd (O)"])
+        self.parity_combo.setCurrentIndex(0)
+        self.parity_label = QLabel("Parity:")
+        
+        self.stop_bits_combo = QComboBox()
+        self.stop_bits_combo.addItems(["1", "1.5", "2"])
+        self.stop_bits_combo.setCurrentText("1")
+        self.stop_bits_label = QLabel("Stop Bits:")
+        
+        self.rtu_transport_combo = QComboBox()
+        self.rtu_transport_combo.addItems(["Serial (RS-485/USB)", "RTU over TCP"])
+        self.rtu_transport_combo.setCurrentIndex(0)
+        self.rtu_transport_combo.currentIndexChanged.connect(self._on_rtu_transport_changed)
+        self.rtu_transport_label = QLabel("Transport:")
 
         # Polling Settings
         self.poll_layout = QHBoxLayout()
@@ -158,6 +207,14 @@ class ConnectionDialog(QDialog):
         self.form.addRow("Port:", self.port_input)
         self.form.addRow("Protocol:", self.type_input)
         self.form.addRow(self.unit_id_label, self.unit_id_input)
+        
+        # RTU Configuration rows
+        self.form.addRow(self.rtu_transport_label, self.rtu_transport_combo)
+        self.form.addRow(self.serial_port_label, self.serial_port_layout)
+        self.form.addRow(self.baud_rate_label, self.baud_rate_combo)
+        self.form.addRow(self.data_bits_label, self.data_bits_combo)
+        self.form.addRow(self.parity_label, self.parity_combo)
+        self.form.addRow(self.stop_bits_label, self.stop_bits_combo)
         
         # Store label reference for Modbus Config
         self.modbus_config_row_label = QLabel("Modbus Config (Optional):")
@@ -194,6 +251,9 @@ class ConnectionDialog(QDialog):
         
         # Internal state
         self.modbus_register_maps = []
+        
+        # Initialize serial ports
+        self._refresh_serial_ports()
         
         # Initialize labels/visibility
         self._update_form_labels(self.type_input.currentText())
@@ -277,6 +337,82 @@ class ConnectionDialog(QDialog):
             print(f"Error getting local IPs: {e}")
             
         self.ip_select.addItems(ips)
+    
+    def _refresh_serial_ports(self):
+        """Refresh the list of available serial ports."""
+        try:
+            from src.protocols.modbus.rtu import list_serial_ports
+            ports = list_serial_ports()
+            
+            # Get current port name (from data, not display text)
+            current_port = self.serial_port_combo.currentData()
+            if current_port is None:
+                current_port = self.serial_port_combo.currentText()
+            
+            self.serial_port_combo.clear()
+            
+            if ports:
+                for port_info in ports:
+                    if isinstance(port_info, tuple) and len(port_info) == 2:
+                        # tuple format: (port_name, description)
+                        port_name, port_desc = port_info
+                        display = f"{port_name} - {port_desc}" if port_desc else port_name
+                        self.serial_port_combo.addItem(display, port_name)
+                    elif isinstance(port_info, dict):
+                        port_name = port_info.get('device', '')
+                        port_desc = port_info.get('description', '')
+                        display = f"{port_name} - {port_desc}" if port_desc else port_name
+                        self.serial_port_combo.addItem(display, port_name)
+                    else:
+                        # Fallback: use string as both display and data
+                        port_str = str(port_info)
+                        self.serial_port_combo.addItem(port_str, port_str)
+                
+                # Restore previous selection if it still exists
+                if current_port:
+                    idx = self.serial_port_combo.findData(current_port)
+                    if idx >= 0:
+                        self.serial_port_combo.setCurrentIndex(idx)
+                    else:
+                        # Try by text as fallback
+                        idx = self.serial_port_combo.findText(current_port)
+                        if idx >= 0:
+                            self.serial_port_combo.setCurrentIndex(idx)
+            else:
+                # No ports found, but allow manual entry
+                self.serial_port_combo.addItem("No ports found - Enter manually", "")
+                logger.info("No serial ports found")
+        except Exception as e:
+            logger.error(f"Failed to refresh serial ports: {e}")
+            self.serial_port_combo.clear()
+            self.serial_port_combo.addItem("Error listing ports - Enter manually", "")
+    
+    def _on_rtu_transport_changed(self):
+        """Handle RTU transport type changes."""
+        transport = self.rtu_transport_combo.currentText()
+        use_serial = "Serial" in transport
+        
+        # Show/hide serial configuration
+        self.serial_port_label.setVisible(use_serial)
+        self.serial_port_combo.setVisible(use_serial)
+        self.refresh_ports_btn.setVisible(use_serial)
+        self.baud_rate_label.setVisible(use_serial)
+        self.baud_rate_combo.setVisible(use_serial)
+        self.data_bits_label.setVisible(use_serial)
+        self.data_bits_combo.setVisible(use_serial)
+        self.parity_label.setVisible(use_serial)
+        self.parity_combo.setVisible(use_serial)
+        self.stop_bits_label.setVisible(use_serial)
+        self.stop_bits_combo.setVisible(use_serial)
+        
+        # Show/hide IP/Port for RTU over TCP
+        self.ip_label.setVisible(not use_serial)
+        self.ip_container.setVisible(not use_serial)
+        self.port_input.setVisible(not use_serial)
+        for i in range(self.form.count()):
+            label = self.form.itemAt(i, QFormLayout.LabelRole)
+            if label and label.widget() and label.widget().text() == "Port:":
+                label.widget().setVisible(not use_serial)
 
     def _on_type_changed(self):
         # Auto-set standard ports
@@ -287,6 +423,9 @@ class ConnectionDialog(QDialog):
             self.port_input.setText("502")
         elif dt == DeviceType.MODBUS_SERVER:
             self.port_input.setText("5020")
+        elif dt in [DeviceType.MODBUS_RTU_MASTER, DeviceType.MODBUS_RTU_SLAVE, DeviceType.MODBUS_RTU_SIMULATOR]:
+            # RTU over TCP uses port 502 by default
+            self.port_input.setText("502")
         else:
             self.port_input.setText("102")
 
@@ -426,6 +565,31 @@ class ConnectionDialog(QDialog):
         self.spin_interval.setValue(config.poll_interval)
         self.unit_id_input.setValue(config.modbus_unit_id)
         
+        # RTU Configuration
+        if hasattr(config, 'rtu_transport') and config.rtu_transport:
+            idx = 0 if config.rtu_transport == 'serial' else 1
+            self.rtu_transport_combo.setCurrentIndex(idx)
+        if hasattr(config, 'serial_port') and config.serial_port:
+            # Try to find by data first, then by text, finally set as editable text
+            idx = self.serial_port_combo.findData(config.serial_port)
+            if idx >= 0:
+                self.serial_port_combo.setCurrentIndex(idx)
+            else:
+                idx = self.serial_port_combo.findText(config.serial_port)
+                if idx >= 0:
+                    self.serial_port_combo.setCurrentIndex(idx)
+                else:
+                    self.serial_port_combo.setEditText(config.serial_port)
+        if hasattr(config, 'serial_baudrate') and config.serial_baudrate:
+            self.baud_rate_combo.setEditText(str(config.serial_baudrate))
+        if hasattr(config, 'serial_bytesize') and config.serial_bytesize:
+            self.data_bits_combo.setCurrentText(str(config.serial_bytesize))
+        if hasattr(config, 'serial_parity') and config.serial_parity:
+            parity_map = {'N': 0, 'E': 1, 'O': 2}
+            self.parity_combo.setCurrentIndex(parity_map.get(config.serial_parity, 0))
+        if hasattr(config, 'serial_stopbits') and config.serial_stopbits:
+            self.stop_bits_combo.setCurrentText(str(config.serial_stopbits))
+        
         self.type_input.blockSignals(False)
         self.blockSignals(False)
 
@@ -483,7 +647,11 @@ class ConnectionDialog(QDialog):
              self.ip_container.setCurrentWidget(self.ip_input)
         
         # Show/Hide Unit ID based on protocol
-        is_modbus = device_type in [DeviceType.MODBUS_TCP, DeviceType.MODBUS_SERVER]
+        try:
+            is_modbus = device_type in [DeviceType.MODBUS_TCP, DeviceType.MODBUS_SERVER, 
+                                       DeviceType.MODBUS_RTU_MASTER, DeviceType.MODBUS_RTU_SLAVE]
+        except:
+            is_modbus = device_type in [DeviceType.MODBUS_TCP, DeviceType.MODBUS_SERVER]
         self.unit_id_input.setVisible(is_modbus)
         self.unit_id_label.setVisible(is_modbus)
         
@@ -491,6 +659,45 @@ class ConnectionDialog(QDialog):
         self.modbus_config_row_label.setVisible(is_modbus)
         self.modbus_config_input.setVisible(is_modbus)
         self.modbus_browse_btn.setVisible(is_modbus)
+        
+        # Show/Hide RTU Configuration based on protocol
+        try:
+            is_rtu = device_type in [DeviceType.MODBUS_RTU_MASTER, DeviceType.MODBUS_RTU_SLAVE, 
+                                    DeviceType.MODBUS_RTU_SIMULATOR]
+        except Exception as e:
+            logger.debug(f"Exception checking RTU: {e}")
+            is_rtu = False
+        
+        self.rtu_transport_label.setVisible(is_rtu)
+        self.rtu_transport_combo.setVisible(is_rtu)
+        self.serial_port_label.setVisible(is_rtu)
+        self.serial_port_combo.setVisible(is_rtu)
+        self.refresh_ports_btn.setVisible(is_rtu)
+        self.baud_rate_label.setVisible(is_rtu)
+        self.baud_rate_combo.setVisible(is_rtu)
+        self.data_bits_label.setVisible(is_rtu)
+        self.data_bits_combo.setVisible(is_rtu)
+        self.parity_label.setVisible(is_rtu)
+        self.parity_combo.setVisible(is_rtu)
+        self.stop_bits_label.setVisible(is_rtu)
+        self.stop_bits_combo.setVisible(is_rtu)
+        
+        # Hide IP/Port for Serial RTU transport
+        if is_rtu:
+            transport = self.rtu_transport_combo.currentText()
+            use_serial = "Serial" in transport
+            self.ip_label.setVisible(not use_serial)
+            self.ip_container.setVisible(not use_serial)
+            self.port_input.setVisible(not use_serial)
+            for i in range(self.form.count()):
+                label = self.form.itemAt(i, QFormLayout.LabelRole)
+                if label and label.widget() and label.widget().text() == "Port:":
+                    label.widget().setVisible(not use_serial)
+        else:
+            # Restore IP/Port visibility for non-RTU
+            self.ip_label.setVisible(True)
+            self.ip_container.setVisible(True)
+            self.port_input.setVisible(True)
         
         # Show/Hide SCD File based on protocol
         is_iec61850 = device_type == DeviceType.IEC61850_IED
@@ -656,7 +863,14 @@ class ConnectionDialog(QDialog):
             scd_file_path=self.scd_input.text() if self.scd_input.text() else None,
             polling_enabled=self.chk_polling.isChecked(),
             poll_interval=self.spin_interval.value(),
-            modbus_unit_id=self.unit_id_input.value()
+            modbus_unit_id=self.unit_id_input.value(),
+            # RTU Configuration
+            rtu_transport='serial' if self.rtu_transport_combo.currentIndex() == 0 else 'rtu_over_tcp',
+            serial_port=self.serial_port_combo.currentData() or self.serial_port_combo.currentText(),
+            serial_baudrate=int(self.baud_rate_combo.currentText()) if self.baud_rate_combo.currentText().isdigit() else 9600,
+            serial_bytesize=int(self.data_bits_combo.currentText()),
+            serial_parity=self.parity_combo.currentText()[0] if self.parity_combo.currentText() else 'N',
+            serial_stopbits=float(self.stop_bits_combo.currentText())
         )
         
         # OPC: include endpoint in protocol_params if provided

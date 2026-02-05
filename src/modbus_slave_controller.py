@@ -10,6 +10,16 @@ import asyncio
 
 logger = logging.getLogger(__name__)
 
+# Verbosity and log level control
+# Set VERBOSE=True for DEBUG level; HEARTBEAT_LOG_LEVEL controls heartbeat (R192 bit 7) logging
+VERBOSE = False  # Toggle for more verbose logging (DEBUG)
+HEARTBEAT_LOG_LEVEL = 25  # Custom level between INFO(20) and WARNING(30)
+logging.addLevelName(HEARTBEAT_LOG_LEVEL, "HEARTBEAT")
+LOG_LEVEL = logging.DEBUG if VERBOSE else logging.INFO
+logger.setLevel(LOG_LEVEL)
+# Ensure root logger respects our chosen level as well
+logging.getLogger().setLevel(LOG_LEVEL)
+
 VOLTAGE_EPSILON = 10
 FREQUENCY_EPSILON = 0.1
 POWER_EPSILON = 10
@@ -484,7 +494,18 @@ class GeneratorController:
             if isinstance(R192, list):
                 current_R192 = R192[0]
                 if current_R192 != self.previousR192:
-                    logger.info(f"[{self.id}] R192 changed: {self.previousR192} -> {current_R192}")
+                    # Bit 7 (SSL708_ClockPulse_CMD) is a heartbeat bit
+                    # Only log heartbeat changes (0↔128) if log level > 5
+                    xor_diff = current_R192 ^ self.previousR192
+                    is_heartbeat_only = xor_diff == 128
+                    
+                    if is_heartbeat_only:
+                        # Heartbeat messages are noisy; only emit when VERBOSE mode is enabled
+                        if VERBOSE:
+                            logger.log(HEARTBEAT_LOG_LEVEL, f"[{self.id}] R192 heartbeat: {self.previousR192} -> {current_R192}")
+                    else:
+                        logger.info(f"[{self.id}] R192 changed: {self.previousR192} -> {current_R192}")
+                    
                     self.parse_R192(current_R192)
                     self.previousR192 = current_R192
 
