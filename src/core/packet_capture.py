@@ -380,6 +380,9 @@ class PacketCaptureWorker(QObject):
             else:
                 # Provide guidance if dumpcap not usable
                 self._emit_dumpcap_guidance(err2)
+        else:
+            # On Windows, provide Windows-specific guidance
+            self._emit_dumpcap_guidance(err)
 
         # final fallback: emit AsyncSniffer error
         self.error_occurred.emit(f"Failed to start sniffer: {err}")
@@ -544,11 +547,25 @@ class PacketCaptureWorker(QObject):
             from sys import platform
             is_linux = platform.startswith('linux')
             is_mac = platform.startswith('darwin')
+            is_windows = platform.startswith('win')
         except Exception:
-            is_linux = is_mac = False
+            is_linux = is_mac = is_windows = False
 
         if not self._dumpcap_path:
-            if is_linux:
+            if is_windows:
+                msg = (
+                    "Packet capture failed.\n\n"
+                    "For Windows, you need:\n"
+                    "1. Npcap (installed with Wireshark)\n"
+                    "2. Run SCADA Scout as Administrator\n\n"
+                    "OR configure Npcap for non-admin capture:\n"
+                    "- Reinstall Npcap from https://npcap.com/\n"
+                    "- Check 'Install Npcap in WinPcap API-compatible Mode'\n"
+                    "- Check 'Support non-administrators'\n"
+                    "- Add your user to 'Npcap' Windows group\n"
+                    "- Restart application"
+                )
+            elif is_linux:
                 msg = (
                     "`dumpcap` not found. Install Wireshark/dumpcap.\n"
                     "On Debian/Ubuntu: sudo apt install wireshark\n"
@@ -569,18 +586,31 @@ class PacketCaptureWorker(QObject):
             return
 
         # dumpcap present but failed to start
-        # Suggest setcap for dumpcap binary
-        try:
-            setcap_cmd = f"sudo setcap 'cap_net_raw,cap_net_admin+eip' {self._dumpcap_path}"
-        except Exception:
-            setcap_cmd = "sudo setcap 'cap_net_raw,cap_net_admin+eip' /usr/bin/dumpcap"
+        if is_windows:
+            guidance = (
+                f"Packet capture failed ({error}).\n\n"
+                "Windows requires Administrator privileges for packet capture.\n\n"
+                "Solutions:\n"
+                "1. Run SCADA Scout as Administrator (right-click → Run as administrator)\n"
+                "2. Configure Npcap to allow non-admin capture:\n"
+                "   - Reinstall Npcap (from npcap.com)\n"
+                "   - Enable 'Support non-administrators' during install\n"
+                "   - Add your user to the 'Npcap' Windows group\n"
+                "   - Log out and back in, then restart SCADA Scout"
+            )
+        else:
+            # Suggest setcap for dumpcap binary on Linux/Unix
+            try:
+                setcap_cmd = f"sudo setcap 'cap_net_raw,cap_net_admin+eip' {self._dumpcap_path}"
+            except Exception:
+                setcap_cmd = "sudo setcap 'cap_net_raw,cap_net_admin+eip' /usr/bin/dumpcap"
 
-        guidance = (
-            f"Failed to use dumpcap ({error}).\n"
-            "If you want to use dumpcap without sudo, grant it capture capabilities (one-time):\n"
-            f"  {setcap_cmd}\n\n"
-            "Alternatively run the application as root (not recommended) or install a capture driver/tool appropriate for your OS."
-        )
+            guidance = (
+                f"Failed to use dumpcap ({error}).\n"
+                "If you want to use dumpcap without sudo, grant it capture capabilities (one-time):\n"
+                f"  {setcap_cmd}\n\n"
+                "Alternatively run the application as root (not recommended) or install a capture driver/tool appropriate for your OS."
+            )
         try:
             self.error_occurred.emit(guidance)
         except Exception:

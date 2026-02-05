@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 Complete IEC 61850 SBO Operation Test
 ======================================
@@ -17,6 +18,13 @@ Requirements:
 
 import sys
 import os
+
+# Set UTF-8 encoding for Windows console
+if sys.platform == 'win32':
+    import codecs
+    sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'strict')
+    sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'strict')
+
 import time
 import threading
 from pathlib import Path
@@ -100,7 +108,7 @@ def main():
     ICD_FILE = project_root / "ABBK3A03A1.iid"
     IED_NAME = "ABBK3A03A1"
     SERVER_IP = "127.0.0.1"
-    SERVER_PORT = 10102
+    SERVER_PORT = 10602  # Changed from 10102 - use available port
     CONTROL_PATH = "CTRL/CBCSWI1.Pos"  # CB prefix, CSWI class, instance 1
     
     if not ICD_FILE.exists():

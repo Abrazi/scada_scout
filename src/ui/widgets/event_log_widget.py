@@ -190,25 +190,20 @@ class EventLogWidget(QWidget):
         if self.btn_capture.isChecked():
             # Check if scapy is available before proceeding
             if not self.capture_worker._scapy_available:
-                error_msg = f"Scapy is not installed. Error: {self.capture_worker._scapy_error}\n\nTo enable packet capture, install scapy:\n  pip install scapy\n\nOn Linux, you may also need: sudo apt-get install tcpdump"
+                import sys
+                if sys.platform.startswith('win'):
+                    error_msg = f"Scapy is not installed. Error: {self.capture_worker._scapy_error}\n\nTo enable packet capture, install scapy:\n  pip install scapy\n\nOn Windows, you also need Npcap (installed with Wireshark)."
+                else:
+                    error_msg = f"Scapy is not installed. Error: {self.capture_worker._scapy_error}\n\nTo enable packet capture, install scapy:\n  pip install scapy\n\nOn Linux, you may also need: sudo apt-get install tcpdump"
                 self.log_event("ERROR", "Network", error_msg)
                 self.btn_capture.setChecked(False)
                 QMessageBox.warning(self, "Scapy Not Available", error_msg)
                 return
-            # Check raw-socket / pcap privileges (non-root may be unable to capture)
-            if not self._has_raw_socket_privileges():
-                warn = (
-                    "Current user lacks privileges to capture packets.\n"
-                    "You can either run the application as root (not recommended),\n"
-                    "or grant capture capabilities to the Python interpreter used by the venv.\n\n"
-                    "For example (run once):\n"
-                    "  sudo setcap 'cap_net_raw,cap_net_admin+eip' /path/to/venv/bin/python\n\n"
-                    "Alternatively install and use `dumpcap` with appropriate permissions,\n"
-                    "or run via a privileged capture helper.\n"
-                    "Capture will likely fail without one of these.\n"
-                )
-                self.log_event("WARNING", "Network", warn)
-                QMessageBox.warning(self, "Insufficient Capture Privileges", warn)
+            # Check raw-socket / pcap privileges (only relevant on Linux)
+            priv_result = self._check_capture_privileges()
+            if priv_result:
+                self.log_event("WARNING", "Network", priv_result)
+                QMessageBox.warning(self, "Insufficient Capture Privileges", priv_result)
                 self.btn_capture.setChecked(False)
                 return
             
@@ -285,18 +280,46 @@ class EventLogWidget(QWidget):
             apply_button_class(self.btn_capture, None)
             self.btn_capture.setText("📡 Capture")
 
-    def _has_raw_socket_privileges(self) -> bool:
-        """Quick check whether current process can open a raw AF_PACKET socket (Linux).
-        Returns True if allowed, False otherwise.
+    def _check_capture_privileges(self) -> str:
+        """Check if current process has packet capture privileges.
+        Returns error message string if privileges insufficient, or empty string if OK.
+        On Windows, this always returns empty (privilege check happens at capture time).
+        On Linux, tests AF_PACKET socket creation.
         """
+        import sys
+        
+        # On Windows, Npcap handles privileges - check at runtime
+        if sys.platform.startswith('win'):
+            return ""  # Don't pre-check on Windows
+        
+        # On Linux/Unix, try to create a raw packet socket
         try:
             import socket
-            # Try to create a raw packet socket (only works on Linux)
             s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.ntohs(3))
             s.close()
-            return True
+            return ""  # Success
+        except AttributeError:
+            # AF_PACKET not available (not Linux)
+            return ""
+        except PermissionError:
+            # Linux: insufficient privileges
+            import os
+            python_path = sys.executable
+            warn = (
+                "Current user lacks privileges to capture packets on Linux.\n\n"
+                "Solutions:\n"
+                "1. Run the application with sudo (not recommended)\n"
+                "2. Grant capture capabilities to Python interpreter (run once):\n"
+                f"   sudo setcap 'cap_net_raw,cap_net_admin+eip' {python_path}\n\n"
+                "3. Install and configure dumpcap:\n"
+                "   sudo apt-get install wireshark\n"
+                "   sudo setcap 'cap_net_raw,cap_net_admin+eip' /usr/bin/dumpcap\n\n"
+                "Capture will likely fail without one of these."
+            )
+            return warn
         except Exception:
-            return False
+            # Other error - allow attempt (might work with dumpcap)
+            return ""
 
     def _browse_log_file(self):
         filename, _ = QFileDialog.getSaveFileName(self, "Select packet log file", "packets.log", "Log Files (*.log *.txt);;All Files (*)")

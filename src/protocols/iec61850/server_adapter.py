@@ -42,6 +42,7 @@ class IEC61850ServerAdapter(BaseProtocol):
         self._sbo_state = {}
         self._sbo_select_timeout_ms = 30000
         self._cdc_control_dos = set()
+        self._created_control_objects = {}  # Maps ref -> (data_object_ptr, ctl_model_val, ctl_model_str)
 
     @staticmethod
     def _find_available_ports(bind_ip: str, start_port: int = 10002, count: int = 3) -> list:
@@ -233,14 +234,7 @@ class IEC61850ServerAdapter(BaseProtocol):
             # except Exception as e:
             #     logger.warning(f"Failed to register write access handler: {e}")
 
-
-            # Register SBO control handlers (if any)
-            try:
-                self._register_sbo_handlers()
-            except Exception as e:
-                logger.warning(f"Failed to register SBO handlers: {e}")
-
-            # Start the server
+            # Start the server (SBO handlers will be registered AFTER server starts)
             if int(self.config.port) < 1024:
                 # Check for administrator/root privileges on Windows/Linux
                 import sys
@@ -370,6 +364,13 @@ class IEC61850ServerAdapter(BaseProtocol):
                 if is_running:
                     self.connected = True
                     logger.info("IEC61850 server started successfully")
+                    
+                    # Register SBO handlers NOW that server is running
+                    try:
+                        self._register_sbo_handlers()
+                    except Exception as e:
+                        logger.warning(f"Failed to register SBO handlers: {e}")
+                    
                     if self.event_logger:
                         # Show actual binding info
                         if bind_ip == "0.0.0.0":
@@ -406,6 +407,12 @@ class IEC61850ServerAdapter(BaseProtocol):
             if start_result == 0:  # 0 = success in libiec61850
                 self.connected = True
                 logger.info("IEC61850 server started successfully")
+                
+                # Register SBO handlers NOW that server is running
+                try:
+                    self._register_sbo_handlers()
+                except Exception as e:
+                    logger.warning(f"Failed to register SBO handlers: {e}")
 
                 if self.event_logger:
                     # Show actual binding info
@@ -910,12 +917,17 @@ class IEC61850ServerAdapter(BaseProtocol):
     def _create_control_data_objects(self, ld_nodes: dict, ln_nodes: dict, do_nodes: dict, ied_name: str) -> int:
         """Pre-create all control Data Objects from SCD with proper control options"""
         created = 0
+        print(f"[CTRL_CREATE] Starting control DO pre-creation for IED '{self.ied_name}'", flush=True)
+        print(f"[CTRL_CREATE] SCD file path: {self.config.scd_file_path}", flush=True)
+        logger.info(f"[CTRL_CREATE] Starting control DO pre-creation for IED '{self.ied_name}'")
+        logger.info(f"[CTRL_CREATE] self.config.scd_file_path = {self.config.scd_file_path}")
         try:
             if not self.config.scd_file_path:
-                logger.debug("No SCD file path, skipping control DO pre-creation")
+                logger.warning("[CTRL_CREATE] No SCD file path, skipping control DO pre-creation")
+                print("[CTRL_CREATE] No SCD file path!", flush=True)
                 return 0
             
-            logger.debug(f"Pre-creating control DOs from {self.config.scd_file_path}")
+            logger.info(f"[CTRL_CREATE] SCD file: {self.config.scd_file_path}")
             logger.debug(f"Available LDs: {list(ld_nodes.keys())}")
             logger.debug(f"Available LNs: {list(ln_nodes.keys())}")
             
@@ -931,17 +943,22 @@ class IEC61850ServerAdapter(BaseProtocol):
             
             # Find target IED
             found_ied = False
+            print(f"[CTRL_CREATE] Searching for IED: {self.ied_name}", flush=True)
             for ied in root.findall(f".//{_ns('IED')}"):
-                if ied.get("name") != self.ied_name:
+                ied_name_attr = ied.get("name")
+                print(f"[CTRL_CREATE] Found IED in SCD: {ied_name_attr}", flush=True)
+                if ied_name_attr != self.ied_name:
                     continue
                 
                 found_ied = True
                 logger.debug(f"Found IED: {self.ied_name}")
+                print(f"[CTRL_CREATE] Matched target IED: {self.ied_name}", flush=True)
                 
                 for ldevice in ied.findall(f".//{_ns('LDevice')}"):
                     ld_inst = ldevice.get("inst", "LD0")
                     ld_inst_norm = self._strip_ied_prefix(ied_name, ld_inst) or ld_inst
                     
+                    print(f"[CTRL_CREATE] Processing LDevice: {ld_inst} -> {ld_inst_norm}", flush=True)
                     logger.debug(f"Processing LDevice: {ld_inst} -> {ld_inst_norm}")
                     
                     for ln in ldevice.findall(f".//{_ns('LN')}") + ldevice.findall(f".//{_ns('LN0')}"):
@@ -950,9 +967,12 @@ class IEC61850ServerAdapter(BaseProtocol):
                         inst = ln.get("inst", "")
                         full_ln_name = f"{prefix}{lnClass}{inst}"
                         
+                        print(f"[CTRL_CREATE] Checking LN: ({ld_inst_norm}, {full_ln_name})", flush=True)
                         # Get the LogicalNode pointer
                         lnode = ln_nodes.get((ld_inst_norm, full_ln_name))
                         if not lnode:
+                            print(f"[CTRL_CREATE] LN not in ln_nodes: ({ld_inst_norm}, {full_ln_name})", flush=True)
+                            print(f"[CTRL_CREATE] Available keys: {list(ln_nodes.keys())[:5]}", flush=True)
                             logger.debug(f"LN not found in ln_nodes: ({ld_inst_norm}, {full_ln_name})")
                             continue
                         
@@ -969,6 +989,7 @@ class IEC61850ServerAdapter(BaseProtocol):
                                     val = dai.find(f"{_ns('Val')}")
                                     if val is not None and val.text:
                                         ctl_model = val.text.strip()
+                                        print(f"[CTRL_CREATE] Found ctlModel={ctl_model} for {ld_inst_norm}/{full_ln_name}.{do_name}", flush=True)
                                         logger.debug(f"Found ctlModel={ctl_model} for {ld_inst_norm}/{full_ln_name}.{do_name}")
                                     break
                             
@@ -977,6 +998,7 @@ class IEC61850ServerAdapter(BaseProtocol):
                                 continue
                             
                             if "status" in ctl_model.lower():
+                                print(f"[CTRL_CREATE] Skipping status-only: {ld_inst_norm}/{full_ln_name}.{do_name}", flush=True)
                                 logger.debug(f"Skipping status-only control: {ld_inst_norm}/{full_ln_name}.{do_name}")
                                 continue
                             
@@ -988,24 +1010,44 @@ class IEC61850ServerAdapter(BaseProtocol):
                             
                             # Create the control DataObject
                             key = (ld_inst_norm, full_ln_name, do_name)
+                            print(f"[CTRL_CREATE] Creating DO: key={key}, lnClass={lnClass}", flush=True)
                             if key not in do_nodes:
                                 parent = ctypes.cast(lnode, ctypes.POINTER(lib.ModelNode))
                                 new_do = None
 
-                                # Prefer CDC-specific creation for known control types to get proper structure
-                                # CSWI.Pos is DPC (double point control)
-                                if lnClass == "CSWI" and do_name == "Pos" and hasattr(lib, "CDC_DPC_create"):
+                                # Prefer manual DPC creation for SBO controls to set correct ctlModel value
+                                # CDC_DPC_create hardcodes ctlModel=0 which is incorrect
+                                print(f"[CTRL_CREATE] Checking CDC: lnClass={lnClass}, do_name={do_name}", flush=True)
+                                if lnClass == "CSWI" and do_name == "Pos":
+                                    print(f"[CTRL_CREATE] Using MANUAL DPC creation for {key}", flush=True)
                                     try:
-                                        new_do = lib.CDC_DPC_create(
-                                            do_name.encode("utf-8"),
+                                        # Map control model string to numeric value
+                                        ctl_model_val = self._map_ctl_model(ctl_model) or lib.CONTROL_MODEL_STATUS_ONLY
+                                        print(f"[CTRL_CREATE] Calling _create_dpc_manually: ctl_model_val={ctl_model_val}, options={control_options}", flush=True)
+                                        
+                                        new_do, ctl_model_da = self._create_dpc_manually(
+                                            do_name,
                                             parent,
-                                            0,
-                                            control_options,
+                                            ctl_model_val,  # Control model (4 for sbo-with-enhanced-security)
+                                            control_options,  # Control options
                                         )
+                                        print(f"[CTRL_CREATE] _create_dpc_manually returned: DO={new_do}, ctlModel DA={ctl_model_da}", flush=True)
                                         if new_do:
                                             self._cdc_control_dos.add(key)
+                                            print(f"[CTRL_CREATE] Manual DPC creation SUCCESS for {key}", flush=True)
+                                            logger.info(f"Manual DPC creation success for {ld_inst_norm}/{full_ln_name}.{do_name}: ctlModel={ctl_model_val} ({ctl_model}), options={control_options}")
+                                            
+                                            # Store the control object pointer for later handler registration
+                                            # Now include the ctlModel DataAttribute pointer
+                                            ref = f"{ld_inst_norm}/{full_ln_name}.{do_name}"
+                                            self._created_control_objects[ref] = (new_do, ctl_model_val, ctl_model, ctl_model_da)
+                                            print(f"[CTRL_CREATE] Stored control object: {ref}", flush=True)
+                                        else:
+                                            print(f"[CTRL_CREATE] _create_dpc_manually returned NULL for {key}", flush=True)
+                                            logger.warning(f"Manual DPC creation returned NULL for {ld_inst_norm}/{full_ln_name}.{do_name}")
                                     except Exception as e:
-                                        logger.debug(f"CDC_DPC_create failed for {ld_inst_norm}/{full_ln_name}.{do_name}: {e}")
+                                        print(f"[CTRL_CREATE] Manual DPC creation EXCEPTION: {e}", flush=True)
+                                        logger.warning(f"Manual DPC creation failed for {ld_inst_norm}/{full_ln_name}.{do_name}: {e}")
 
                                 # Fallback to generic DataObject_create
                                 if not new_do:
@@ -1158,140 +1200,150 @@ class IEC61850ServerAdapter(BaseProtocol):
 
     def _register_sbo_handlers(self) -> None:
         """Register SBO select/operate handlers for control DOs defined in the SCD."""
-        if not self.server or not self.model or not self.config.scd_file_path:
+        print(f"[SBO_REGISTER] Starting handler registration", flush=True)
+        print(f"[SBO_REGISTER] server={self.server}, model={self.model}, scd={self.config.scd_file_path}", flush=True)
+        print(f"[SBO_REGISTER] Created control objects: {list(self._created_control_objects.keys())}", flush=True)
+        
+        if not self.server or not self.model:
+            print(f"[SBO_REGISTER] Missing server or model, skipping", flush=True)
             return
 
-        sbo_controls = self._find_sbo_control_objects(self.config.scd_file_path, self.ied_name)
-        if not sbo_controls:
-            logger.debug("No SBO control objects found in SCD")
+        # Use the stored control objects from _create_control_data_objects
+        if not self._created_control_objects:
+            logger.debug("No control objects were created - nothing to register")
             return
 
-        logger.info(f"Found {len(sbo_controls)} SBO control objects in SCD: {[ref for ref, _ in sbo_controls]}")
-
-        for ref, ctl_model in sbo_controls:
-            # Try multiple reference formats (model might use different naming)
-            # IEC 61850 control objects are typically addressed as LD/LN$CO$DO
-            variations = [
-                ref,  # Original: CTRL/DCCSWI1.Pos
-                ref.replace("/", "$"),  # CTRL$DCCSWI1.Pos
-                ref.replace(".", "$"),  # CTRL/DCCSWI1$Pos
-                ref.replace("/", "$").replace(".", "$"),  # CTRL$DCCSWI1$Pos
-            ]
-
-            # Add CO-functional-constraint variants
+        logger.info(f"Registering SBO handlers for {len(self._created_control_objects)} control objects")
+        
+        registered_count = 0
+        for ref, control_tuple in self._created_control_objects.items():
+            # Unpack the tuple - it might be 3 or 4 elements depending on manual vs CDC creation
+            if len(control_tuple) == 4:
+                data_object, ctl_model_val, ctl_model_str, ctl_model_da = control_tuple
+            else:
+                data_object, ctl_model_val, ctl_model_str = control_tuple
+                ctl_model_da = None  # Will search for it
+            
+            print(f"[SBO_REGISTER] Processing {ref}: ctlModel={ctl_model_val}, DA={ctl_model_da}", flush=True)
+            
+            # Only register handlers for SBO controls (not status-only or direct)
+            if "sbo" not in ctl_model_str.lower():
+                print(f"[SBO_REGISTER] Skipping non-SBO control: {ref} ({ctl_model_str})", flush=True)
+                continue
+            
             try:
-                ld_part, ln_do = ref.split("/", 1)
-                ln_part, do_part = ln_do.split(".", 1)
-                variations.extend([
-                    f"{ld_part}/{ln_part}$CO${do_part}",
-                    f"{ld_part}${ln_part}$CO${do_part}",
-                ])
-            except ValueError:
-                pass
-
-            # Add IED-prefixed variants (some models include IED name in reference)
-            ied_prefix = (self.ied_name or "").strip()
-            if ied_prefix:
-                variations.extend([f"{ied_prefix}/{v}" for v in variations])
-
-            def _resolve_data_object(node: ctypes.POINTER(lib.ModelNode)):
-                if not node:
-                    return None
+                # Update ctlModel on the server (control behavior)
                 try:
-                    node_type = lib.ModelNode_getType(node)
-                except Exception:
-                    return None
-
-                # If already a DataObject, return
-                if node_type == lib.DataObjectModelType:
-                    return node
-
-                # If DataAttribute, climb to parent
-                if node_type == lib.DataAttributeModelType:
-                    try:
-                        parent = lib.ModelNode_getParent(node)
-                        if parent and lib.ModelNode_getType(parent) == lib.DataObjectModelType:
-                            return parent
-                    except Exception:
-                        return None
-
-                return None
-
-            model_node = None
-            found_ref = None
-            for variant in variations:
-                # Try full object reference lookup
-                model_node = lib.IedModel_getModelNodeByObjectReference(self.model, variant.encode("utf-8"))
-                data_object_node = _resolve_data_object(model_node)
-                if data_object_node:
-                    found_ref = variant
-                    model_node = data_object_node
-                    logger.debug(f"Found control object with reference: {variant}")
-                    break
-
-                # Try short object reference lookup (if available)
-                if hasattr(lib, "IedModel_getModelNodeByShortObjectReference"):
-                    model_node = lib.IedModel_getModelNodeByShortObjectReference(self.model, variant.encode("utf-8"))
-                    data_object_node = _resolve_data_object(model_node)
-                    if data_object_node:
-                        found_ref = variant
-                        model_node = data_object_node
-                        logger.debug(f"Found control object with short reference: {variant}")
-                        break
-
-            if not model_node:
-                logger.warning(f"SBO control object not found in model (tried {len(variations)} formats): {ref}")
-                continue
-
-            data_object = ctypes.cast(model_node, ctypes.POINTER(lib.DataObject))
-            if not data_object:
-                logger.warning(f"Failed to cast model node to DataObject: {ref}")
-                continue
-
-            ctl_model_value = self._map_ctl_model(ctl_model)
-            if ctl_model_value is not None:
-                try:
-                    lib.IedServer_updateCtlModel(self.server, data_object, ctl_model_value)
+                    lib.IedServer_updateCtlModel(self.server, data_object, ctl_model_val)
+                    print(f"[SBO_REGISTER] Updated control model for {ref}", flush=True)
                 except Exception as e:
                     logger.warning(f"Failed to set ctlModel for {ref}: {e}")
 
-                # Also update the ctlModel DA value so clients see the correct numeric value
+                # Update the ctlModel DA value so clients see the correct numeric value
                 try:
-                    ctl_attr = self._get_child_attribute(data_object, "ctlModel")
-                    if ctl_attr is not None and hasattr(lib, "IedServer_updateUnsignedAttributeValue"):
-                        lib.IedServer_updateUnsignedAttributeValue(self.server, ctl_attr, int(ctl_model_value))
+                    # Use the stored pointer from manual DPC creation
+                    ctl_attr = ctl_model_da
+                    print(f"[SBO_REGISTER] Using stored ctlModel DA: {ctl_attr}", flush=True)
+                    if ctl_attr is not None:
+                        # Try multiple update methods
+                        updated = False
+                        
+                        # Method 1: Try updateInt32AttributeValue with data model locking
+                        if hasattr(lib, "IedServer_updateInt32AttributeValue"):
+                            try:
+                                # Lock the data model for thread-safe updates
+                                if hasattr(lib, "IedServer_lockDataModel"):
+                                    lib.IedServer_lockDataModel(self.server)
+                                
+                                print(f"[SBO_REGISTER] Calling IedServer_updateInt32AttributeValue(server={self.server}, attr={ctl_attr}, value={int(ctl_model_val)})", flush=True)
+                                lib.IedServer_updateInt32AttributeValue(self.server, ctl_attr, int(ctl_model_val))
+                                print(f"[SBO_REGISTER] Used updateInt32AttributeValue", flush=True)
+                                
+                                # Unlock the data model
+                                if hasattr(lib, "IedServer_unlockDataModel"):
+                                    lib.IedServer_unlockDataModel(self.server)
+                                
+                                # Try reading it back to verify
+                                if hasattr(lib, "IedServer_getAttributeValue"):
+                                    try:
+                                        readback = lib.IedServer_getAttributeValue(self.server, ctl_attr)
+                                        if readback:
+                                            val_type = lib.MmsValue_getType(readback)
+                                            if val_type in (lib.MMS_INTEGER, 1):  # INT type
+                                                readback_val = lib.MmsValue_toInt32(readback)
+                                                print(f"[SBO_REGISTER] Readback value: {readback_val}", flush=True)
+                                    except Exception as e2:
+                                        print(f"[SBO_REGISTER] Readback failed: {e2}", flush=True)
+                                
+                                updated = True
+                            except Exception as e:
+                                # Make sure to unlock even if there's an error
+                                if hasattr(lib, "IedServer_unlockDataModel"):
+                                    try:
+                                        lib.IedServer_unlockDataModel(self.server)
+                                    except:
+                                        pass
+                                print(f"[SBO_REGISTER] updateInt32AttributeValue failed: {e}", flush=True)
+                        
+                        # Method 2: Try with MmsValue
+                        if not updated and hasattr(lib, "MmsValue_newIntegerFromInt32"):
+                            try:
+                                mms_val = lib.MmsValue_newIntegerFromInt32(int(ctl_model_val))
+                                if hasattr(lib, "IedServer_updateAttributeValue"):
+                                    lib.IedServer_updateAttributeValue(self.server, ctl_attr, mms_val)
+                                    print(f"[SBO_REGISTER] Used MmsValue method", flush=True)
+                                    updated = True
+                                if hasattr(lib, "MmsValue_delete"):
+                                    lib.MmsValue_delete(mms_val)
+                            except Exception as e:
+                                print(f"[SBO_REGISTER] MmsValue method failed: {e}", flush=True)
+                        
+                        if updated:
+                            print(f"[SBO_REGISTER] Set ctlModel DA value={ctl_model_val} for {ref}", flush=True)
+                        else:
+                            print(f"[SBO_REGISTER] WARNING: Could not update ctlModel value for {ref}", flush=True)
+                    else:
+                        print(f"[SBO_REGISTER] WARNING: ctlModel attribute not found for {ref}", flush=True)
                 except Exception as e:
+                    print(f"[SBO_REGISTER] ERROR updating ctlModel DA: {e}", flush=True)
                     logger.debug(f"Failed to update ctlModel DA for {ref}: {e}")
 
-            control_ctx = {
-                "ref": ref,
-                "st_val": self._get_child_attribute(data_object, "stVal"),
-                "op_ok": self._get_child_attribute(data_object, "opOk"),
-                "t": self._get_child_attribute(data_object, "t"),
-            }
+                # Create control context
+                control_ctx = {
+                    "ref": ref,
+                    "st_val": self._get_child_attribute(data_object, "stVal"),
+                    "op_ok": self._get_child_attribute(data_object, "opOk"),
+                    "t": self._get_child_attribute(data_object, "t"),
+                }
 
-            check_handler = self._make_sbo_check_handler(control_ctx)
-            control_handler = self._make_sbo_control_handler(control_ctx)
+                # Create handlers
+                check_handler = self._make_sbo_check_handler(control_ctx)
+                control_handler = self._make_sbo_control_handler(control_ctx)
 
-            param = ctypes.py_object(control_ctx)
-            # pointers must be kept alive!
-            p_obj = ctypes.pointer(param)
-            param_ptr = ctypes.cast(p_obj, ctypes.c_void_p)
+                param = ctypes.py_object(control_ctx)
+                p_obj = ctypes.pointer(param)
+                param_ptr = ctypes.cast(p_obj, ctypes.c_void_p)
 
-            lib.IedServer_setPerformCheckHandler(self.server, data_object, check_handler, param_ptr)
-            lib.IedServer_setControlHandler(self.server, data_object, control_handler, param_ptr)
+                # Register handlers
+                lib.IedServer_setPerformCheckHandler(self.server, data_object, check_handler, param_ptr)
+                lib.IedServer_setControlHandler(self.server, data_object, control_handler, param_ptr)
 
-            self._control_handlers.append((check_handler, control_handler))
-            self._control_handler_params.append(param)
-            self._control_handler_ptrs.append(p_obj)  # Keep pointer alive
+                self._control_handlers.append((check_handler, control_handler))
+                self._control_handler_params.append(param)
+                self._control_handler_ptrs.append(p_obj)
 
-            logger.info(f"✓ Registered SBO handlers for {found_ref} (ctlModel={ctl_model})")
+                logger.info(f"✓ Registered SBO handlers for {ref} (ctlModel={ctl_model_str})")
+                print(f"[SBO_REGISTER] ✓ Registered handlers for {ref}", flush=True)
+                registered_count += 1
+                
+            except Exception as e:
+                logger.error(f"Failed to register SBO handlers for {ref}: {e}", exc_info=True)
+                print(f"[SBO_REGISTER] ERROR registering {ref}: {e}", flush=True)
 
-        registered_count = len(self._control_handlers)
         if registered_count > 0:
             logger.info(f"Successfully registered {registered_count} SBO control handlers")
         else:
-            logger.warning(f"No SBO control handlers were registered (found {len(sbo_controls)} candidates)")
+            logger.warning(f"No SBO control handlers were registered")
 
     def _find_sbo_control_objects(self, scd_path: str, ied_name: str) -> list[tuple[str, str]]:
         """Find control DOs with SBO control model in the SCD and return object references."""
@@ -1364,13 +1416,130 @@ class IEC61850ServerAdapter(BaseProtocol):
         if model == "status-only":
             return lib.CONTROL_MODEL_STATUS_ONLY
         return None
+    
+    def _create_dpc_manually(self, name: str, parent, ctl_model: int, options: int):
+        """
+        Manually create a DPC (Double Point Control) structure with correct ctlModel value.
+        This bypasses CDC_DPC_create which hardcodes ctlModel=0.
+        
+        DPC structure according to IEC 61850-7-3:
+        - stVal (INT8, FC=ST) - status value
+        - q (QUALITY, FC=ST) - quality
+        - t (TIMESTAMP, FC=ST) - timestamp
+        - ctlVal (CODED_ENUM, FC=CO) - control value
+        - origin (ORIGIN, FC=CO) - originator
+        - ctlNum (INT8U, FC=CO) - control number
+        - T (TIMESTAMP, FC=CO) - control timestamp
+        - Test (BOOLEAN, FC=CO) - test mode
+        - Check (CHECK, FC=CO) - check
+        - ctlModel (CODED_ENUM, FC=CF) - control model (THIS is what we need to set correctly!)
+        - sboTimeout (INT32U, FC=CF) - SBO timeout
+        - operTimeout (INT32U, FC=CF) - operate timeout
+        - pulseConfig (PULSE_CONFIG, FC=CF) - pulse configuration
+        """
+        try:
+            # Create the DataObject
+            do = lib.DataObject_create(name.encode("utf-8"), parent, options)
+            if not do:
+                return None
+            
+            do_node = ctypes.cast(do, ctypes.POINTER(lib.ModelNode))
+            
+            # Create status attributes (FC=ST)
+            lib.DataAttribute_create(b"stVal", do_node, lib.IEC61850_INT8, lib.IEC61850_FC_ST, 0, 0, 0)
+            lib.DataAttribute_create(b"q", do_node, lib.IEC61850_QUALITY, lib.IEC61850_FC_ST, 0, 0, 0)
+            lib.DataAttribute_create(b"t", do_node, lib.IEC61850_TIMESTAMP, lib.IEC61850_FC_ST, 0, 0, 0)
+            
+            # Create control attributes (FC=CO)
+            lib.DataAttribute_create(b"ctlVal", do_node, lib.IEC61850_ENUMERATED, lib.IEC61850_FC_CO, 0, 0, 0)
+            
+            # Create origin structure (FC=CO)
+            origin = lib.DataAttribute_create(b"origin", do_node, lib.IEC61850_CONSTRUCTED, lib.IEC61850_FC_CO, 0, 0, 0)
+            if origin:
+                origin_node = ctypes.cast(origin, ctypes.POINTER(lib.ModelNode))
+                lib.DataAttribute_create(b"orCat", origin_node, lib.IEC61850_ENUMERATED, lib.IEC61850_FC_CO, 0, 0, 0)
+                lib.DataAttribute_create(b"orIdent", origin_node, lib.IEC61850_OCTET_STRING_64, lib.IEC61850_FC_CO, 0, 0, 0)
+            
+            lib.DataAttribute_create(b"ctlNum", do_node, lib.IEC61850_INT8U, lib.IEC61850_FC_CO, 0, 0, 0)
+            lib.DataAttribute_create(b"T", do_node, lib.IEC61850_TIMESTAMP, lib.IEC61850_FC_CO, 0, 0, 0)
+            lib.DataAttribute_create(b"Test", do_node, lib.IEC61850_BOOLEAN, lib.IEC61850_FC_CO, 0, 0, 0)
+            lib.DataAttribute_create(b"Check", do_node, lib.IEC61850_CHECK, lib.IEC61850_FC_CO, 0, 0, 0)
+            
+            # Create configuration attributes (FC=CF)
+            # THIS is the critical one - create ctlModel DA (we'll set its value later via IedServer API)
+            ctl_model_da = lib.DataAttribute_create(b"ctlModel", do_node, lib.IEC61850_ENUMERATED, lib.IEC61850_FC_CF, 0, 0, 0)
+            if not ctl_model_da:
+                print(f"[MANUAL_DPC] WARNING: Failed to create ctlModel DA for {name}", flush=True)
+            else:
+                print(f"[MANUAL_DPC] Created ctlModel DA for {name} (will set value={ctl_model} via server API)", flush=True)
+                # Set the default value at build time so clients read ctlModel!=STATUS_ONLY immediately
+                try:
+                    mms_val = None
+                    if hasattr(lib, "MmsValue_newIntegerFromInt32"):
+                        mms_val = lib.MmsValue_newIntegerFromInt32(int(ctl_model))
+                    elif hasattr(lib, "MmsValue_newInteger"):
+                        mms_val = lib.MmsValue_newInteger(int(ctl_model))
+                    elif hasattr(lib, "MmsValue_newUnsigned"):
+                        mms_val = lib.MmsValue_newUnsigned(int(ctl_model))
+                    if mms_val:
+                        lib.DataAttribute_setValue(ctl_model_da, mms_val)
+                        if hasattr(lib, "MmsValue_delete"):
+                            lib.MmsValue_delete(mms_val)
+                        print(f"[MANUAL_DPC] Initialized ctlModel default to {ctl_model} on DA", flush=True)
+                    else:
+                        print(f"[MANUAL_DPC] WARNING: Could not allocate MMS value for ctlModel", flush=True)
+                except Exception as set_err:
+                    print(f"[MANUAL_DPC] WARNING: Failed to set default ctlModel value: {set_err}", flush=True)
+            
+            lib.DataAttribute_create(b"sboTimeout", do_node, lib.IEC61850_INT32U, lib.IEC61850_FC_CF, 0, 0, 0)
+            lib.DataAttribute_create(b"operTimeout", do_node, lib.IEC61850_INT32U, lib.IEC61850_FC_CF, 0, 0, 0)
+            
+            # Create pulseConfig structure (FC=CF)
+            pulse = lib.DataAttribute_create(b"pulseConfig", do_node, lib.IEC61850_CONSTRUCTED, lib.IEC61850_FC_CF, 0, 0, 0)
+            if pulse:
+                pulse_node = ctypes.cast(pulse, ctypes.POINTER(lib.ModelNode))
+                lib.DataAttribute_create(b"cmdQual", pulse_node, lib.IEC61850_ENUMERATED, lib.IEC61850_FC_CF, 0, 0, 0)
+                lib.DataAttribute_create(b"onDur", pulse_node, lib.IEC61850_INT32U, lib.IEC61850_FC_CF, 0, 0, 0)
+                lib.DataAttribute_create(b"offDur", pulse_node, lib.IEC61850_INT32U, lib.IEC61850_FC_CF, 0, 0, 0)
+                lib.DataAttribute_create(b"numPls", pulse_node, lib.IEC61850_INT32U, lib.IEC61850_FC_CF, 0, 0, 0)
+            
+            print(f"[MANUAL_DPC] Successfully created DPC {name} with ctlModel={ctl_model}", flush=True)
+            return do, ctl_model_da
+            
+        except Exception as e:
+            print(f"[MANUAL_DPC] Error creating DPC: {e}", flush=True)
+            return None, None
 
-    def _get_child_attribute(self, data_object, name: str):
+    def _get_child_attribute(self, data_object, name: str, fc: Optional[int] = None):
         node = ctypes.cast(data_object, ctypes.POINTER(lib.ModelNode))
+
+        # Try FC-specific lookup first if requested
+        if fc is not None and hasattr(lib, "ModelNode_getChildWithFc"):
+            try:
+                child = lib.ModelNode_getChildWithFc(node, name.encode("utf-8"), fc)
+                if child:
+                    return ctypes.cast(child, ctypes.POINTER(lib.DataAttribute))
+            except Exception:
+                pass
+
+        # Fallback: generic child lookup
         child = lib.ModelNode_getChild(node, name.encode("utf-8"))
-        if not child:
-            return None
-        return ctypes.cast(child, ctypes.POINTER(lib.DataAttribute))
+        if child:
+            return ctypes.cast(child, ctypes.POINTER(lib.DataAttribute))
+
+        # Final fallback: try common FCs
+        if hasattr(lib, "ModelNode_getChildWithFc"):
+            for fc_try in (getattr(lib, "IEC61850_FC_CF", None), getattr(lib, "IEC61850_FC_CO", None)):
+                if fc_try is None:
+                    continue
+                try:
+                    child = lib.ModelNode_getChildWithFc(node, name.encode("utf-8"), fc_try)
+                    if child:
+                        return ctypes.cast(child, ctypes.POINTER(lib.DataAttribute))
+                except Exception:
+                    continue
+
+        return None
 
     # REMOVED: _make_write_access_handler - definition invalid
 
@@ -1382,26 +1551,42 @@ class IEC61850ServerAdapter(BaseProtocol):
                 now = int(lib.Hal_getTimeInMs())
 
                 if lib.ControlAction_isSelect(action):
+                    logger.info(f"[SBO] Select request received for {ref}")
                     selected_at = self._sbo_state.get(ref)
-                    # 30s timeout default
+                    
+                    # Check if already selected and selection is still valid
                     if selected_at and (now - selected_at) < self._sbo_select_timeout_ms:
+                        logger.warning(f"[SBO] {ref} already selected (age={(now-selected_at)}ms)")
                         lib.ControlAction_setAddCause(action, lib.ADD_CAUSE_OBJECT_ALREADY_SELECTED)
                         return lib.CONTROL_OBJECT_ACCESS_DENIED
 
+                    # Accept new selection
                     self._sbo_state[ref] = now
-                    # logger.debug(f"SBO Select accepted for {ref}")
+                    logger.info(f"[SBO] ✓ Select ACCEPTED for {ref}")
                     return lib.CONTROL_ACCEPTED
 
-                # Operate: require selection
-                selected_at = self._sbo_state.get(ref)
-                if not selected_at or (now - selected_at) > self._sbo_select_timeout_ms:
-                    lib.ControlAction_setAddCause(action, lib.ADD_CAUSE_OBJECT_NOT_SELECTED)
-                    return lib.CONTROL_WAITING_FOR_SELECT
+                # Operate: require prior selection
+                if lib.ControlAction_isOperate(action):
+                    logger.info(f"[SBO] Operate request received for {ref}")
+                    selected_at = self._sbo_state.get(ref)
+                    
+                    if not selected_at:
+                        logger.warning(f"[SBO] {ref} not selected - rejecting operate")
+                        lib.ControlAction_setAddCause(action, lib.ADD_CAUSE_OBJECT_NOT_SELECTED)
+                        return lib.CONTROL_WAITING_FOR_SELECT
+                    
+                    if (now - selected_at) > self._sbo_select_timeout_ms:
+                        logger.warning(f"[SBO] {ref} selection expired (age={(now-selected_at)}ms)")
+                        lib.ControlAction_setAddCause(action, lib.ADD_CAUSE_OBJECT_NOT_SELECTED)
+                        return lib.CONTROL_WAITING_FOR_SELECT
 
-                # logger.debug(f"SBO Operate accepted for {ref}")
+                    logger.info(f"[SBO] ✓ Operate ACCEPTED for {ref} (selected {now-selected_at}ms ago)")
+                    return lib.CONTROL_ACCEPTED
+                
+                logger.debug(f"[SBO] Unknown action type for {ref}")
                 return lib.CONTROL_ACCEPTED
             except Exception as e:
-                logger.error(f"Exception in SBO check handler: {e}")
+                logger.error(f"[SBO] Exception in check handler for {ref}: {e}", exc_info=True)
                 return lib.CONTROL_OBJECT_ACCESS_DENIED
         return _handler
 
@@ -1410,34 +1595,40 @@ class IEC61850ServerAdapter(BaseProtocol):
         def _handler(action, _param, value, _test):
             try:
                 ref = ctx["ref"]
+                logger.info(f"[SBO] Control handler invoked for {ref}")
+                
                 state = False
                 try:
                     state = bool(lib.MmsValue_getBoolean(value)) if value else False
-                except Exception:
-                    pass
+                    logger.debug(f"[SBO] Control value for {ref}: {state}")
+                except Exception as e:
+                    logger.warning(f"[SBO] Failed to read control value: {e}")
 
                 # Update opOk if available
                 if ctx.get("op_ok"):
                     op_ok_val = lib.MmsValue_newBoolean(True)
                     lib.IedServer_updateAttributeValue(self.server, ctx["op_ok"], op_ok_val)
                     lib.MmsValue_delete(op_ok_val)
+                    logger.debug(f"[SBO] Updated opOk for {ref}")
 
                 # Update stVal if available
                 if ctx.get("st_val"):
                     st_val = lib.MmsValue_newBoolean(state)
                     lib.IedServer_updateAttributeValue(self.server, ctx["st_val"], st_val)
                     lib.MmsValue_delete(st_val)
+                    logger.debug(f"[SBO] Updated stVal={state} for {ref}")
 
                 # Update timestamp if available
                 if ctx.get("t"):
                     ts = int(lib.Hal_getTimeInMs())
                     lib.IedServer_updateUTCTimeAttributeValue(self.server, ctx["t"], ts)
+                    logger.debug(f"[SBO] Updated timestamp for {ref}")
 
                 # Clear selection on operate
                 self._sbo_state.pop(ref, None)
-                # logger.info(f"Control operate executed for {ref} (state={state})")
+                logger.info(f"[SBO] ✓ Control operation completed for {ref} (state={state})")
                 return lib.CONTROL_RESULT_OK
             except Exception as e:
-                logger.error(f"Exception in SBO control handler: {e}")
+                logger.error(f"[SBO] Exception in control handler for {ref}: {e}", exc_info=True)
                 return lib.CONTROL_RESULT_FAILED
         return _handler
