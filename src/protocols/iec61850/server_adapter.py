@@ -1,6 +1,7 @@
 import ctypes
 import logging
 import os
+import sys
 import tempfile
 import xml.etree.ElementTree as ET
 from typing import Optional
@@ -43,6 +44,73 @@ class IEC61850ServerAdapter(BaseProtocol):
         self._sbo_select_timeout_ms = 30000
         self._cdc_control_dos = set()
         self._created_control_objects = {}  # Maps ref -> (data_object_ptr, ctl_model_val, ctl_model_str)
+        self._sbo_bridge = None
+        self._sbo_bridge_active = False
+        self._sbo_operate_cb = None
+        self._sbo_control_contexts = {}
+        self._sbo_operate_cb_type = None
+        self._use_c_sbo = os.environ.get("IEC61850_USE_C_SBO", "true").lower() == "true"
+        self._load_sbo_bridge()
+
+    def _load_sbo_bridge(self) -> None:
+        if not self._use_c_sbo:
+            logger.info("C SBO bridge disabled via IEC61850_USE_C_SBO=false")
+            return
+
+        system = os.name
+        if system == "nt":
+            lib_names = ["sbo_bridge.dll", "native_sbo_bridge.dll"]
+        elif sys.platform == "darwin":
+            lib_names = ["libsbo_bridge.dylib"]
+        else:
+            lib_names = ["libsbo_bridge.so"]
+
+        search_paths = [
+            os.path.dirname(__file__),
+            os.getcwd(),
+            os.path.join(os.getcwd(), "lib"),
+        ]
+
+        if system == "nt" and hasattr(os, "add_dll_directory"):
+            for path in search_paths:
+                if os.path.exists(path):
+                    try:
+                        os.add_dll_directory(path)
+                    except Exception:
+                        pass
+
+        for path in search_paths:
+            for name in lib_names:
+                dll_path = os.path.join(path, name)
+                if not os.path.exists(dll_path):
+                    continue
+                try:
+                    bridge = ctypes.CDLL(dll_path)
+                    bridge.SboBridge_create.argtypes = [ctypes.POINTER(lib.IedModel)]
+                    bridge.SboBridge_create.restype = lib.IedServer
+                    bridge.SboBridge_start.argtypes = [lib.IedServer, ctypes.c_int]
+                    bridge.SboBridge_start.restype = ctypes.c_bool
+                    bridge.SboBridge_stop.argtypes = [lib.IedServer]
+                    bridge.SboBridge_stop.restype = None
+                    bridge.SboBridge_destroy.argtypes = [lib.IedServer]
+                    bridge.SboBridge_destroy.restype = None
+                    bridge.SboBridge_registerControlPoint.argtypes = [
+                        lib.IedServer,
+                        ctypes.POINTER(lib.DataObject),
+                        ctypes.c_char_p,
+                        ctypes.c_uint32,
+                    ]
+                    bridge.SboBridge_registerControlPoint.restype = ctypes.c_int
+                    self._sbo_operate_cb_type = ctypes.CFUNCTYPE(None, ctypes.c_char_p, ctypes.c_uint8, ctypes.c_void_p)
+                    bridge.SboBridge_setOperateCallback.argtypes = [self._sbo_operate_cb_type, ctypes.c_void_p]
+                    bridge.SboBridge_setOperateCallback.restype = None
+                    self._sbo_bridge = bridge
+                    logger.info(f"Loaded C SBO bridge: {dll_path}")
+                    return
+                except Exception as e:
+                    logger.warning(f"Failed to load C SBO bridge at {dll_path}: {e}")
+
+        logger.info("C SBO bridge not found; falling back to Python handlers")
 
     @staticmethod
     def _find_available_ports(bind_ip: str, start_port: int = 10002, count: int = 3) -> list:
@@ -148,8 +216,22 @@ class IEC61850ServerAdapter(BaseProtocol):
                         f"Failed to create IED model for '{self.ied_name}'"
                     )
 
-            # Create the IED server
-            self.server = lib.IedServer_create(self.model)
+            # Create the IED server (prefer C SBO bridge when available)
+            self.server = None
+            if self._sbo_bridge is not None:
+                try:
+                    self.server = self._sbo_bridge.SboBridge_create(self.model)
+                    if self.server:
+                        self._sbo_bridge_active = True
+                        logger.info("Created IED server via C SBO bridge")
+                except Exception as e:
+                    logger.warning(f"C SBO bridge create failed, falling back to libiec61850: {e}")
+                    self.server = None
+
+            if not self.server:
+                self.server = lib.IedServer_create(self.model)
+                self._sbo_bridge_active = False
+
             if not self.server:
                 raise RuntimeError("Failed to create IED server from model")
 
@@ -206,6 +288,14 @@ class IEC61850ServerAdapter(BaseProtocol):
                 logger.info(f"Set server identity: {self.ied_name}")
             except Exception as e:
                 logger.warning(f"Could not set server identity: {e}")
+
+            # Initialize default values if available
+            try:
+                if hasattr(lib, "IedServer_setAllModelDefaultValues"):
+                    lib.IedServer_setAllModelDefaultValues(self.server)
+                    logger.debug("Initialized model default values")
+            except Exception as e:
+                logger.debug(f"Could not set model default values: {e}")
 
             # Set default write access policy to ALLOW (critical for some clients)
             # This prevents undefined behavior if a client tries to write to an unmapped variable
@@ -342,7 +432,15 @@ class IEC61850ServerAdapter(BaseProtocol):
                         )
 
             logger.info(f"Starting IEC61850 server on {bind_ip}:{self.config.port}")
-            start_result = lib.IedServer_start(self.server, int(self.config.port))
+            if self._sbo_bridge_active and self._sbo_bridge is not None:
+                try:
+                    self._sbo_bridge.SboBridge_start(self.server, int(self.config.port))
+                    start_result = None
+                except Exception as e:
+                    logger.error(f"C SBO bridge start failed: {e}")
+                    raise
+            else:
+                start_result = lib.IedServer_start(self.server, int(self.config.port))
 
             # Some libiec61850 builds return void; check isRunning if so
             if start_result is None:
@@ -445,20 +543,31 @@ class IEC61850ServerAdapter(BaseProtocol):
     def disconnect(self):
         try:
             if self.server:
-                try:
-                    lib.IedServer_stop(self.server)
-                except Exception:
-                    pass
-                # Always destroy server - it will clean up the model internally
-                # Do NOT call IedModel_destroy separately - causes double-free
-                try:
-                    lib.IedServer_destroy(self.server)
-                except Exception:
-                    pass
+                if self._sbo_bridge_active and self._sbo_bridge is not None:
+                    try:
+                        self._sbo_bridge.SboBridge_stop(self.server)
+                    except Exception:
+                        pass
+                    try:
+                        self._sbo_bridge.SboBridge_destroy(self.server)
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        lib.IedServer_stop(self.server)
+                    except Exception:
+                        pass
+                    # Always destroy server - it will clean up the model internally
+                    # Do NOT call IedModel_destroy separately - causes double-free
+                    try:
+                        lib.IedServer_destroy(self.server)
+                    except Exception:
+                        pass
         finally:
             self.server = None
             self.model = None  # Clear reference but don't destroy - server handles it
             self.connected = False
+            self._sbo_bridge_active = False
 
         # Clean up temporary files (both filtered SCD and extracted ICD)
         if self._filtered_scd_path and os.path.exists(self._filtered_scd_path):
@@ -1214,6 +1323,110 @@ class IEC61850ServerAdapter(BaseProtocol):
             return
 
         logger.info(f"Registering SBO handlers for {len(self._created_control_objects)} control objects")
+
+        # If C SBO bridge is active, register control points in C and exit
+        if self._sbo_bridge_active and self._sbo_bridge is not None:
+            self._sbo_control_contexts = {}
+
+            if self._sbo_operate_cb is None and self._sbo_operate_cb_type is not None:
+                @self._sbo_operate_cb_type
+                def _on_operate(obj_ref, command_value, _ctx):
+                    try:
+                        ref = obj_ref.decode("utf-8") if obj_ref else ""
+                        ctx = self._sbo_control_contexts.get(ref)
+                        if not ctx:
+                            logger.debug(f"[SBO_BRIDGE] No context for {ref}")
+                            return
+
+                        state = bool(command_value)
+
+                        if ctx.get("op_ok"):
+                            op_ok_val = lib.MmsValue_newBoolean(True)
+                            lib.IedServer_updateAttributeValue(self.server, ctx["op_ok"], op_ok_val)
+                            lib.MmsValue_delete(op_ok_val)
+
+                        if ctx.get("st_val"):
+                            st_val = lib.MmsValue_newBoolean(state)
+                            lib.IedServer_updateAttributeValue(self.server, ctx["st_val"], st_val)
+                            lib.MmsValue_delete(st_val)
+
+                        if ctx.get("t"):
+                            ts = int(lib.Hal_getTimeInMs())
+                            lib.IedServer_updateUTCTimeAttributeValue(self.server, ctx["t"], ts)
+
+                        logger.info(f"[SBO_BRIDGE] Operate applied for {ref} (state={state})")
+                    except Exception as cb_err:
+                        logger.warning(f"[SBO_BRIDGE] Operate callback error: {cb_err}")
+
+                self._sbo_operate_cb = _on_operate
+                try:
+                    self._sbo_bridge.SboBridge_setOperateCallback(self._sbo_operate_cb, None)
+                    logger.info("[SBO_BRIDGE] Operate callback registered")
+                except Exception as cb_set_err:
+                    logger.warning(f"[SBO_BRIDGE] Failed to register operate callback: {cb_set_err}")
+
+            registered_count = 0
+            for ref, control_tuple in self._created_control_objects.items():
+                if len(control_tuple) == 4:
+                    data_object, ctl_model_val, ctl_model_str, ctl_model_da = control_tuple
+                else:
+                    data_object, ctl_model_val, ctl_model_str = control_tuple
+                    ctl_model_da = None
+
+                if "sbo" not in ctl_model_str.lower():
+                    continue
+
+                # Update control model in server
+                try:
+                    lib.IedServer_updateCtlModel(self.server, data_object, ctl_model_val)
+                except Exception as e:
+                    logger.debug(f"[SBO_BRIDGE] Failed to set ctlModel for {ref}: {e}")
+
+                # Update ctlModel DA value if available
+                if ctl_model_da is not None and hasattr(lib, "IedServer_updateAttributeValue"):
+                    try:
+                        if hasattr(lib, "IedServer_lockDataModel"):
+                            lib.IedServer_lockDataModel(self.server)
+                        mms_val = lib.MmsValue_newIntegerFromInt32(int(ctl_model_val))
+                        lib.IedServer_updateAttributeValue(self.server, ctl_model_da, mms_val)
+                        lib.MmsValue_delete(mms_val)
+                        if hasattr(lib, "IedServer_unlockDataModel"):
+                            lib.IedServer_unlockDataModel(self.server)
+                    except Exception as e:
+                        if hasattr(lib, "IedServer_unlockDataModel"):
+                            try:
+                                lib.IedServer_unlockDataModel(self.server)
+                            except Exception:
+                                pass
+                        logger.debug(f"[SBO_BRIDGE] Failed to update ctlModel DA for {ref}: {e}")
+
+                control_ctx = {
+                    "ref": ref,
+                    "st_val": self._get_child_attribute(data_object, "stVal"),
+                    "op_ok": self._get_child_attribute(data_object, "opOk"),
+                    "t": self._get_child_attribute(data_object, "t"),
+                }
+                self._sbo_control_contexts[ref] = control_ctx
+
+                try:
+                    result = self._sbo_bridge.SboBridge_registerControlPoint(
+                        self.server,
+                        data_object,
+                        ref.encode("utf-8"),
+                        int(self._sbo_select_timeout_ms),
+                    )
+                    if result == 0:
+                        registered_count += 1
+                    else:
+                        logger.warning(f"[SBO_BRIDGE] Failed to register {ref} (code={result})")
+                except Exception as e:
+                    logger.warning(f"[SBO_BRIDGE] Exception registering {ref}: {e}")
+
+            if registered_count > 0:
+                logger.info(f"[SBO_BRIDGE] Registered {registered_count} SBO control points in C")
+            else:
+                logger.warning("[SBO_BRIDGE] No SBO control points were registered")
+            return
         
         registered_count = 0
         for ref, control_tuple in self._created_control_objects.items():

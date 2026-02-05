@@ -809,7 +809,7 @@ class DeviceTreeWidget(QWidget):
             if desc_item is None:
                 desc_item = QStandardItem("")
 
-            val_text = str(getattr(signal, 'value', ''))
+            val_text = self._format_signal_value(signal)
             base_desc = getattr(signal, 'description', '') or ''
             desc_item.setText(f"{base_desc}  Value: {val_text}")
 
@@ -850,6 +850,71 @@ class DeviceTreeWidget(QWidget):
 
         except Exception as e:
             logger.debug(f"DeviceTreeWidget: Failed to update signal in tree: {e}")
+
+    def _format_signal_value(self, signal) -> str:
+        if signal is None or getattr(signal, "value", None) is None:
+            return ""
+
+        num, enum_label = self._extract_numeric_and_enum(signal)
+        if num is not None:
+            hex_str = f"0x{num:X}"
+            if enum_label:
+                return f"{hex_str} ({num}) {enum_label}"
+            return f"{hex_str} ({num})"
+
+        return str(getattr(signal, "value", ""))
+
+    def _is_pos_stval(self, signal) -> bool:
+        addr = (getattr(signal, "address", "") or "").lower()
+        name = (getattr(signal, "name", "") or "").lower()
+        return "pos.stval" in addr or "pos$stval" in addr or ("pos" in addr and name == "stval")
+
+    def _extract_numeric_and_enum(self, signal) -> tuple[Optional[int], Optional[str]]:
+        num = None
+        enum_label = None
+
+        mapping = getattr(signal, "enum_map", None)
+        if not mapping and self._is_pos_stval(signal):
+            mapping = {0: "intermediate", 1: "open", 2: "closed", 3: "bad"}
+
+        val = getattr(signal, "value", None)
+        if isinstance(val, bool):
+            num = int(val)
+        elif isinstance(val, int):
+            num = val
+        elif isinstance(val, float) and val.is_integer():
+            num = int(val)
+        elif isinstance(val, str):
+            text = val.strip()
+            try:
+                if text.lower().startswith("0x"):
+                    num = int(text.split()[0], 16)
+                else:
+                    import re
+                    m = re.search(r"\(([-]?\d+)\)", text)
+                    if m:
+                        num = int(m.group(1))
+                    elif re.fullmatch(r"-?\d+", text):
+                        num = int(text)
+            except Exception:
+                num = None
+
+            if num is None and mapping:
+                for k, v in mapping.items():
+                    if str(v).lower() == text.lower():
+                        num = int(k)
+                        break
+
+            if num is not None and not enum_label:
+                import re
+                m = re.match(r"(.+?)\s*\(\s*[-]?\d+\s*\)", text)
+                if m:
+                    enum_label = m.group(1).strip()
+
+        if num is not None and mapping and num in mapping:
+            enum_label = mapping[num]
+
+        return num, enum_label
 
     def _remove_device_node(self, device_name):
         """Removes a device from the tree."""
