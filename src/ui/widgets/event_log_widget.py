@@ -291,6 +291,15 @@ class EventLogWidget(QWidget):
         # On Windows, Npcap handles privileges - check at runtime
         if sys.platform.startswith('win'):
             return ""  # Don't pre-check on Windows
+
+        # If dumpcap is selected (or auto with dumpcap available), skip raw-socket check
+        try:
+            preferred = getattr(self.capture_worker, "_preferred_backend", "auto")
+            dumpcap_available = bool(getattr(self.capture_worker, "_dumpcap_path", None))
+            if preferred == "dumpcap" or (preferred == "auto" and dumpcap_available):
+                return ""
+        except Exception:
+            pass
         
         # On Linux/Unix, try to create a raw packet socket
         try:
@@ -304,17 +313,21 @@ class EventLogWidget(QWidget):
         except PermissionError:
             # Linux: insufficient privileges
             import os
-            python_path = sys.executable
+            import shutil
+            python_path = os.path.realpath(sys.executable)
+            dumpcap_path = shutil.which("dumpcap") or "/usr/bin/dumpcap"
             warn = (
                 "Current user lacks privileges to capture packets on Linux.\n\n"
                 "Solutions:\n"
-                "1. Run the application with sudo (not recommended)\n"
-                "2. Grant capture capabilities to Python interpreter (run once):\n"
-                f"   sudo setcap 'cap_net_raw,cap_net_admin+eip' {python_path}\n\n"
-                "3. Install and configure dumpcap:\n"
+                "1. Use dumpcap (recommended):\n"
                 "   sudo apt-get install wireshark\n"
-                "   sudo setcap 'cap_net_raw,cap_net_admin+eip' /usr/bin/dumpcap\n\n"
-                "Capture will likely fail without one of these."
+                f"   sudo setcap 'cap_net_raw,cap_net_admin+eip' {dumpcap_path}\n\n"
+                "2. Grant capture capabilities to the real Python interpreter (run once):\n"
+                f"   sudo setcap 'cap_net_raw,cap_net_admin+eip' {python_path}\n\n"
+                "3. Run the application with sudo (not recommended)\n\n"
+                "Capture will likely fail without one of these.\n\n"
+                "Note: If dumpcap is already installed and configured on your system,\n"
+                "you can ignore this warning and select the dumpcap backend for capture."
             )
             return warn
         except Exception:

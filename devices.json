@@ -1,4 +1,34 @@
 {
-    "devices": [],
+    "devices": [
+        {
+            "name": "IED_172_16_11_18",
+            "ip_address": "172.16.11.18",
+            "port": 502,
+            "folder": "",
+            "description": "",
+            "device_type": "Modbus TCP",
+            "device_role": "Client",
+            "enabled": true,
+            "scd_file_path": null,
+            "use_scd_discovery": true,
+            "protocol_params": {},
+            "polling_enabled": true,
+            "poll_interval": 1.0,
+            "modbus_unit_id": 1,
+            "modbus_timeout": 3.0,
+            "modbus_register_maps": [],
+            "modbus_slave_mappings": [],
+            "modbus_slave_blocks": [],
+            "rtu_transport": "serial",
+            "rtu_slave_address": 1,
+            "serial_port": "",
+            "serial_baudrate": 9600,
+            "serial_bytesize": 8,
+            "serial_parity": "N",
+            "serial_stopbits": 1.0,
+            "serial_timeout": 1.0,
+            "rtu_simulator_config": null
+        }
+    ],
     "folders": {}
 }
