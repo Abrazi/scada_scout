@@ -234,7 +234,7 @@ class PLCIDEWindow(QMainWindow):
         # Initialize compiler and runtime
         self.compiler = STCompiler()
         # Use PLC IDE's own logging method instead of main event logger
-        self.runtime = PLCRuntime(self.plc_ext, self._plc_log)
+        self.runtime = PLCRuntime(self.plc_ext, self._plc_log, self.device_manager)
         
         self.current_program: Optional[PLCProgram] = None
         
@@ -244,6 +244,7 @@ class PLCIDEWindow(QMainWindow):
         self._setup_ui()
         self._setup_menubar()
         self._setup_toolbar()
+        self._wire_device_updates()
         
         # Refresh timer for runtime status
         self.status_timer = QTimer(self)
@@ -251,6 +252,21 @@ class PLCIDEWindow(QMainWindow):
         self.status_timer.start(500)  # 2Hz
         
         self.statusBar().showMessage("Ready")
+
+    def _wire_device_updates(self):
+        """Auto-refresh tag helper when devices/signals change."""
+        try:
+            self.device_manager.device_updated.connect(lambda _name=None: self._refresh_tag_list())
+        except Exception:
+            pass
+        try:
+            self.device_manager.device_added.connect(lambda _dev=None: self._refresh_tag_list())
+        except Exception:
+            pass
+        try:
+            self.device_manager.device_removed.connect(lambda _name=None: self._refresh_tag_list())
+        except Exception:
+            pass
     
     def _setup_ui(self):
         """Setup user interface with debugging panels."""
@@ -287,6 +303,7 @@ class PLCIDEWindow(QMainWindow):
         right_tabs.addTab(self._create_variable_panel(), "Variables")
         right_tabs.addTab(self._create_watch_panel(), "Watch")
         right_tabs.addTab(self._create_callstack_panel(), "Call Stack")
+        right_tabs.addTab(self._create_tag_helper_panel(), "Tags")
         main_splitter.addWidget(right_tabs)
         
         main_splitter.setSizes([250, 800, 350])
@@ -402,6 +419,52 @@ class PLCIDEWindow(QMainWindow):
         self.callstack_list = QListWidget()
         layout.addWidget(self.callstack_list)
         
+        return widget
+
+    def _create_tag_helper_panel(self) -> QWidget:
+        """Create tag browser helper panel for read/write insertion."""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        layout.addWidget(QLabel("Device Tags"))
+
+        filter_layout = QHBoxLayout()
+        self.tag_filter = QLineEdit()
+        self.tag_filter.setPlaceholderText("Filter tags...")
+        self.tag_filter.textChanged.connect(self._filter_tag_list)
+        filter_layout.addWidget(self.tag_filter)
+
+        btn_refresh = QPushButton("Refresh")
+        btn_refresh.clicked.connect(self._refresh_tag_list)
+        filter_layout.addWidget(btn_refresh)
+        layout.addLayout(filter_layout)
+
+        self.tag_list = QListWidget()
+        self.tag_list.itemDoubleClicked.connect(lambda _: self._insert_tag_token())
+        layout.addWidget(self.tag_list)
+
+        btn_layout = QHBoxLayout()
+        btn_insert_tag = QPushButton("Insert Tag")
+        btn_insert_tag.clicked.connect(self._insert_tag_token)
+        btn_layout.addWidget(btn_insert_tag)
+
+        btn_insert_read = QPushButton("Insert READ")
+        btn_insert_read.clicked.connect(self._insert_read_call)
+        btn_layout.addWidget(btn_insert_read)
+
+        btn_insert_write = QPushButton("Insert WRITE")
+        btn_insert_write.clicked.connect(self._insert_write_call)
+        btn_layout.addWidget(btn_insert_write)
+
+        btn_insert_mapping = QPushButton("Insert Mapping")
+        btn_insert_mapping.clicked.connect(self._insert_register_mapping_snippet)
+        btn_layout.addWidget(btn_insert_mapping)
+
+        layout.addLayout(btn_layout)
+
+        self._all_tags = []
+        self._refresh_tag_list()
+
         return widget
     
     def _setup_menubar(self):
@@ -558,6 +621,81 @@ class PLCIDEWindow(QMainWindow):
             task_item.setData(0, Qt.UserRole, task)
         
         self.project_tree.expandAll()
+
+    def _refresh_tag_list(self):
+        """Refresh tag list from device manager."""
+        try:
+            tags = self.device_manager.list_unique_addresses()
+        except Exception:
+            tags = []
+
+        self._all_tags = sorted(tags)
+        self._apply_tag_filter()
+
+    def _filter_tag_list(self, _text: str = ""):
+        self._apply_tag_filter()
+
+    def _apply_tag_filter(self):
+        if not hasattr(self, "tag_list"):
+            return
+        filter_text = (self.tag_filter.text() if hasattr(self, "tag_filter") else "").strip().lower()
+        self.tag_list.clear()
+        for tag in self._all_tags:
+            if filter_text and filter_text not in tag.lower():
+                continue
+            item = QListWidgetItem(tag)
+            item.setData(Qt.UserRole, tag)
+            self.tag_list.addItem(item)
+
+    def _current_tag_token(self) -> Optional[str]:
+        if not hasattr(self, "tag_list"):
+            return None
+        item = self.tag_list.currentItem()
+        if not item:
+            return None
+        tag = item.data(Qt.UserRole) or item.text()
+        try:
+            return self.device_manager.make_tag_token(tag)
+        except Exception:
+            return f"{{{{TAG:{tag}}}}}"
+
+    def _insert_text_at_cursor(self, text: str):
+        if not text or not hasattr(self, "editor"):
+            return
+        cursor = self.editor.textCursor()
+        cursor.insertText(text)
+        self.editor.setTextCursor(cursor)
+        self.editor.setFocus()
+
+    def _insert_tag_token(self):
+        token = self._current_tag_token()
+        if not token:
+            return
+        self._insert_text_at_cursor(token)
+
+    def _insert_read_call(self):
+        token = self._current_tag_token()
+        if not token:
+            return
+        self._insert_text_at_cursor(f"READ_DEVICE_SIGNAL('{token}');")
+
+    def _insert_write_call(self):
+        token = self._current_tag_token()
+        if not token:
+            return
+        self._insert_text_at_cursor(f"WRITE_DEVICE_SIGNAL('{token}', value);")
+
+    def _insert_register_mapping_snippet(self):
+        snippet = (
+            "(* Register mapping template *)\n"
+            "VAR_INPUT\n"
+            "    input_reg : INT AT %IW0;\n"
+            "END_VAR\n\n"
+            "VAR_OUTPUT\n"
+            "    output_reg : INT AT %QW0;\n"
+            "END_VAR\n"
+        )
+        self._insert_text_at_cursor(snippet)
     
     def _on_tree_item_double_clicked(self, item: QTreeWidgetItem, column: int):
         """Handle double-click on tree item."""
@@ -586,11 +724,13 @@ class PLCIDEWindow(QMainWindow):
         # Create program with template
         template = """PROGRAM NewProgram
 VAR
-    counter : INT := 0;
+    counter : DINT := 0;
 END_VAR
 
-(* Main program logic *)
+(* Replace with your tag from the Tags panel *)
+counter := READ_DEVICE_SIGNAL('{{TAG:DeviceName::1:3:0}}');
 counter := counter + 1;
+WRITE_DEVICE_SIGNAL('{{TAG:DeviceName::1:3:0}}', counter);
 
 END_PROGRAM
 """

@@ -1,5 +1,6 @@
 """Simulated PLC runtime for executing IEC 61131-3 programs with debugging support."""
 import logging
+import re
 import threading
 import time
 from typing import Dict, Optional, Any, List, Callable
@@ -199,9 +200,10 @@ class DebugEngine:
 class PLCRuntime:
     """Simulated PLC runtime with debugging support."""
     
-    def __init__(self, device_extension: PLCDeviceExtension, event_logger=None):
+    def __init__(self, device_extension: PLCDeviceExtension, event_logger=None, device_manager=None):
         self.device = device_extension
         self.event_logger = event_logger
+        self._device_manager = device_manager
         
         self._running = False
         self._scan_thread: Optional[threading.Thread] = None
@@ -220,6 +222,82 @@ class PLCRuntime:
         
         # Verbose logging
         self.verbose_logging = False
+
+    def _get_device_manager_core(self):
+        dm = self._device_manager
+        if dm is None:
+            return None
+        return getattr(dm, "_core", dm)
+
+    def _resolve_tag_address(self, tag_address: Any) -> Optional[str]:
+        if not isinstance(tag_address, str):
+            return None
+        if "{{TAG:" not in tag_address:
+            return tag_address
+        dm_core = self._get_device_manager_core()
+        mgr = getattr(dm_core, "_script_tag_manager", None) if dm_core else None
+        if mgr and hasattr(mgr, "resolve_code"):
+            resolved = mgr.resolve_code(f"'{tag_address}'")
+            if len(resolved) >= 2 and resolved[0] == resolved[-1] and resolved[0] in ("'", '"'):
+                return resolved[1:-1]
+            return resolved
+        match = re.search(r"\{\{TAG:([^\}]+)\}\}", tag_address)
+        return match.group(1) if match else tag_address
+
+    def _read_device_signal(self, tag_or_device: Any, address: Optional[str] = None):
+        dm_core = self._get_device_manager_core()
+        if not dm_core:
+            self._log("warning", "READ_DEVICE_SIGNAL: device manager not available")
+            return None
+
+        if address is None:
+            tag = self._resolve_tag_address(tag_or_device)
+            if not tag:
+                return None
+            device_name, addr = dm_core.parse_unique_address(tag)
+            if not device_name or not addr:
+                return None
+            sig = dm_core.get_signal_by_unique_address(f"{device_name}::{addr}")
+        else:
+            device_name = tag_or_device if isinstance(tag_or_device, str) else None
+            addr = address
+            if not device_name or not addr:
+                return None
+            sig = dm_core.get_signal_by_unique_address(f"{device_name}::{addr}")
+
+        if not sig:
+            return None
+
+        updated = dm_core.read_signal(device_name, sig)
+        if updated is None:
+            return getattr(sig, "value", None)
+        return getattr(updated, "value", None)
+
+    def _write_device_signal(self, tag_or_device: Any, address: Optional[str] = None, value: Any = None) -> bool:
+        dm_core = self._get_device_manager_core()
+        if not dm_core:
+            self._log("warning", "WRITE_DEVICE_SIGNAL: device manager not available")
+            return False
+
+        if address is None:
+            tag = self._resolve_tag_address(tag_or_device)
+            if not tag:
+                return False
+            device_name, addr = dm_core.parse_unique_address(tag)
+            if not device_name or not addr:
+                return False
+            sig = dm_core.get_signal_by_unique_address(f"{device_name}::{addr}")
+        else:
+            device_name = tag_or_device if isinstance(tag_or_device, str) else None
+            addr = address
+            if not device_name or not addr:
+                return False
+            sig = dm_core.get_signal_by_unique_address(f"{device_name}::{addr}")
+
+        if not sig:
+            return False
+
+        return bool(dm_core.write_signal(device_name, sig, value))
     
     def start(self) -> bool:
         """Start PLC runtime (transition to RUN mode)."""
@@ -508,6 +586,15 @@ class PLCRuntime:
             
             # Merge global context
             exec_context = {**self._global_context, **ctx}
+            exec_context.update(
+                {
+                    "READ_DEVICE_SIGNAL": self._read_device_signal,
+                    "WRITE_DEVICE_SIGNAL": self._write_device_signal,
+                    "READ_TAG": self._read_device_signal,
+                    "WRITE_TAG": self._write_device_signal,
+                    "SCADA_LOG": self._log,
+                }
+            )
             
             # Debug logging
             logger.debug(f"[EXEC] Program {program.name}: context before = {ctx}")
@@ -788,13 +875,14 @@ class PLCRuntime:
     
     def _log(self, level: str, message: str):
         """Log to event logger or standard logger."""
+        level_norm = level.lower() if isinstance(level, str) else "info"
         if self.event_logger:
             try:
-                if level == "info":
+                if level_norm == "info":
                     self.event_logger.info("PLC Runtime", message)
-                elif level == "warning":
+                elif level_norm == "warning":
                     self.event_logger.warning("PLC Runtime", message)
-                elif level == "error":
+                elif level_norm == "error":
                     self.event_logger.error("PLC Runtime", message)
                 return
             except Exception:
