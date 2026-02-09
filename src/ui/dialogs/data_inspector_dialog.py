@@ -87,15 +87,40 @@ class DataInspectorDialog(QDialog):
                 self.lbl_raw.setText("Error: Device not connected")
                 return
 
+            connected = getattr(protocol, "connected", None)
+            if connected is None and hasattr(protocol, "is_connected"):
+                try:
+                    connected = bool(protocol.is_connected())
+                except Exception:
+                    connected = None
+            if connected is False:
+                self.lbl_raw.setText("Error: Not connected to device")
+                return
+
             # Parse address
             parts = self.signal.address.split(':')
-            if len(parts) != 3:
+            unit_id = None
+            func_code = None
+            start_addr = None
+
+            if len(parts) == 3:
+                unit_id = int(parts[0])
+                func_code = int(parts[1])
+                start_addr = int(parts[2])
+            elif len(parts) == 2:
+                # Server-style address: "type:addr"
+                func_map = {
+                    "coils": 1,
+                    "discrete": 2,
+                    "holding": 3,
+                    "input": 4
+                }
+                func_code = func_map.get(parts[0].lower())
+                start_addr = int(parts[1])
+                unit_id = getattr(protocol, "unit_id", 1)
+            else:
                 self.lbl_raw.setText("Error: Invalid address format")
                 return
-                
-            unit_id = int(parts[0])
-            func_code = int(parts[1])
-            start_addr = int(parts[2])
             
             # Decide function code for reading. 
             # If FC is 1 or 2 (Coils), we can't really do "register" inspection properly 
@@ -107,26 +132,48 @@ class DataInspectorDialog(QDialog):
                 # This might fail if device doesn't support it, but Inspector is usually for registers.
                 read_fc = 3
             
-            # Use internal client if available to read block
-            # Assuming ModbusTCPAdapter
+            # Prefer internal pymodbus client if available
             client = getattr(protocol, 'client', None)
-            if not client or not protocol.connected:
-                self.lbl_raw.setText("Error: Not connected to device")
-                return
-
-            # Read 4 registers (64 bits)
-            count = 4
-            result = None
-            if read_fc == 4:
-                result = client.read_input_registers(start_addr, count=count, device_id=unit_id)
+            if client and getattr(protocol, "connected", True):
+                # Read 4 registers (64 bits)
+                count = 4
+                result = None
+                if read_fc == 4:
+                    result = client.read_input_registers(start_addr, count=count, device_id=unit_id)
+                else:
+                    result = client.read_holding_registers(start_addr, count=count, device_id=unit_id)
+                
+                if result.isError():
+                    self.lbl_raw.setText(f"Read Error: {result}")
+                    return
+                
+                self.raw_registers = result.registers
             else:
-                result = client.read_holding_registers(start_addr, count=count, device_id=unit_id)
-            
-            if result.isError():
-                self.lbl_raw.setText(f"Read Error: {result}")
-                return
-            
-            self.raw_registers = result.registers
+                # Fall back to adapter methods for single-connection devices (e.g., RTU)
+                if read_fc == 4 and hasattr(protocol, "read_input_registers"):
+                    regs = protocol.read_input_registers(unit_id, start_addr, 4)
+                elif read_fc == 3 and hasattr(protocol, "read_holding_registers"):
+                    regs = protocol.read_holding_registers(unit_id, start_addr, 4)
+                elif read_fc == 1 and hasattr(protocol, "read_coils"):
+                    regs = protocol.read_coils(unit_id, start_addr, 16)
+                elif read_fc == 2 and hasattr(protocol, "read_discrete_inputs"):
+                    regs = protocol.read_discrete_inputs(unit_id, start_addr, 16)
+                else:
+                    regs = None
+
+                if regs is None:
+                    self.lbl_raw.setText("Read Error: No compatible read method available")
+                    return
+
+                if read_fc in [1, 2]:
+                    # Coils/Discrete Inputs: represent as a single register bitmask
+                    bitmask = 0
+                    for i, b in enumerate(regs[:16]):
+                        if b:
+                            bitmask |= (1 << i)
+                    self.raw_registers = [bitmask, 0, 0, 0]
+                else:
+                    self.raw_registers = regs
             
             # Update Raw Display
             hex_strs = [f"[{i:04X}]" for i in self.raw_registers]

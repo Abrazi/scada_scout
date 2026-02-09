@@ -1,8 +1,8 @@
 {
     "devices": [
         {
-            "name": "IED_172_16_11_18",
-            "ip_address": "172.16.11.18",
+            "name": "IED_172_16_21_14",
+            "ip_address": "172.16.21.14",
             "port": 502,
             "folder": "",
             "description": "",
@@ -16,7 +16,19 @@
             "poll_interval": 1.0,
             "modbus_unit_id": 1,
             "modbus_timeout": 3.0,
-            "modbus_register_maps": [],
+            "modbus_register_maps": [
+                {
+                    "start_address": 0,
+                    "count": 3,
+                    "function_code": 3,
+                    "data_type": "Unsigned 16-bit",
+                    "name_prefix": "test",
+                    "description": "3: Read Holding Registers range",
+                    "scale": 1.0,
+                    "offset": 0.0,
+                    "endianness": "Big-endian (ABCD)"
+                }
+            ],
             "modbus_slave_mappings": [],
             "modbus_slave_blocks": [],
             "rtu_transport": "serial",

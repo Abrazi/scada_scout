@@ -17,6 +17,7 @@ class ModbusRangeDialog(QDialog):
         self.resize(600, 450)
         
         self.register_maps = list(device_config.modbus_register_maps)
+        self._selected_index = None
         
         self._setup_ui()
         self._load_maps()
@@ -43,6 +44,7 @@ class ModbusRangeDialog(QDialog):
         self.table_maps.setHorizontalHeaderLabels(["Group Name", "Function", "Start", "Count", "Type"])
         self.table_maps.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table_maps.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table_maps.itemSelectionChanged.connect(self._on_map_selection_changed)
         
         layout.addWidget(self.table_maps)
         
@@ -85,7 +87,7 @@ class ModbusRangeDialog(QDialog):
         self.combo_type = QComboBox()
         for dtype in ModbusDataType:
             self.combo_type.addItem(dtype.value, dtype)
-        self.combo_type.setCurrentText("UINT16")
+        self._set_combo_by_data(self.combo_type, ModbusDataType.UINT16)
         new_layout.addRow("Data Type:", self.combo_type)
         
         self.combo_endian = QComboBox()
@@ -97,6 +99,11 @@ class ModbusRangeDialog(QDialog):
         self.btn_add = QPushButton("Add Range")
         self.btn_add.clicked.connect(self._add_map)
         btn_layout.addWidget(self.btn_add)
+
+        self.btn_update = QPushButton("Update Range")
+        self.btn_update.setEnabled(False)
+        self.btn_update.clicked.connect(self._update_map)
+        btn_layout.addWidget(self.btn_update)
         
         self.btn_remove = QPushButton("Remove Selected")
         self.btn_remove.clicked.connect(self._remove_map)
@@ -125,6 +132,12 @@ class ModbusRangeDialog(QDialog):
             self.table_maps.setItem(row, 3, QTableWidgetItem(str(m.count)))
             self.table_maps.setItem(row, 4, QTableWidgetItem(m.data_type.value))
 
+        if self._selected_index is not None:
+            if 0 <= self._selected_index < self.table_maps.rowCount():
+                self.table_maps.selectRow(self._selected_index)
+            else:
+                self._clear_edit_fields()
+
     def _add_map(self):
         name = self.txt_name.text().strip()
         if not name:
@@ -144,12 +157,71 @@ class ModbusRangeDialog(QDialog):
         self.register_maps.append(new_map)
         self._load_maps()
         self.txt_name.clear()
+        self._selected_index = None
+        self._clear_edit_fields()
+
+    def _update_map(self):
+        if self._selected_index is None or not (0 <= self._selected_index < len(self.register_maps)):
+            QMessageBox.warning(self, "Update Range", "Please select a range to update.")
+            return
+
+        name = self.txt_name.text().strip()
+        if not name:
+            QMessageBox.warning(self, "Validation", "Please enter a group name")
+            return
+
+        current_map = self.register_maps[self._selected_index]
+        current_map.name_prefix = name
+        current_map.function_code = self.combo_function.currentData()
+        current_map.start_address = self.spin_start.value()
+        current_map.count = self.spin_count.value()
+        current_map.data_type = self.combo_type.currentData()
+        current_map.endianness = self.combo_endian.currentData()
+        current_map.description = f"{self.combo_function.currentText()} range"
+
+        self._load_maps()
 
     def _remove_map(self):
         current_row = self.table_maps.currentRow()
         if current_row >= 0:
             self.register_maps.pop(current_row)
             self._load_maps()
+            self._selected_index = None
+            self._clear_edit_fields()
+
+    def _on_map_selection_changed(self):
+        row = self.table_maps.currentRow()
+        if row < 0 or row >= len(self.register_maps):
+            self._selected_index = None
+            self._clear_edit_fields()
+            return
+
+        self._selected_index = row
+        self._fill_edit_fields(self.register_maps[row])
+
+    def _fill_edit_fields(self, reg_map: ModbusRegisterMap):
+        self.txt_name.setText(reg_map.name_prefix)
+        self.spin_start.setValue(reg_map.start_address)
+        self.spin_count.setValue(reg_map.count)
+        self._set_combo_by_data(self.combo_function, reg_map.function_code)
+        self._set_combo_by_data(self.combo_type, reg_map.data_type)
+        self._set_combo_by_data(self.combo_endian, reg_map.endianness)
+        self.btn_update.setEnabled(True)
+
+    def _clear_edit_fields(self):
+        self.txt_name.clear()
+        self.spin_start.setValue(0)
+        self.spin_count.setValue(10)
+        self.combo_function.setCurrentIndex(0)
+        self._set_combo_by_data(self.combo_type, ModbusDataType.UINT16)
+        self._set_combo_by_data(self.combo_endian, ModbusEndianness.BIG_ENDIAN)
+        self.btn_update.setEnabled(False)
+
+    def _set_combo_by_data(self, combo: QComboBox, data):
+        for i in range(combo.count()):
+            if combo.itemData(i) == data:
+                combo.setCurrentIndex(i)
+                return
 
     def get_register_maps(self):
         return self.register_maps
