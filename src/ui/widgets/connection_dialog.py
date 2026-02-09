@@ -224,8 +224,25 @@ class ConnectionDialog(QDialog):
         # OPC endpoint row (inserted near SCD since it's protocol-specific)
         self.form.addRow(self.opc_endpoint_label, self.opc_endpoint_input)
         self.form.addRow("Polling:", self.poll_layout)
+
+        # Register mapping (optional)
+        self.map_group = QGroupBox("Register Mapping (Optional)")
+        map_layout = QVBoxLayout(self.map_group)
+        map_btn_layout = QHBoxLayout()
+        self.btn_import_map = QPushButton("Import Map (CSV/JSON)...")
+        self.btn_import_map.clicked.connect(self._load_modbus_config)
+        map_btn_layout.addWidget(self.btn_import_map)
+        self.btn_edit_map = QPushButton("Edit Map...")
+        self.btn_edit_map.clicked.connect(self._edit_register_map)
+        map_btn_layout.addWidget(self.btn_edit_map)
+        map_btn_layout.addStretch()
+        map_layout.addLayout(map_btn_layout)
+        self.lbl_map_status = QLabel("No register map configured (will use default scan)")
+        self.lbl_map_status.setWordWrap(True)
+        map_layout.addWidget(self.lbl_map_status)
         
         self.layout.addLayout(self.form)
+        self.layout.addWidget(self.map_group)
         
         # IP History
         self.layout.addWidget(QLabel("Recent Connections:"))
@@ -648,9 +665,14 @@ class ConnectionDialog(QDialog):
         
         # Show/Hide Unit ID based on protocol
         try:
-            is_modbus = device_type in [DeviceType.MODBUS_TCP, DeviceType.MODBUS_SERVER, 
-                                       DeviceType.MODBUS_RTU_MASTER, DeviceType.MODBUS_RTU_SLAVE]
-        except:
+            is_modbus = device_type in [
+                DeviceType.MODBUS_TCP,
+                DeviceType.MODBUS_SERVER,
+                DeviceType.MODBUS_RTU_MASTER,
+                DeviceType.MODBUS_RTU_SLAVE,
+                DeviceType.MODBUS_RTU_SIMULATOR,
+            ]
+        except Exception:
             is_modbus = device_type in [DeviceType.MODBUS_TCP, DeviceType.MODBUS_SERVER]
         self.unit_id_input.setVisible(is_modbus)
         self.unit_id_label.setVisible(is_modbus)
@@ -659,6 +681,7 @@ class ConnectionDialog(QDialog):
         self.modbus_config_row_label.setVisible(is_modbus)
         self.modbus_config_input.setVisible(is_modbus)
         self.modbus_browse_btn.setVisible(is_modbus)
+        self.map_group.setVisible(is_modbus)
         
         # Show/Hide RTU Configuration based on protocol
         try:
@@ -736,6 +759,7 @@ class ConnectionDialog(QDialog):
             
             # Set the file path in the text field
             self.modbus_config_input.setText(fname)
+            self._update_register_map_status()
             QMessageBox.information(self, "Config Loaded", f"Configuration loaded from {os.path.basename(fname)}")
             
         except Exception as e:
@@ -810,6 +834,7 @@ class ConnectionDialog(QDialog):
                              continue
             
             self.modbus_register_maps = maps
+            self._update_register_map_status()
             if not maps:
                 QMessageBox.warning(self, "Import Warning", "No valid registers found in CSV file.")
                 
@@ -835,6 +860,35 @@ class ConnectionDialog(QDialog):
             
         if 'modbus_register_maps' in data:
             self.modbus_register_maps = [ModbusRegisterMap.from_dict(m) for m in data['modbus_register_maps']]
+        self._update_register_map_status()
+
+    def _update_register_map_status(self):
+        if self.modbus_register_maps:
+            self.lbl_map_status.setText(f"✓ {len(self.modbus_register_maps)} register map(s) configured")
+        else:
+            self.lbl_map_status.setText("No register map configured (will use default scan)")
+
+    def _edit_register_map(self):
+        from src.ui.widgets.modbus_range_dialog import ModbusRangeDialog
+        ip = self.ip_select.currentText() if self.ip_container.currentWidget() == self.ip_select else self.ip_input.text()
+        try:
+            port = int(self.port_input.text())
+        except ValueError:
+            port = 0
+
+        temp_config = DeviceConfig(
+            name=self.name_input.text().strip() or "Modbus_Device",
+            ip_address=ip,
+            port=port,
+            device_type=self.type_input.currentData()
+        )
+        temp_config.poll_interval = self.spin_interval.value()
+        temp_config.modbus_register_maps = list(self.modbus_register_maps)
+
+        dialog = ModbusRangeDialog(temp_config, self)
+        if dialog.exec():
+            self.modbus_register_maps = dialog.get_register_maps()
+            self._update_register_map_status()
 
     def get_config(self) -> DeviceConfig:
         try:
@@ -880,7 +934,18 @@ class ConnectionDialog(QDialog):
                 config.protocol_params['endpoint'] = endpoint_text
 
         # Attach register maps if available and Modbus
-        if config.device_type in [DeviceType.MODBUS_TCP, DeviceType.MODBUS_SERVER] and self.modbus_register_maps:
+        try:
+            modbus_types = [
+                DeviceType.MODBUS_TCP,
+                DeviceType.MODBUS_SERVER,
+                DeviceType.MODBUS_RTU_MASTER,
+                DeviceType.MODBUS_RTU_SLAVE,
+                DeviceType.MODBUS_RTU_SIMULATOR,
+            ]
+        except Exception:
+            modbus_types = [DeviceType.MODBUS_TCP, DeviceType.MODBUS_SERVER]
+
+        if config.device_type in modbus_types and self.modbus_register_maps:
             config.modbus_register_maps = self.modbus_register_maps
             
         return config
