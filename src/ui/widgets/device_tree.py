@@ -1309,6 +1309,19 @@ class DeviceTreeWidget(QWidget):
                     
                     menu.addSeparator()
 
+                # IEC 61850 simulation shortcut for existing devices
+                if device.config.device_type in (DeviceType.IEC61850_IED, DeviceType.IEC61850_SERVER):
+                    if device.config.device_type == DeviceType.IEC61850_IED:
+                        sim_label = "Simulate Device..."
+                    else:
+                        sim_label = "Start Simulation"
+                    simulate_action = QAction(sim_label, self)
+                    simulate_action.triggered.connect(lambda: self._simulate_existing_device(device_name))
+                    if device.config.device_type == DeviceType.IEC61850_SERVER and device.connected:
+                        simulate_action.setEnabled(False)
+                    menu.addAction(simulate_action)
+                    menu.addSeparator()
+
                 # Discovery mode toggle (existing functionality)
                 online_action = QAction("Use Online Discovery", self)
                 scd_action = QAction("Use SCD Discovery", self)
@@ -1363,12 +1376,6 @@ class DeviceTreeWidget(QWidget):
                 # Edit and Remove
                 menu.addSeparator()
                 if device.config.device_type == DeviceType.IEC61850_IED:
-                    # Add simulator option
-                    simulate_action = QAction("Start Simulator for this IED...", self)
-                    simulate_action.triggered.connect(lambda: self._start_ied_simulator(device_name))
-                    menu.addAction(simulate_action)
-                    menu.addSeparator()
-                    
                     export_ied_action = QAction("Export Selected IED (.iid/.icd/.scd)...", self)
                     export_ied_action.triggered.connect(lambda: self._trigger_export_selected_ied(device_name))
                     menu.addAction(export_ied_action)
@@ -2207,6 +2214,36 @@ class DeviceTreeWidget(QWidget):
                     "Simulation Failed",
                     detailed_msg
                 )
+
+    def _simulate_existing_device(self, device_name):
+        """Simulate an existing IEC 61850 device from the Device Explorer."""
+        from PySide6.QtWidgets import QMessageBox
+
+        device = self.device_manager.get_device(device_name)
+        if not device:
+            QMessageBox.warning(self, "Error", "Device not found")
+            return
+
+        if device.config.device_type == DeviceType.IEC61850_SERVER:
+            if device.connected:
+                QMessageBox.information(self, "Simulator", "Simulation is already running for this device.")
+                return
+            try:
+                self.device_manager.connect_device(device_name)
+                QMessageBox.information(
+                    self,
+                    "Simulator Starting",
+                    f"Starting IEC 61850 simulator for {device_name}..."
+                )
+            except Exception as e:
+                QMessageBox.critical(self, "Simulation Failed", f"Failed to start simulator:\n{e}")
+            return
+
+        if device.config.device_type != DeviceType.IEC61850_IED:
+            QMessageBox.warning(self, "Error", "Simulation is only available for IEC 61850 devices")
+            return
+
+        self._start_ied_simulator(device_name)
 
     def _show_modbus_range_dialog(self, device_name):
         """Shows the dialog to configure Modbus address ranges."""

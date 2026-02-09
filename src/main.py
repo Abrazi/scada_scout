@@ -9,6 +9,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 import logging
 import ctypes
+import ctypes.util
+import glob
 
 # Early environment sanity checks to avoid loading incompatible system libs (snap/core20)
 def _detect_incompatible_system_libs() -> list:
@@ -19,6 +21,60 @@ def _detect_incompatible_system_libs() -> list:
         if "/snap/core20" in val or ("/snap" in val and "core" in val):
             bad.append((var, val))
     return bad
+
+
+def _iec61850_library_present() -> bool:
+    if os.name == "nt":
+        return True
+
+    project_lib_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "lib"))
+    for path in glob.glob(os.path.join(project_lib_dir, "libiec61850.so*")):
+        if os.path.isfile(path):
+            return True
+
+    if ctypes.util.find_library("iec61850") or ctypes.util.find_library("libiec61850"):
+        return True
+
+    return False
+
+
+def _warn_missing_iec61850_library() -> None:
+    if os.name == "nt":
+        return
+
+    if _iec61850_library_present():
+        return
+
+    sys.stderr.write("WARNING: libiec61850 not found on Linux. IEC 61850 features will fail to load.\n")
+    sys.stderr.write("Fix: run scripts/build_libiec61850_linux.sh or follow IEC61850_SETUP.md\n")
+
+
+def _warn_asan_preload() -> None:
+    if os.name == "nt":
+        return
+
+    ld_preload = os.environ.get("LD_PRELOAD", "")
+    asan_opts = os.environ.get("ASAN_OPTIONS", "")
+    if not ld_preload and not asan_opts:
+        return
+
+    entries = []
+    for token in ld_preload.split():
+        entries.extend(token.split(":"))
+
+    if "libasan" in ld_preload:
+        if entries and "libasan" not in entries[0]:
+            sys.stderr.write(
+                "WARNING: ASAN is set but not first in LD_PRELOAD. "
+                "Preload it first or clear LD_PRELOAD for normal runs.\n"
+            )
+        return
+
+    if asan_opts:
+        sys.stderr.write(
+            "WARNING: ASAN_OPTIONS is set but libasan is not preloaded. "
+            "Preload libasan or clear ASAN_OPTIONS.\n"
+        )
 
 # NOTE: GUI and other C-extension imports are intentionally deferred until runtime
 # after the environment check — this prevents the dynamic loader from pulling
@@ -94,6 +150,9 @@ def main():
             sys.stderr.write("  3) If launched from a .desktop/systemd/IDE, remove the export from that launcher.\n")
             sys.stderr.write("\nIf you want the application to attempt to sanitize these variables automatically, reply and I can add an opt-in flag.\n")
             return 2
+
+        _warn_asan_preload()
+        _warn_missing_iec61850_library()
 
         # Defer heavy GUI imports until after env validation to avoid crashing the process
         from PySide6.QtWidgets import QApplication

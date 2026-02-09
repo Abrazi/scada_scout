@@ -43,7 +43,7 @@ class IEC61850ServerAdapter(BaseProtocol):
         self._sbo_state = {}
         self._sbo_select_timeout_ms = 30000
         self._cdc_control_dos = set()
-        self._created_control_objects = {}  # Maps ref -> (data_object_ptr, ctl_model_val, ctl_model_str)
+        self._created_control_objects = {}  # Maps ref -> (data_object_ptr, ctl_model_val, ctl_model_str, ctl_model_da)
         self._sbo_bridge = None
         self._sbo_bridge_active = False
         self._sbo_operate_cb = None
@@ -111,6 +111,76 @@ class IEC61850ServerAdapter(BaseProtocol):
                     logger.warning(f"Failed to load C SBO bridge at {dll_path}: {e}")
 
         logger.info("C SBO bridge not found; falling back to Python handlers")
+
+    def _debug_sbo_log(self, message: str) -> None:
+        if os.environ.get("IEC61850_DEBUG_SBO_LOGS", "false").lower() == "true":
+            print(message, flush=True)
+            logger.debug(message)
+
+    def _required_sbo_dais(self, ctl_model: str) -> set[str]:
+        required = {"Oper", "Cancel"}
+        if "enhanced" in (ctl_model or "").lower():
+            required.add("SBOw")
+        else:
+            required.add("SBO")
+        return required
+
+    def _parse_scd_control_dois(self, scd_path: str, ied_name: str) -> list[dict]:
+        results = []
+        if not scd_path or not os.path.exists(scd_path):
+            return results
+
+        try:
+            tree = ET.parse(scd_path)
+            root = tree.getroot()
+
+            ns_uri = None
+            if "}" in root.tag:
+                ns_uri = root.tag.split("}")[0].strip("{")
+
+            def _ns(tag: str) -> str:
+                return f"{{{ns_uri}}}{tag}" if ns_uri else tag
+
+            for ied in root.findall(f".//{_ns('IED')}"):
+                if ied.get("name") != ied_name:
+                    continue
+
+                for ldevice in ied.findall(f".//{_ns('LDevice')}"):
+                    ld_inst = ldevice.get("inst", "LD0")
+                    ld_inst_norm = self._strip_ied_prefix(ied_name, ld_inst) or ld_inst
+
+                    for ln in ldevice.findall(f".//{_ns('LN')}") + ldevice.findall(f".//{_ns('LN0')}"):
+                        prefix = ln.get("prefix", "")
+                        ln_class = ln.get("lnClass", "")
+                        inst = ln.get("inst", "")
+                        full_ln_name = f"{prefix}{ln_class}{inst}"
+
+                        for doi in ln.findall(f"{_ns('DOI')}"):
+                            do_name = doi.get("name")
+                            if not do_name:
+                                continue
+
+                            ctl_model = None
+                            dai_names = set()
+                            for dai in doi.findall(f"{_ns('DAI')}"):
+                                name = dai.get("name")
+                                if name:
+                                    dai_names.add(name)
+                                if name == "ctlModel":
+                                    val = dai.find(f"{_ns('Val')}")
+                                    if val is not None and val.text:
+                                        ctl_model = val.text.strip()
+
+                            if ctl_model:
+                                ref = f"{ld_inst_norm}/{full_ln_name}.{do_name}"
+                                results.append({
+                                    "ref": ref,
+                                    "ctl_model": ctl_model,
+                                    "dai_names": dai_names,
+                                })
+            return results
+        except Exception:
+            return results
 
     @staticmethod
     def _find_available_ports(bind_ip: str, start_port: int = 10002, count: int = 3) -> list:
@@ -1079,6 +1149,9 @@ class IEC61850ServerAdapter(BaseProtocol):
                         print(f"[CTRL_CREATE] Checking LN: ({ld_inst_norm}, {full_ln_name})", flush=True)
                         # Get the LogicalNode pointer
                         lnode = ln_nodes.get((ld_inst_norm, full_ln_name))
+                        self._debug_sbo_log(
+                            f"[SBO_DEBUG] LN {ld_inst_norm}/{full_ln_name} lnode={lnode}"
+                        )
                         if not lnode:
                             print(f"[CTRL_CREATE] LN not in ln_nodes: ({ld_inst_norm}, {full_ln_name})", flush=True)
                             print(f"[CTRL_CREATE] Available keys: {list(ln_nodes.keys())[:5]}", flush=True)
@@ -1093,8 +1166,12 @@ class IEC61850ServerAdapter(BaseProtocol):
                             
                             # Check if this DOI has a ctlModel
                             ctl_model = None
+                            dai_names = set()
                             for dai in doi.findall(f"{_ns('DAI')}"):
-                                if dai.get("name") == "ctlModel":
+                                dai_name = dai.get("name")
+                                if dai_name:
+                                    dai_names.add(dai_name)
+                                if dai_name == "ctlModel":
                                     val = dai.find(f"{_ns('Val')}")
                                     if val is not None and val.text:
                                         ctl_model = val.text.strip()
@@ -1110,12 +1187,26 @@ class IEC61850ServerAdapter(BaseProtocol):
                                 print(f"[CTRL_CREATE] Skipping status-only: {ld_inst_norm}/{full_ln_name}.{do_name}", flush=True)
                                 logger.debug(f"Skipping status-only control: {ld_inst_norm}/{full_ln_name}.{do_name}")
                                 continue
+
+                            if "sbo" in ctl_model.lower():
+                                required = self._required_sbo_dais(ctl_model)
+                                missing = sorted(required - dai_names)
+                                self._debug_sbo_log(
+                                    f"[SBO_DEBUG] {ld_inst_norm}/{full_ln_name}.{do_name} ctlModel={ctl_model} "
+                                    f"DAIs={sorted(dai_names)} missing={missing}"
+                                )
+                                if missing:
+                                    logger.warning(
+                                        f"SBO control {ld_inst_norm}/{full_ln_name}.{do_name} missing DAI {missing}; "
+                                        "continuing and validating against the model"
+                                    )
                             
                             # Map control model to libiec61850 constant
-                            control_options = self._map_ctl_model(ctl_model)
-                            if control_options is None:
+                            ctl_model_val = self._map_ctl_model(ctl_model)
+                            if ctl_model_val is None:
                                 logger.warning(f"Failed to map ctlModel '{ctl_model}' for {ld_inst_norm}/{full_ln_name}.{do_name}")
-                                control_options = 0
+                                ctl_model_val = lib.CONTROL_MODEL_STATUS_ONLY
+                            control_options = ctl_model_val
                             
                             # Create the control DataObject
                             key = (ld_inst_norm, full_ln_name, do_name)
@@ -1124,39 +1215,74 @@ class IEC61850ServerAdapter(BaseProtocol):
                                 parent = ctypes.cast(lnode, ctypes.POINTER(lib.ModelNode))
                                 new_do = None
 
-                                # Prefer manual DPC creation for SBO controls to set correct ctlModel value
-                                # CDC_DPC_create hardcodes ctlModel=0 which is incorrect
+                                # Prefer CDC_DPC_create to populate control attributes; manual fallback keeps ctlModel aligned
                                 print(f"[CTRL_CREATE] Checking CDC: lnClass={lnClass}, do_name={do_name}", flush=True)
+                                ctl_model_da = None
                                 if lnClass == "CSWI" and do_name == "Pos":
-                                    print(f"[CTRL_CREATE] Using MANUAL DPC creation for {key}", flush=True)
-                                    try:
-                                        # Map control model string to numeric value
-                                        ctl_model_val = self._map_ctl_model(ctl_model) or lib.CONTROL_MODEL_STATUS_ONLY
-                                        print(f"[CTRL_CREATE] Calling _create_dpc_manually: ctl_model_val={ctl_model_val}, options={control_options}", flush=True)
-                                        
-                                        new_do, ctl_model_da = self._create_dpc_manually(
-                                            do_name,
-                                            parent,
-                                            ctl_model_val,  # Control model (4 for sbo-with-enhanced-security)
-                                            control_options,  # Control options
-                                        )
-                                        print(f"[CTRL_CREATE] _create_dpc_manually returned: DO={new_do}, ctlModel DA={ctl_model_da}", flush=True)
-                                        if new_do:
-                                            self._cdc_control_dos.add(key)
-                                            print(f"[CTRL_CREATE] Manual DPC creation SUCCESS for {key}", flush=True)
-                                            logger.info(f"Manual DPC creation success for {ld_inst_norm}/{full_ln_name}.{do_name}: ctlModel={ctl_model_val} ({ctl_model}), options={control_options}")
-                                            
-                                            # Store the control object pointer for later handler registration
-                                            # Now include the ctlModel DataAttribute pointer
-                                            ref = f"{ld_inst_norm}/{full_ln_name}.{do_name}"
-                                            self._created_control_objects[ref] = (new_do, ctl_model_val, ctl_model, ctl_model_da)
-                                            print(f"[CTRL_CREATE] Stored control object: {ref}", flush=True)
-                                        else:
-                                            print(f"[CTRL_CREATE] _create_dpc_manually returned NULL for {key}", flush=True)
-                                            logger.warning(f"Manual DPC creation returned NULL for {ld_inst_norm}/{full_ln_name}.{do_name}")
-                                    except Exception as e:
-                                        print(f"[CTRL_CREATE] Manual DPC creation EXCEPTION: {e}", flush=True)
-                                        logger.warning(f"Manual DPC creation failed for {ld_inst_norm}/{full_ln_name}.{do_name}: {e}")
+                                    if hasattr(lib, "CDC_DPC_create"):
+                                        print(f"[CTRL_CREATE] Using CDC_DPC_create for {key}", flush=True)
+                                        try:
+                                            new_do = lib.CDC_DPC_create(
+                                                do_name.encode("utf-8"),
+                                                parent,
+                                                ctl_model_val,
+                                                control_options,
+                                            )
+                                            if new_do:
+                                                self._cdc_control_dos.add(key)
+                                                print(f"[CTRL_CREATE] CDC_DPC_create SUCCESS for {key}", flush=True)
+                                                logger.info(
+                                                    f"CDC_DPC_create success for {ld_inst_norm}/{full_ln_name}.{do_name}: "
+                                                    f"ctlModel={ctl_model_val} ({ctl_model}), options={control_options}"
+                                                )
+                                            else:
+                                                print(f"[CTRL_CREATE] CDC_DPC_create returned NULL for {key}", flush=True)
+                                        except Exception as e:
+                                            print(f"[CTRL_CREATE] CDC_DPC_create EXCEPTION: {e}", flush=True)
+                                            logger.warning(
+                                                f"CDC_DPC_create failed for {ld_inst_norm}/{full_ln_name}.{do_name}: {e}"
+                                            )
+
+                                    if not new_do:
+                                        print(f"[CTRL_CREATE] Using MANUAL DPC creation for {key}", flush=True)
+                                        try:
+                                            print(
+                                                f"[CTRL_CREATE] Calling _create_dpc_manually: "
+                                                f"ctl_model_val={ctl_model_val}, options={control_options}",
+                                                flush=True,
+                                            )
+
+                                            new_do, ctl_model_da = self._create_dpc_manually(
+                                                do_name,
+                                                parent,
+                                                ctl_model_val,  # Control model (4 for sbo-with-enhanced-security)
+                                                control_options,  # Control options
+                                            )
+                                            print(
+                                                f"[CTRL_CREATE] _create_dpc_manually returned: "
+                                                f"DO={new_do}, ctlModel DA={ctl_model_da}",
+                                                flush=True,
+                                            )
+                                            self._debug_sbo_log(
+                                                f"[SBO_DEBUG] Manual DPC pointers: parent={parent} new_do={new_do} ctl_model_da={ctl_model_da}"
+                                            )
+                                            if new_do:
+                                                self._cdc_control_dos.add(key)
+                                                print(f"[CTRL_CREATE] Manual DPC creation SUCCESS for {key}", flush=True)
+                                                logger.info(
+                                                    f"Manual DPC creation success for {ld_inst_norm}/{full_ln_name}.{do_name}: "
+                                                    f"ctlModel={ctl_model_val} ({ctl_model}), options={control_options}"
+                                                )
+                                            else:
+                                                print(f"[CTRL_CREATE] _create_dpc_manually returned NULL for {key}", flush=True)
+                                                logger.warning(
+                                                    f"Manual DPC creation returned NULL for {ld_inst_norm}/{full_ln_name}.{do_name}"
+                                                )
+                                        except Exception as e:
+                                            print(f"[CTRL_CREATE] Manual DPC creation EXCEPTION: {e}", flush=True)
+                                            logger.warning(
+                                                f"Manual DPC creation failed for {ld_inst_norm}/{full_ln_name}.{do_name}: {e}"
+                                            )
 
                                 # Fallback to generic DataObject_create
                                 if not new_do:
@@ -1164,7 +1290,22 @@ class IEC61850ServerAdapter(BaseProtocol):
                                 if new_do:
                                     do_nodes[key] = ctypes.cast(new_do, ctypes.POINTER(lib.ModelNode))
                                     created += 1
-                                    logger.info(f"✓ Created control DO: {ld_inst_norm}/{full_ln_name}.{do_name} with ctlModel={ctl_model} (options={control_options})")
+                                    logger.info(
+                                        f"✓ Created control DO: {ld_inst_norm}/{full_ln_name}.{do_name} "
+                                        f"with ctlModel={ctl_model} (options={control_options})"
+                                    )
+
+                                    # Store control object for SBO registration (even for non-SBO to keep mapping consistent)
+                                    ref = f"{ld_inst_norm}/{full_ln_name}.{do_name}"
+                                    if ctl_model_da is None:
+                                        ctl_model_da = self._get_child_attribute(new_do, "ctlModel")
+                                    self._created_control_objects[ref] = (
+                                        new_do,
+                                        ctl_model_val,
+                                        ctl_model,
+                                        ctl_model_da,
+                                    )
+                                    print(f"[CTRL_CREATE] Stored control object: {ref}", flush=True)
                                 else:
                                     logger.warning(f"DataObject_create returned NULL for {ld_inst_norm}/{full_ln_name}.{do_name}")
                             else:
@@ -1309,6 +1450,14 @@ class IEC61850ServerAdapter(BaseProtocol):
 
     def _register_sbo_handlers(self) -> None:
         """Register SBO select/operate handlers for control DOs defined in the SCD."""
+        disable_sbo = os.environ.get(
+            "IEC61850_DISABLE_SBO_REGISTRATION",
+            "true" if os.name != "nt" else "false",
+        ).lower() == "true"
+        if disable_sbo:
+            print("[SBO_REGISTER] Disabled via IEC61850_DISABLE_SBO_REGISTRATION", flush=True)
+            return
+
         print(f"[SBO_REGISTER] Starting handler registration", flush=True)
         print(f"[SBO_REGISTER] server={self.server}, model={self.model}, scd={self.config.scd_file_path}", flush=True)
         print(f"[SBO_REGISTER] Created control objects: {list(self._created_control_objects.keys())}", flush=True)
@@ -1443,8 +1592,25 @@ class IEC61850ServerAdapter(BaseProtocol):
             if "sbo" not in ctl_model_str.lower():
                 print(f"[SBO_REGISTER] Skipping non-SBO control: {ref} ({ctl_model_str})", flush=True)
                 continue
+
+            required_attrs = sorted(self._required_sbo_dais(ctl_model_str))
+            missing_attrs = [
+                name for name in required_attrs if not self._get_child_attribute(data_object, name)
+            ]
+            if missing_attrs:
+                logger.warning(
+                    f"Skipping SBO registration for {ref}: missing control attributes {missing_attrs}"
+                )
+                self._debug_sbo_log(
+                    f"[SBO_DEBUG] {ref} missing control attributes {missing_attrs}; skip registration"
+                )
+                continue
             
             try:
+                if not data_object:
+                    logger.warning(f"Skipping SBO registration for {ref}: data_object is NULL")
+                    continue
+
                 # Update ctlModel on the server (control behavior)
                 try:
                     lib.IedServer_updateCtlModel(self.server, data_object, ctl_model_val)
@@ -1454,69 +1620,79 @@ class IEC61850ServerAdapter(BaseProtocol):
 
                 # Update the ctlModel DA value so clients see the correct numeric value
                 try:
-                    # Use the stored pointer from manual DPC creation
-                    ctl_attr = ctl_model_da
-                    print(f"[SBO_REGISTER] Using stored ctlModel DA: {ctl_attr}", flush=True)
-                    if ctl_attr is not None:
-                        # Try multiple update methods
-                        updated = False
-                        
-                        # Method 1: Try updateInt32AttributeValue with data model locking
-                        if hasattr(lib, "IedServer_updateInt32AttributeValue"):
-                            try:
-                                # Lock the data model for thread-safe updates
-                                if hasattr(lib, "IedServer_lockDataModel"):
-                                    lib.IedServer_lockDataModel(self.server)
-                                
-                                print(f"[SBO_REGISTER] Calling IedServer_updateInt32AttributeValue(server={self.server}, attr={ctl_attr}, value={int(ctl_model_val)})", flush=True)
-                                lib.IedServer_updateInt32AttributeValue(self.server, ctl_attr, int(ctl_model_val))
-                                print(f"[SBO_REGISTER] Used updateInt32AttributeValue", flush=True)
-                                
-                                # Unlock the data model
-                                if hasattr(lib, "IedServer_unlockDataModel"):
-                                    lib.IedServer_unlockDataModel(self.server)
-                                
-                                # Try reading it back to verify
-                                if hasattr(lib, "IedServer_getAttributeValue"):
-                                    try:
-                                        readback = lib.IedServer_getAttributeValue(self.server, ctl_attr)
-                                        if readback:
-                                            val_type = lib.MmsValue_getType(readback)
-                                            if val_type in (lib.MMS_INTEGER, 1):  # INT type
-                                                readback_val = lib.MmsValue_toInt32(readback)
-                                                print(f"[SBO_REGISTER] Readback value: {readback_val}", flush=True)
-                                    except Exception as e2:
-                                        print(f"[SBO_REGISTER] Readback failed: {e2}", flush=True)
-                                
-                                updated = True
-                            except Exception as e:
-                                # Make sure to unlock even if there's an error
-                                if hasattr(lib, "IedServer_unlockDataModel"):
-                                    try:
-                                        lib.IedServer_unlockDataModel(self.server)
-                                    except:
-                                        pass
-                                print(f"[SBO_REGISTER] updateInt32AttributeValue failed: {e}", flush=True)
-                        
-                        # Method 2: Try with MmsValue
-                        if not updated and hasattr(lib, "MmsValue_newIntegerFromInt32"):
-                            try:
-                                mms_val = lib.MmsValue_newIntegerFromInt32(int(ctl_model_val))
-                                if hasattr(lib, "IedServer_updateAttributeValue"):
-                                    lib.IedServer_updateAttributeValue(self.server, ctl_attr, mms_val)
-                                    print(f"[SBO_REGISTER] Used MmsValue method", flush=True)
-                                    updated = True
-                                if hasattr(lib, "MmsValue_delete"):
-                                    lib.MmsValue_delete(mms_val)
-                            except Exception as e:
-                                print(f"[SBO_REGISTER] MmsValue method failed: {e}", flush=True)
-                        
-                        if updated:
-                            print(f"[SBO_REGISTER] Set ctlModel DA value={ctl_model_val} for {ref}", flush=True)
-                        else:
-                            print(f"[SBO_REGISTER] WARNING: Could not update ctlModel value for {ref}", flush=True)
+                    update_ctlmodel_da = os.environ.get(
+                        "IEC61850_SBO_UPDATE_CTLMODEL_DA",
+                        "true" if os.name == "nt" else "false",
+                    ).lower() == "true"
+                    if not update_ctlmodel_da:
+                        print(f"[SBO_REGISTER] Skipping ctlModel DA update for {ref}", flush=True)
                     else:
-                        print(f"[SBO_REGISTER] WARNING: ctlModel attribute not found for {ref}", flush=True)
+                        # Use the stored pointer from manual DPC creation
+                        ctl_attr = ctl_model_da
+                        if ctl_attr is None:
+                            ctl_attr = self._get_child_attribute(data_object, "ctlModel")
+                        print(f"[SBO_REGISTER] Using stored ctlModel DA: {ctl_attr}", flush=True)
+                        if ctl_attr is not None:
+                            # Try multiple update methods
+                            updated = False
+
+                            # Method 1: Try updateInt32AttributeValue with data model locking
+                            use_int32_update = os.environ.get(
+                                "IEC61850_SBO_USE_INT32_UPDATE",
+                                "true" if os.name == "nt" else "false",
+                            ).lower() == "true"
+                            if use_int32_update and hasattr(lib, "IedServer_updateInt32AttributeValue"):
+                                try:
+                                    # Lock the data model for thread-safe updates
+                                    if hasattr(lib, "IedServer_lockDataModel"):
+                                        lib.IedServer_lockDataModel(self.server)
+
+                                    print(f"[SBO_REGISTER] Calling IedServer_updateInt32AttributeValue(server={self.server}, attr={ctl_attr}, value={int(ctl_model_val)})", flush=True)
+                                    lib.IedServer_updateInt32AttributeValue(self.server, ctl_attr, int(ctl_model_val))
+                                    print(f"[SBO_REGISTER] Used updateInt32AttributeValue", flush=True)
+
+                                    # Unlock the data model
+                                    if hasattr(lib, "IedServer_unlockDataModel"):
+                                        lib.IedServer_unlockDataModel(self.server)
+
+                                    updated = True
+                                except Exception as e:
+                                    # Make sure to unlock even if there's an error
+                                    if hasattr(lib, "IedServer_unlockDataModel"):
+                                        try:
+                                            lib.IedServer_unlockDataModel(self.server)
+                                        except Exception:
+                                            pass
+                                    print(f"[SBO_REGISTER] updateInt32AttributeValue failed: {e}", flush=True)
+
+                            # Method 2: Try with MmsValue
+                            if not updated and hasattr(lib, "MmsValue_newIntegerFromInt32"):
+                                try:
+                                    if hasattr(lib, "IedServer_lockDataModel"):
+                                        lib.IedServer_lockDataModel(self.server)
+                                    mms_val = lib.MmsValue_newIntegerFromInt32(int(ctl_model_val))
+                                    if hasattr(lib, "IedServer_updateAttributeValue"):
+                                        lib.IedServer_updateAttributeValue(self.server, ctl_attr, mms_val)
+                                        print(f"[SBO_REGISTER] Used MmsValue method", flush=True)
+                                        updated = True
+                                    if hasattr(lib, "MmsValue_delete"):
+                                        lib.MmsValue_delete(mms_val)
+                                    if hasattr(lib, "IedServer_unlockDataModel"):
+                                        lib.IedServer_unlockDataModel(self.server)
+                                except Exception as e:
+                                    if hasattr(lib, "IedServer_unlockDataModel"):
+                                        try:
+                                            lib.IedServer_unlockDataModel(self.server)
+                                        except Exception:
+                                            pass
+                                    print(f"[SBO_REGISTER] MmsValue method failed: {e}", flush=True)
+
+                            if updated:
+                                print(f"[SBO_REGISTER] Set ctlModel DA value={ctl_model_val} for {ref}", flush=True)
+                            else:
+                                print(f"[SBO_REGISTER] WARNING: Could not update ctlModel value for {ref}", flush=True)
+                        else:
+                            print(f"[SBO_REGISTER] WARNING: ctlModel attribute not found for {ref}", flush=True)
                 except Exception as e:
                     print(f"[SBO_REGISTER] ERROR updating ctlModel DA: {e}", flush=True)
                     logger.debug(f"Failed to update ctlModel DA for {ref}: {e}")
@@ -1528,6 +1704,10 @@ class IEC61850ServerAdapter(BaseProtocol):
                     "op_ok": self._get_child_attribute(data_object, "opOk"),
                     "t": self._get_child_attribute(data_object, "t"),
                 }
+                self._debug_sbo_log(
+                    f"[SBO_DEBUG] Register {ref} data_object={data_object} "
+                    f"st_val={control_ctx['st_val']} op_ok={control_ctx['op_ok']} t={control_ctx['t']}"
+                )
 
                 # Create handlers
                 check_handler = self._make_sbo_check_handler(control_ctx)
@@ -1724,10 +1904,17 @@ class IEC61850ServerAdapter(BaseProtocol):
             return None, None
 
     def _get_child_attribute(self, data_object, name: str, fc: Optional[int] = None):
+        if not data_object:
+            return None
+
+        use_fc_lookup = os.environ.get(
+            "IEC61850_USE_FC_LOOKUP",
+            "true" if os.name == "nt" else "false",
+        ).lower() == "true"
         node = ctypes.cast(data_object, ctypes.POINTER(lib.ModelNode))
 
         # Try FC-specific lookup first if requested
-        if fc is not None and hasattr(lib, "ModelNode_getChildWithFc"):
+        if use_fc_lookup and fc is not None and hasattr(lib, "ModelNode_getChildWithFc"):
             try:
                 child = lib.ModelNode_getChildWithFc(node, name.encode("utf-8"), fc)
                 if child:
@@ -1739,18 +1926,6 @@ class IEC61850ServerAdapter(BaseProtocol):
         child = lib.ModelNode_getChild(node, name.encode("utf-8"))
         if child:
             return ctypes.cast(child, ctypes.POINTER(lib.DataAttribute))
-
-        # Final fallback: try common FCs
-        if hasattr(lib, "ModelNode_getChildWithFc"):
-            for fc_try in (getattr(lib, "IEC61850_FC_CF", None), getattr(lib, "IEC61850_FC_CO", None)):
-                if fc_try is None:
-                    continue
-                try:
-                    child = lib.ModelNode_getChildWithFc(node, name.encode("utf-8"), fc_try)
-                    if child:
-                        return ctypes.cast(child, ctypes.POINTER(lib.DataAttribute))
-                except Exception:
-                    continue
 
         return None
 
