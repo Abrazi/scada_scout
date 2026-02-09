@@ -1,16 +1,17 @@
-from PySide6.QtWidgets import (QDialog, QVBoxLayout, QFormLayout, QLineEdit, QComboBox, 
-                                 QDialogButtonBox, QMessageBox, QPushButton, QHBoxLayout, 
-                                 QFileDialog, QListWidget, QLabel, QMenu, QStackedWidget, 
-                                 QCheckBox, QDoubleSpinBox, QSpinBox)
+from PySide6.QtWidgets import (QDialog, QVBoxLayout, QFormLayout, QLineEdit, QComboBox,
+                               QDialogButtonBox, QMessageBox, QPushButton, QHBoxLayout,
+                               QFileDialog, QListWidget, QLabel, QMenu, QStackedWidget,
+                               QCheckBox, QDoubleSpinBox, QSpinBox, QGroupBox)
 from PySide6.QtCore import QSettings, Qt
 from PySide6.QtGui import QGuiApplication
 import platform
+from typing import Optional
 import psutil
 import socket
 import os
 import tempfile
 import logging
-from src.models.device_models import DeviceConfig, DeviceType
+from src.models.device_models import DeviceConfig, DeviceType, DeviceRole, infer_device_role
 from src.utils.archive_utils import ArchiveExtractor
 
 logger = logging.getLogger(__name__)
@@ -19,9 +20,10 @@ class ConnectionDialog(QDialog):
     """
     Dialog to input connection details (IP, Port, Protocol).
     """
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, role_default: DeviceRole = None, connect_immediately_default: Optional[bool] = None, preset_device_type: DeviceType = None):
         super().__init__(parent)
-        self.setWindowTitle("🔌 Connect to Device")
+        # Architectural: unified Add Device dialog (role-aware, protocol-agnostic).
+        self.setWindowTitle("Add Device")
         # Scale dialog size for Windows DPI and available screen size
         base_width, base_height = 850, 650
         min_width, min_height = 750, 580
@@ -81,31 +83,47 @@ class ConnectionDialog(QDialog):
         self.port_input = QLineEdit("102") # Default IEC 61850 port
         
         self.type_input = QComboBox()
-        self.type_input.addItem(DeviceType.IEC61850_IED.value, DeviceType.IEC61850_IED)
-        self.type_input.addItem(DeviceType.IEC104_RTU.value, DeviceType.IEC104_RTU)
-        self.type_input.addItem(DeviceType.MODBUS_TCP.value, DeviceType.MODBUS_TCP)
-        self.type_input.addItem(DeviceType.MODBUS_SERVER.value, DeviceType.MODBUS_SERVER)
-        
-        # Modbus RTU options
-        try:
-            self.type_input.addItem(DeviceType.MODBUS_RTU_MASTER.value, DeviceType.MODBUS_RTU_MASTER)
-            self.type_input.addItem(DeviceType.MODBUS_RTU_SLAVE.value, DeviceType.MODBUS_RTU_SLAVE)
-            self.type_input.addItem(DeviceType.MODBUS_RTU_SIMULATOR.value, DeviceType.MODBUS_RTU_SIMULATOR)
-        except Exception:
-            pass  # RTU types not available
-        
-        # OPC (opt-in) — appears in the Connect dialog so users can add OPC UA devices
-        from src.models.device_models import DeviceType as _DT
-        try:
-            self.type_input.addItem(DeviceType.OPC_UA_CLIENT.value, DeviceType.OPC_UA_CLIENT)
-            self.type_input.addItem(DeviceType.OPC_UA_SERVER.value, DeviceType.OPC_UA_SERVER)
-        except Exception:
-            # If DeviceType wasn't updated for some reason, ignore silently
-            pass
 
-        # Update default port based on selection
+        # Role selector (offline/client/server)
+        self.role_input = QComboBox()
+        self.role_input.addItem(DeviceRole.OFFLINE.value, DeviceRole.OFFLINE)
+        self.role_input.addItem(DeviceRole.CLIENT.value, DeviceRole.CLIENT)
+        self.role_input.addItem(DeviceRole.SERVER.value, DeviceRole.SERVER)
+
+        # Device type options per role
+        self._role_device_types = {
+            DeviceRole.CLIENT: [
+                DeviceType.IEC61850_IED,
+                DeviceType.IEC104_RTU,
+                DeviceType.MODBUS_TCP,
+                DeviceType.MODBUS_RTU_MASTER,
+                DeviceType.OPC_UA_CLIENT,
+            ],
+            DeviceRole.SERVER: [
+                DeviceType.IEC61850_SERVER,
+                DeviceType.MODBUS_SERVER,
+                DeviceType.MODBUS_RTU_SLAVE,
+                DeviceType.MODBUS_RTU_SIMULATOR,
+                DeviceType.OPC_UA_SERVER,
+            ],
+            DeviceRole.OFFLINE: [
+                DeviceType.IEC61850_IED,
+                DeviceType.IEC61850_SERVER,
+                DeviceType.IEC104_RTU,
+                DeviceType.MODBUS_TCP,
+                DeviceType.MODBUS_SERVER,
+                DeviceType.MODBUS_RTU_MASTER,
+                DeviceType.MODBUS_RTU_SLAVE,
+                DeviceType.MODBUS_RTU_SIMULATOR,
+                DeviceType.OPC_UA_CLIENT,
+                DeviceType.OPC_UA_SERVER,
+            ],
+        }
+
+        # Update defaults based on selection
         self.type_input.currentTextChanged.connect(self._on_type_changed)
         self.type_input.currentTextChanged.connect(self._update_form_labels)
+        self.role_input.currentTextChanged.connect(self._on_role_changed)
         
         
         # SCD File Selection
@@ -198,6 +216,7 @@ class ConnectionDialog(QDialog):
         self.form.addRow("Device Name:", self.name_input)
         self.form.addRow("Description:", self.desc_input)
         self.form.addRow("Folder:", self.folder_input)
+        self.form.addRow("Role:", self.role_input)
         
         # Store label reference to avoid layout.labelForField issues
         self.ip_label = QLabel("IP Address:")
@@ -206,6 +225,10 @@ class ConnectionDialog(QDialog):
         
         self.form.addRow("Port:", self.port_input)
         self.form.addRow("Protocol:", self.type_input)
+
+        # Startup behavior (connect/start) is role-sensitive
+        self.connect_immediately_checkbox = QCheckBox("Connect immediately")
+        self.form.addRow("Startup:", self.connect_immediately_checkbox)
         self.form.addRow(self.unit_id_label, self.unit_id_input)
         
         # RTU Configuration rows
@@ -268,6 +291,27 @@ class ConnectionDialog(QDialog):
         
         # Internal state
         self.modbus_register_maps = []
+
+        # Default role/device type for entry point presets
+        if preset_device_type is not None and role_default is None:
+            role_default = infer_device_role(preset_device_type)
+        if role_default is None:
+            role_default = DeviceRole.CLIENT
+
+        self._set_role(role_default, preset_device_type)
+
+        # Preset protocol-specific defaults
+        if preset_device_type in (DeviceType.OPC_UA_CLIENT, DeviceType.OPC_UA_SERVER):
+            if not self.opc_endpoint_input.text().strip():
+                if preset_device_type == DeviceType.OPC_UA_CLIENT:
+                    self.opc_endpoint_input.setText("opc.tcp://127.0.0.1:4840")
+                else:
+                    self.opc_endpoint_input.setText("opc.tcp://0.0.0.0:4840")
+
+        # Default connect/start behavior (Client auto-connect by default)
+        if connect_immediately_default is None:
+            connect_immediately_default = (role_default == DeviceRole.CLIENT)
+        self.connect_immediately_checkbox.setChecked(connect_immediately_default)
         
         # Initialize serial ports
         self._refresh_serial_ports()
@@ -431,6 +475,57 @@ class ConnectionDialog(QDialog):
             if label and label.widget() and label.widget().text() == "Port:":
                 label.widget().setVisible(not use_serial)
 
+    def _set_type_options(self, device_types, preferred: Optional[DeviceType] = None):
+        """Replace protocol choices based on role selection."""
+        current = preferred or self.type_input.currentData()
+        self.type_input.blockSignals(True)
+        self.type_input.clear()
+        for dt in device_types:
+            self.type_input.addItem(dt.value, dt)
+        if current in device_types:
+            idx = self.type_input.findData(current)
+            if idx >= 0:
+                self.type_input.setCurrentIndex(idx)
+        elif device_types:
+            self.type_input.setCurrentIndex(0)
+        self.type_input.blockSignals(False)
+        self._on_type_changed()
+        self._update_form_labels(self.type_input.currentText())
+
+    def _set_role(self, role: DeviceRole, preferred_device_type: Optional[DeviceType] = None):
+        """Apply role selection and update available protocol types."""
+        idx = self.role_input.findData(role)
+        if idx >= 0:
+            self.role_input.blockSignals(True)
+            self.role_input.setCurrentIndex(idx)
+            self.role_input.blockSignals(False)
+        self._set_type_options(self._role_device_types.get(role, []), preferred_device_type)
+        self._update_startup_controls(role)
+
+    def _update_startup_controls(self, role: DeviceRole):
+        """Role-specific startup control labeling/visibility."""
+        if role == DeviceRole.SERVER:
+            self.connect_immediately_checkbox.setText("Start server immediately")
+            self.connect_immediately_checkbox.setVisible(True)
+        elif role == DeviceRole.CLIENT:
+            self.connect_immediately_checkbox.setText("Connect immediately")
+            self.connect_immediately_checkbox.setVisible(True)
+        else:
+            self.connect_immediately_checkbox.setVisible(False)
+
+    def _on_role_changed(self):
+        role = self.role_input.currentData()
+        self._set_type_options(self._role_device_types.get(role, []))
+        self._update_startup_controls(role)
+
+        # Offline defaults (kept editable for later online transition)
+        if role == DeviceRole.OFFLINE:
+            if not self.ip_input.text().strip():
+                self.ip_input.setText("127.0.0.1")
+            current_port = self.port_input.text().strip()
+            if not current_port or current_port in ("102", "2404", "502", "5020", "4840"):
+                self.port_input.setText("0")
+
     def _on_type_changed(self):
         # Auto-set standard ports
         dt = self.type_input.currentData()
@@ -440,6 +535,8 @@ class ConnectionDialog(QDialog):
             self.port_input.setText("502")
         elif dt == DeviceType.MODBUS_SERVER:
             self.port_input.setText("5020")
+        elif dt in (DeviceType.OPC_UA_CLIENT, DeviceType.OPC_UA_SERVER):
+            self.port_input.setText("4840")
         elif dt in [DeviceType.MODBUS_RTU_MASTER, DeviceType.MODBUS_RTU_SLAVE, DeviceType.MODBUS_RTU_SIMULATOR]:
             # RTU over TCP uses port 502 by default
             self.port_input.setText("502")
@@ -545,6 +642,10 @@ class ConnectionDialog(QDialog):
         """Pre-fills the dialog with existing config."""
         self.blockSignals(True)
         self.type_input.blockSignals(True)
+
+        # Role drives available protocol choices
+        role = getattr(config, 'device_role', None) or infer_device_role(config.device_type)
+        self._set_role(role, preferred_device_type=config.device_type)
         
         index = self.type_input.findData(config.device_type)
         if index >= 0:
@@ -626,6 +727,8 @@ class ConnectionDialog(QDialog):
         name = self.name_input.text().strip()
         if not name:
             name = f"IED_{ip.replace('.', '_')}"
+
+        role = self.role_input.currentData() or DeviceRole.CLIENT
             
         return DeviceConfig(
             name=name,
@@ -634,6 +737,7 @@ class ConnectionDialog(QDialog):
             ip_address=ip,
             port=port,
             device_type=self.type_input.currentData(),
+            device_role=role,
             scd_file_path=self.scd_input.text() if self.scd_input.text() else None,
             polling_enabled=self.chk_polling.isChecked(),
             poll_interval=self.spin_interval.value(),
@@ -907,6 +1011,8 @@ class ConnectionDialog(QDialog):
         if not name:
             name = f"IED_{ip.replace('.', '_')}"
             
+        role = self.role_input.currentData() or DeviceRole.CLIENT
+
         config = DeviceConfig(
             name=name,
             description=self.desc_input.text(),
@@ -914,6 +1020,7 @@ class ConnectionDialog(QDialog):
             ip_address=ip,
             port=port,
             device_type=self.type_input.currentData(),
+            device_role=role,
             scd_file_path=self.scd_input.text() if self.scd_input.text() else None,
             polling_enabled=self.chk_polling.isChecked(),
             poll_interval=self.spin_interval.value(),
@@ -949,3 +1056,10 @@ class ConnectionDialog(QDialog):
             config.modbus_register_maps = self.modbus_register_maps
             
         return config
+
+    def get_connect_immediately(self) -> bool:
+        """Return whether the device should auto-connect/start after add."""
+        role = self.role_input.currentData() or DeviceRole.CLIENT
+        if role == DeviceRole.OFFLINE:
+            return False
+        return bool(self.connect_immediately_checkbox.isChecked())

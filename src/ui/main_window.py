@@ -9,7 +9,6 @@ import getpass
 
 from src.ui.widgets.device_tree import DeviceTreeWidget
 from src.ui.widgets.signals_view import SignalsViewWidget
-from src.ui.widgets.connection_dialog import ConnectionDialog
 from src.ui.widgets.scd_import_dialog import SCDImportDialog
 from src.ui.widgets.scrollable_message_box import show_scrollable_error, ScrollableMessageBox
 from src.models.device_models import DeviceType
@@ -248,36 +247,36 @@ class MainWindow(QMainWindow):
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
         
-        # Connection Menu
-        conn_menu = menu_bar.addMenu("&Connection")
+        # Device Menu
+        device_menu = menu_bar.addMenu("&Device")
         
-        # Connect Action
-        connect_action = QAction("&Connect to Device...", self)
-        connect_action.setStatusTip("Connect to a remote device as client")
-        connect_action.triggered.connect(self._show_connection_dialog)
-        conn_menu.addAction(connect_action)
+        # Add Device Action
+        add_device_action = QAction("&Add Device...", self)
+        add_device_action.setStatusTip("Add a device definition (Offline/Client/Server)")
+        add_device_action.triggered.connect(self._show_connection_dialog)
+        device_menu.addAction(add_device_action)
         
-        conn_menu.addSeparator()
+        device_menu.addSeparator()
         
         # Modbus Slave Server
         slave_server_action = QAction("&Modbus Slave Server...", self)
         slave_server_action.setStatusTip("Start Modbus slave/server for simulation")
         slave_server_action.triggered.connect(self._show_modbus_slave)
-        conn_menu.addAction(slave_server_action)
+        device_menu.addAction(slave_server_action)
         
         # IEC 61850 Simulator
         iec_simulator_action = QAction("&IEC 61850 Simulator...", self)
         iec_simulator_action.setStatusTip("Simulate IEDs from an SCD file")
         iec_simulator_action.triggered.connect(self._show_iec61850_simulator_dialog)
-        conn_menu.addAction(iec_simulator_action)
+        device_menu.addAction(iec_simulator_action)
         
-        conn_menu.addSeparator()
+        device_menu.addSeparator()
         
         # IED Project Manager
         ied_project_action = QAction("📦 &IED Project Manager...", self)
         ied_project_action.setStatusTip("Load SCD files and create IED servers with PLC programs")
         ied_project_action.triggered.connect(self._show_ied_project_dialog)
-        conn_menu.addAction(ied_project_action)
+        device_menu.addAction(ied_project_action)
         
         # View Menu
         self.view_menu = menu_bar.addMenu("&View")
@@ -551,8 +550,8 @@ class MainWindow(QMainWindow):
 
         self.toolbar.addSeparator()
 
-        connect_action = QAction(_icon('network-connect', 'Connect'), 'Connect', self)
-        connect_action.setStatusTip('Connect to selected device')
+        connect_action = QAction(_icon('list-add', 'Add'), 'Add Device', self)
+        connect_action.setStatusTip('Add a device definition (Offline/Client/Server)')
         connect_action.triggered.connect(lambda: self._show_connection_dialog())
         self.toolbar.addAction(connect_action)
 
@@ -1409,15 +1408,13 @@ QTabBar::tab {{ padding: {widget_padding + 2}px {button_padding + 8}px; font-siz
         self.repaint()
 
     def _show_connection_dialog(self):
-        """Opens the Connection Dialog."""
-        dialog = ConnectionDialog(self)
-        if dialog.exec():
-            config = dialog.get_config()
-            try:
-                self.device_manager.add_device(config)
-                self._connect_with_progress(config.name)
-            except ValueError as e:
-                QMessageBox.critical(self, "Error", f"Error adding device: {e}")
+        """Opens the unified Add Device dialog."""
+        from src.ui.widgets.add_device_workflow import add_device_via_dialog
+
+        add_device_via_dialog(
+            self,
+            self.device_manager,
+        )
     
     def _connect_with_progress(self, device_name: str):
         """Connect to device with progress dialog."""

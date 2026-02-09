@@ -16,6 +16,24 @@ class DeviceType(Enum):
     OPC_UA_SERVER = "OPC UA Server (Simulator)"
     UNKNOWN = "Unknown"
 
+class DeviceRole(Enum):
+    """High-level device role independent of protocol."""
+    OFFLINE = "Offline"
+    CLIENT = "Client"
+    SERVER = "Server"
+
+def infer_device_role(device_type: 'DeviceType') -> 'DeviceRole':
+    """Infer role from device type for backward compatibility."""
+    if device_type in (
+        DeviceType.IEC61850_SERVER,
+        DeviceType.MODBUS_SERVER,
+        DeviceType.MODBUS_RTU_SLAVE,
+        DeviceType.MODBUS_RTU_SIMULATOR,
+        DeviceType.OPC_UA_SERVER,
+    ):
+        return DeviceRole.SERVER
+    return DeviceRole.CLIENT
+
 class SignalType(Enum):
     ANALOG = "Analog"
     BINARY = "Binary"
@@ -258,6 +276,8 @@ class DeviceConfig:
     folder: str = ""
     description: str = ""
     device_type: DeviceType = DeviceType.IEC61850_IED
+    # Architectural: role adds a protocol-agnostic device lifecycle axis.
+    device_role: DeviceRole = DeviceRole.CLIENT
     enabled: bool = True
     scd_file_path: Optional[str] = None
     use_scd_discovery: bool = True
@@ -291,6 +311,7 @@ class DeviceConfig:
             'folder': self.folder,
             'description': self.description,
             'device_type': self.device_type.value,
+            'device_role': self.device_role.value,
             'enabled': self.enabled,
             'scd_file_path': self.scd_file_path,
             'use_scd_discovery': self.use_scd_discovery,
@@ -322,6 +343,15 @@ class DeviceConfig:
             if dt.value == data.get('device_type'):
                 device_type = dt
                 break
+
+        # Role is optional in older configs; infer when missing.
+        device_role = None
+        for role in DeviceRole:
+            if role.value == data.get('device_role'):
+                device_role = role
+                break
+        if device_role is None:
+            device_role = infer_device_role(device_type)
         
         config = cls(
             name=data['name'],
@@ -330,6 +360,7 @@ class DeviceConfig:
             folder=data.get('folder', ""),
             description=data.get('description', ""),
             device_type=device_type,
+            device_role=device_role,
             enabled=data.get('enabled', True),
             scd_file_path=data.get('scd_file_path'),
             use_scd_discovery=data.get('use_scd_discovery', True),

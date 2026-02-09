@@ -393,7 +393,7 @@ After successful installation:
 
 1. **Read User Guide:** `docs/USER_GUIDE.md`
 2. **Try Modbus Example:** `docs/MODBUS_TCP_GUIDE.md`
-3. **Configure First Device:** Connection → Connect to Device
+3. **Configure First Device:** Device → Add Device
 4. **Join Community:** Report issues on GitHub
 
 ---

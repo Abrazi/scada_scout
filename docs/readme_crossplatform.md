@@ -86,7 +86,7 @@ python src/main.py
 
 ### Connect to Modbus Device
 
-1. **Connection → Connect to Device**
+1. **Device → Add Device**
 2. Select **Modbus TCP**
 3. Enter IP: `192.168.1.100`, Port: `502`
 4. Set Unit ID: `1`
@@ -94,7 +94,7 @@ python src/main.py
 
 ### Start Modbus Slave Server
 
-1. **Connection → Modbus Slave Server**
+1. **Device → Modbus Slave Server**
 2. Configure port (e.g., `5020`)
 3. Click **Start Server**
 4. Clients can now connect!

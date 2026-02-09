@@ -493,7 +493,7 @@ Planned features:
 
 You now have **complete Modbus dual-mode capability**:
 
-✅ **Client Mode:** Connect to devices, read/write registers  
+✅ **Client Mode:** Add/connect to devices, read/write registers  
 ✅ **Server Mode:** Simulate devices, serve register data  
 ✅ **Gateway Mode:** Bridge protocols seamlessly  
 

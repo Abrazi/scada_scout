@@ -161,14 +161,14 @@ ieds = loader.extract_ieds()
 ### 7. Main Window Integration (`src/ui/main_window.py`)
 
 **Changes**:
-- Added menu item: **Connection → IED Project Manager...**
+- Added menu item: **Device → IED Project Manager...**
 - Added handler: `_show_ied_project_dialog()`
 - Integrated orchestrator lifecycle
 
 **Menu Location**:
 ```
-Connection
-  ├── Connect to Device...
+Device
+  ├── Add Device...
   ├── Modbus Slave Server...
   ├── IEC 61850 Simulator...
   ├── ──────────────────

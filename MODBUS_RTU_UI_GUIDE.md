@@ -8,7 +8,7 @@ SCADA Scout now includes full Modbus RTU support with an intuitive user interfac
 
 ### Step 1: Open Connection Dialog
 
-Click the **"Connect to Device"** button or menu option in the main window.
+Click the **"Add Device"** button or menu option in the main window.
 
 ### Step 2: Select Protocol
 
@@ -74,7 +74,7 @@ When you select a Modbus RTU device type, additional fields will appear:
 
 ### Step 5: Connect
 
-Click **OK** to save the configuration and connect to the device.
+Click **OK** to save the configuration and connect to the device (Client role).
 
 ## Common Serial Port Configurations
 

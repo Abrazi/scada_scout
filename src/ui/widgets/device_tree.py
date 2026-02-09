@@ -6,7 +6,7 @@ import json
 from typing import Optional, List
 from src.ui.widgets.connection_dialog import ConnectionDialog
 from src.ui.widgets.modbus_inspector_dialog import ModbusInspectorDialog
-from src.models.device_models import DeviceType
+from src.models.device_models import DeviceType, DeviceRole, infer_device_role
 import logging
 
 logger = logging.getLogger(__name__)
@@ -438,7 +438,8 @@ class DeviceTreeWidget(QWidget):
                     desc_item = QStandardItem(desc_text)
                     desc_item.setEditable(True)
                     fc_item = QStandardItem("")
-                    type_item = QStandardItem("Device")
+                    role = getattr(device.config, 'device_role', None) or infer_device_role(device.config.device_type)
+                    type_item = QStandardItem(role.value)
                     
                     parent.appendRow([name_item, status_item, desc_item, fc_item, type_item])
                     self.device_items[device.config.name] = name_item
@@ -503,6 +504,19 @@ class DeviceTreeWidget(QWidget):
             
             # 3. Re-populate
             device = self.device_manager.get_device(device_name)
+            if device:
+                # Update status/description/type to reflect role changes
+                status_item = item.index().siblingAtColumn(1).model().itemFromIndex(item.index().siblingAtColumn(1))
+                desc_item = item.index().siblingAtColumn(2).model().itemFromIndex(item.index().siblingAtColumn(2))
+                type_item = item.index().siblingAtColumn(4).model().itemFromIndex(item.index().siblingAtColumn(4))
+                if status_item:
+                    status_item.setText("🟢" if device.connected else "🔴")
+                if desc_item:
+                    desc_item.setText(device.config.description or device.config.device_type.value)
+                if type_item:
+                    role = getattr(device.config, 'device_role', None) or infer_device_role(device.config.device_type)
+                    type_item.setText(role.value)
+
             if device and device.root_node:
                 child_count = len(device.root_node.children)
                 logger.info(f"  Adding {child_count} children to '{device_name}'")
@@ -590,7 +604,8 @@ class DeviceTreeWidget(QWidget):
             desc_item = QStandardItem(desc_text)
             desc_item.setEditable(True)
             fc_item = QStandardItem("")
-            type_item = QStandardItem("Device")
+            role = getattr(device.config, 'device_role', None) or infer_device_role(device.config.device_type)
+            type_item = QStandardItem(role.value)
             
             # Row layout: [Name, Status, Description, FC, Type]
             parent.appendRow([name_item, status_item, desc_item, fc_item, type_item])
@@ -762,7 +777,11 @@ class DeviceTreeWidget(QWidget):
             if device.connected:
                 self.device_manager.disconnect_device(device_name)
             else:
-                self.device_manager.connect_device(device_name)
+                role = getattr(device.config, 'device_role', None) or infer_device_role(device.config.device_type)
+                if role == DeviceRole.OFFLINE:
+                    self._prompt_go_online(device_name, connect_after=True)
+                else:
+                    self.device_manager.connect_device(device_name)
                 
             # Bring Event Log to focus to show connection progress
             self.show_event_log_requested.emit()
@@ -1065,7 +1084,7 @@ class DeviceTreeWidget(QWidget):
         if not index.isValid():
             # Background click
             menu = QMenu()
-            add_dev_action = QAction("Add New Device...", self)
+            add_dev_action = QAction("Add Device...", self)
             add_dev_action.triggered.connect(self._add_new_device)
             menu.addAction(add_dev_action)
 
@@ -1100,7 +1119,7 @@ class DeviceTreeWidget(QWidget):
                 menu.addAction(copy_action)
                 menu.addSeparator()
 
-            add_dev_action = QAction("Add Device to this Folder...", self)
+            add_dev_action = QAction("Add Device to Folder...", self)
             add_dev_action.triggered.connect(lambda: self._add_new_device(folder=root_item.text()))
             menu.addAction(add_dev_action)
 
@@ -1342,10 +1361,15 @@ class DeviceTreeWidget(QWidget):
                 
                 # Connect/Disconnect
                 menu.addSeparator()
+                role = getattr(device.config, 'device_role', None) or infer_device_role(device.config.device_type)
                 if device.connected:
                     disc_action = QAction("Disconnect", self)
                     disc_action.triggered.connect(lambda: self.device_manager.disconnect_device(device_name))
                     menu.addAction(disc_action)
+                elif role == DeviceRole.OFFLINE:
+                    go_online_action = QAction("Go Online (Switch to Client)", self)
+                    go_online_action.triggered.connect(lambda: self._prompt_go_online(device_name, connect_after=True))
+                    menu.addAction(go_online_action)
                 else:
                     conn_action = QAction("Connect", self)
                     conn_action.triggered.connect(lambda: self.device_manager.connect_device(device_name))
@@ -2273,55 +2297,65 @@ class DeviceTreeWidget(QWidget):
             self.device_manager.save_configuration()
             logger.info(f"Polling {'enabled' if device.config.polling_enabled else 'disabled'} for {device_name}")
 
+    def _prompt_go_online(self, device_name: str, connect_after: bool = True):
+        """Switch Offline devices to Client role before live communication."""
+        from PySide6.QtWidgets import QMessageBox
+        import copy
+
+        device = self.device_manager.get_device(device_name)
+        if not device:
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Go Online",
+            f"'{device_name}' is Offline. Switch to Client role and connect?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        new_config = copy.deepcopy(device.config)
+        new_config.device_role = DeviceRole.CLIENT
+        self.device_manager.update_device_config(new_config)
+        self.device_manager.save_configuration()
+
+        if connect_after:
+            self.device_manager.connect_device(device_name)
+
     def _add_new_device(self, folder: str = ""):
-        """Shows connection dialog to add a new device."""
-        from src.ui.widgets.connection_dialog import ConnectionDialog
-        dialog = ConnectionDialog(self)
-        if folder:
-            # We need to add a way to set folder in ConnectionDialog if we want to pre-fill
-            # For now, let's assume we can pre-set it if we modify ConnectionDialog.
-            # I added folder_input to ConnectionDialog, so I can set it.
-            dialog.folder_input.setText(folder)
-            
-        if dialog.exec():
-            config = dialog.get_config()
-            try:
-                self.device_manager.add_device(config)
-            except Exception as e:
-                from PySide6.QtWidgets import QMessageBox
-                QMessageBox.critical(self, "Error", f"Could not add device: {e}")
+        """Shows unified Add Device dialog."""
+        from src.ui.widgets.add_device_workflow import add_device_via_dialog
+
+        add_device_via_dialog(
+            self,
+            self.device_manager,
+            connect_immediately_default=False,
+            folder=folder,
+        )
 
     def _add_new_device_preselected(self, preset: str, folder: str = ""):
         """Open ConnectionDialog with a preset selection (used by quick-actions).
 
         preset: 'opc_client' | 'opc_server' currently supported.
         """
-        from src.ui.widgets.connection_dialog import ConnectionDialog
-        dlg = ConnectionDialog(self)
-        if folder:
-            dlg.folder_input.setText(folder)
-        # Preselect a protocol type safely (ignore if not present)
-        if preset == 'opc_client':
-            for i in range(dlg.type_input.count()):
-                if dlg.type_input.itemData(i) == getattr(__import__('src.models.device_models', fromlist=['DeviceType']).DeviceType, 'OPC_UA_CLIENT'):
-                    dlg.type_input.setCurrentIndex(i)
-                    break
-            # sensible default endpoint
-            dlg.opc_endpoint_input.setText('opc.tcp://127.0.0.1:4840')
-        elif preset == 'opc_server':
-            for i in range(dlg.type_input.count()):
-                if dlg.type_input.itemData(i) == getattr(__import__('src.models.device_models', fromlist=['DeviceType']).DeviceType, 'OPC_UA_SERVER'):
-                    dlg.type_input.setCurrentIndex(i)
-                    break
-            dlg.opc_endpoint_input.setText('opc.tcp://0.0.0.0:4840')
+        from src.models.device_models import DeviceType as _DT
+        from src.ui.widgets.add_device_workflow import add_device_via_dialog
 
-        if dlg.exec():
-            cfg = dlg.get_config()
-            try:
-                self.device_manager.add_device(cfg)
-            except Exception as e:
-                from PySide6.QtWidgets import QMessageBox
-                QMessageBox.critical(self, "Error", f"Could not add device: {e}")
+        preset_device_type = None
+        if preset == 'opc_client':
+            preset_device_type = _DT.OPC_UA_CLIENT
+        elif preset == 'opc_server':
+            preset_device_type = _DT.OPC_UA_SERVER
+
+        add_device_via_dialog(
+            self,
+            self.device_manager,
+            connect_immediately_default=False,
+            preset_device_type=preset_device_type,
+            folder=folder,
+        )
 
     def _show_add_folder_dialog(self):
         """Simple dialog to get folder name."""

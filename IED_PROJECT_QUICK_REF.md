@@ -5,7 +5,7 @@
 ### Option 1: GUI Workflow
 
 ```
-1. Connection → IED Project Manager...
+1. Device → IED Project Manager...
 2. Browse → Select DUBGG.scd
 3. Click "Load SCD"
 4. Review IED list
@@ -234,7 +234,7 @@ for name, status in statuses.items():
 ## Menu Location
 
 ```
-Main Menu → Connection → IED Project Manager...
+Main Menu → Device → IED Project Manager...
 ```
 
 ## Keyboard Shortcuts

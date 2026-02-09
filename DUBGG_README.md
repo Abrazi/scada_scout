@@ -11,7 +11,7 @@ This directory contains everything needed to automatically instantiate all IED d
    python src/main.py
    ```
 
-2. Go to **Connection → IED Project Manager...**
+2. Go to **Device → IED Project Manager...**
 
 3. Click **Browse** next to "SCD File" and select `dubgg/DUBGG.scd`
 
@@ -107,7 +107,7 @@ plc_programs/                # Generated PLC programs
 
 To restore the complete project later:
 
-1. **Via GUI**: Connection → IED Project Manager → Browse MSS → Load Project
+1. **Via GUI**: Device → IED Project Manager → Browse MSS → Load Project
 
 2. **Via Code**:
    ```python

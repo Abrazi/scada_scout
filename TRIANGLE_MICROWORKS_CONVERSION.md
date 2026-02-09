@@ -23,7 +23,7 @@ These scripts **cannot run directly** in SCADA Scout because:
 2. Go to Scripts window
 3. Add script by importing the Python file
 4. Run once with `main(ctx)` to add all devices to DeviceManager
-5. Connect to devices from the Device Manager window
+5. Add/connect to devices from the Device Manager window
 
 ### 2. Generator Simulation Script (⚠️ Template Only)
 
@@ -131,10 +131,10 @@ from scripts.swg_devices_setup import main
 # This adds GPS1-GPS4
 ```
 
-### Step 2: Connect to Devices
-- Open Device Manager window
+### Step 2: Connect to Devices (Client Role)
+- Open Device Explorer
 - Select devices (G1, G2, etc.)
-- Click "Connect"
+- Click "Connect" (after adding the devices)
 - Devices should show as connected if the Modbus servers are running
 
 ### Step 3: Monitor/Control
