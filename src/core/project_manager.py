@@ -64,6 +64,7 @@ class ProjectManager(QObject):
                 metadata = {
                     'name': os.path.basename(filepath),
                     'version': '1.0',
+                    'format': 'scada_scout_project',
                     'app_settings': app_settings or {}
                 }
                 
@@ -81,13 +82,19 @@ class ProjectManager(QObject):
                 self.progress_updated.emit(80, "Compressing project file...")
                 if not filepath.endswith('.mss'):
                     filepath += '.mss'
-                    
-                with zipfile.ZipFile(filepath, 'w', zipfile.ZIP_DEFLATED) as zipf:
+
+                target_dir = os.path.dirname(os.path.abspath(filepath)) or "."
+                os.makedirs(target_dir, exist_ok=True)
+                tmp_path = os.path.join(target_dir, f".{os.path.basename(filepath)}.tmp")
+
+                with zipfile.ZipFile(tmp_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
                     for root, dirs, files in os.walk(tmp_dir):
                         for file in files:
                             abs_path = os.path.join(root, file)
                             rel_path = os.path.relpath(abs_path, tmp_dir)
                             zipf.write(abs_path, rel_path)
+
+                os.replace(tmp_path, filepath)
                             
                 self.current_project_path = filepath
                 self.progress_updated.emit(100, "Project saved successfully.")
@@ -105,6 +112,22 @@ class ProjectManager(QObject):
         """
         try:
             self.progress_updated.emit(10, "Extracting project file...")
+
+            if not zipfile.is_zipfile(filepath):
+                # Detect if this is an IED .mss JSON file (different format)
+                try:
+                    with open(filepath, 'r') as f:
+                        probe = json.load(f)
+                    if isinstance(probe, dict) and 'metadata' in probe and 'devices' in probe:
+                        self.error_occurred.emit(
+                            "This .mss file is an IED simulation project. "
+                            "Open it from the IED Project Manager, not the Project menu."
+                        )
+                        return False
+                except Exception:
+                    pass
+                self.error_occurred.emit("Invalid project file or unsupported format.")
+                return False
             
             # Use a persistent extraction directory for resources
             # We'll use a hidden folder in the user's home or local app data
@@ -131,12 +154,21 @@ class ProjectManager(QObject):
                 # Update paths in devices.json to point to the current extraction dir
                 # This ensures portability even if the project was moved
                 self._fix_device_paths(devices_path, extract_base)
+                # Point config to extracted project data before loading
+                try:
+                    self.device_manager.config_path = devices_path
+                except Exception:
+                    pass
                 self.device_manager.load_configuration(devices_path)
             
             # 3. Restore Watchlist
             self.progress_updated.emit(70, "Restoring watch list...")
             watchlist_path = os.path.join(extract_base, "watchlist.json")
             if os.path.exists(watchlist_path):
+                try:
+                    self.watch_list_manager.clear_all()
+                except Exception:
+                    pass
                 self.watch_list_manager.load_from_file(watchlist_path)
             
             # 4. Restore Event History

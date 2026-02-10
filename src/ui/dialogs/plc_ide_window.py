@@ -1284,16 +1284,16 @@ END_PROGRAM
         """Update debug UI elements after step."""
         # Update current line highlight
         current_line = self.runtime.debug_engine.current_line
-        self.code_editor.current_debug_line = current_line
-        self.code_editor.line_number_area.update()
+        self.editor.current_debug_line = current_line
+        self.editor.line_number_area.update()
         
         # Scroll to current line if set
         if current_line:
-            cursor = self.code_editor.textCursor()
+            cursor = self.editor.textCursor()
             cursor.setPosition(0)
             cursor.movePosition(QTextCursor.Down, QTextCursor.MoveAnchor, current_line - 1)
-            self.code_editor.setTextCursor(cursor)
-            self.code_editor.centerCursor()
+            self.editor.setTextCursor(cursor)
+            self.editor.centerCursor()
         
         QTimer.singleShot(100, self._update_callstack)
         QTimer.singleShot(100, self._update_watch_list)

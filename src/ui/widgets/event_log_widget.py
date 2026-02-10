@@ -141,6 +141,7 @@ class EventLogWidget(QWidget):
 
         self.is_paused = False
         self.source_filter = "All Sources" # or specific device name
+        self._last_event_sig = None
         
         self.capture_worker = PacketCaptureWorker()
         self.capture_worker.packet_captured.connect(self._on_packet_captured)
@@ -462,6 +463,11 @@ class EventLogWidget(QWidget):
         """Processes an event from the logger or direct call."""
         if self.is_paused:
             return
+
+        signature = f"{level}|{source}|{message}"
+        if signature == self._last_event_sig:
+            return
+        self._last_event_sig = signature
 
         # Create a display-only event dict if it wasn't already in history
         # (Though usually this will be called via Signal)

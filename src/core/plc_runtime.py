@@ -266,6 +266,7 @@ class PLCRuntime:
             sig = dm_core.get_signal_by_unique_address(f"{device_name}::{addr}")
 
         if not sig:
+            self._log("warning", f"READ_DEVICE_SIGNAL: tag not found ({device_name}::{addr})")
             return None
 
         updated = dm_core.read_signal(device_name, sig)
@@ -278,6 +279,12 @@ class PLCRuntime:
         if not dm_core:
             self._log("warning", "WRITE_DEVICE_SIGNAL: device manager not available")
             return False
+
+        if address is not None and value is None and isinstance(tag_or_device, str):
+            if "{{TAG:" in tag_or_device or "::" in tag_or_device:
+                if not isinstance(address, str):
+                    value = address
+                    address = None
 
         if address is None:
             tag = self._resolve_tag_address(tag_or_device)
@@ -295,9 +302,13 @@ class PLCRuntime:
             sig = dm_core.get_signal_by_unique_address(f"{device_name}::{addr}")
 
         if not sig:
+            self._log("warning", f"WRITE_DEVICE_SIGNAL: tag not found ({device_name}::{addr})")
             return False
 
-        return bool(dm_core.write_signal(device_name, sig, value))
+        ok = bool(dm_core.write_signal(device_name, sig, value))
+        if not ok:
+            self._log("warning", f"WRITE_DEVICE_SIGNAL failed ({device_name}::{addr})")
+        return ok
     
     def start(self) -> bool:
         """Start PLC runtime (transition to RUN mode)."""
@@ -622,8 +633,9 @@ class PLCRuntime:
             
             # Extract only the executable statements (skip VAR blocks)
             executable_lines = []
+            executable_map = []
             in_var_block = False
-            for line in source.split('\n'):
+            for line_num, line in enumerate(source.split('\n'), start=1):
                 line_stripped = line.strip().upper()
                 if line_stripped.startswith('VAR'):
                     in_var_block = True
@@ -631,6 +643,7 @@ class PLCRuntime:
                     in_var_block = False
                 elif not in_var_block and not line_stripped.startswith('PROGRAM') and not line_stripped.startswith('END_PROGRAM'):
                     executable_lines.append(line)
+                    executable_map.append((line_num, line))
             
             executable_code = '\n'.join(executable_lines)
             executable_code = self._strip_st_comments(executable_code)
@@ -641,7 +654,7 @@ class PLCRuntime:
             # Execute with debug support
             if self.device.operating_mode == PLCMode.DEBUG:
                 # Line-by-line execution for debugging
-                self._execute_with_debug(python_code, exec_context, program.program_id)
+                self._execute_with_debug(python_code, exec_context, program.program_id, executable_map)
             else:
                 # Normal execution
                 exec(python_code, exec_context, exec_context)
@@ -823,15 +836,21 @@ class PLCRuntime:
 
         return '\n'.join(result_lines)
     
-    def _execute_with_debug(self, python_code: str, exec_context: Dict[str, Any], program_id: str):
+    def _execute_with_debug(self, python_code: str, exec_context: Dict[str, Any], program_id: str, executable_map=None):
         """Execute code with line-by-line debugging support."""
         lines = python_code.split('\n')
+        source_lines = None
+        if executable_map:
+            source_lines = [entry[0] for entry in executable_map if len(entry) == 2]
         for line_num, line in enumerate(lines, start=1):
             if not line.strip():
                 continue
+
+            source_line = source_lines[line_num - 1] if source_lines and line_num - 1 < len(source_lines) else line_num
+            self.debug_engine.current_line = source_line
             
             # Check for breakpoint before executing
-            should_break = self.debug_engine.check_breakpoint(program_id, line_num, exec_context)
+            should_break = self.debug_engine.check_breakpoint(program_id, source_line, exec_context)
             
             if should_break:
                 # Pause and wait for user command

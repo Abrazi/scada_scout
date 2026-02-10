@@ -46,6 +46,7 @@ class WatchListManager(QObject):
         super().__init__()
         self.device_manager = device_manager
         self._watched_signals: Dict[str, WatchedSignal] = {}
+        self._pending_watchlist_entries = []
         self._poll_interval_ms = 1000  # Default 1 second
         self._max_poll_batch = 50  # Maximum signals to poll per batch
         self._poll_index = 0  # Current position in polling rotation
@@ -64,6 +65,10 @@ class WatchListManager(QObject):
         # Connect to DeviceManager updates
         if hasattr(self.device_manager, 'signal_updated'):
              self.device_manager.signal_updated.connect(self._on_device_signal_updated)
+        if hasattr(self.device_manager, 'device_updated'):
+            self.device_manager.device_updated.connect(self._resolve_pending_watchlist)
+        if hasattr(self.device_manager, 'scd_parse_completed'):
+            self.device_manager.scd_parse_completed.connect(self._resolve_pending_watchlist)
         
     def add_signal(self, device_name: str, signal: Signal):
         """Add a signal to the watch list."""
@@ -279,6 +284,7 @@ class WatchListManager(QObject):
             
             # Clear existing
             self.clear_all()
+            self._pending_watchlist_entries = []
             
             # Set interval
             self.set_poll_interval(data.get('poll_interval_ms', 1000))
@@ -289,20 +295,54 @@ class WatchListManager(QObject):
             for sig_data in data.get('signals', []):
                 device_name = sig_data['device_name']
                 signal_address = sig_data['signal_address']
-                
+
                 # Try to find the signal in the device structure
                 device = self.device_manager.get_device(device_name)
                 if device and device.root_node:
                     signal = self._find_signal_in_node(device.root_node, signal_address)
                     if signal:
                         self.add_signal(device_name, signal)
-                    else:
-                        logger.warning(f"Could not find signal {signal_address} in device {device_name}")
+                        continue
+
+                # Defer until device tree is populated
+                self._pending_watchlist_entries.append(sig_data)
             
-            logger.info(f"Loaded watch list from {filepath}")
+            if self._pending_watchlist_entries:
+                logger.info(
+                    f"Watch list loaded with {len(self._pending_watchlist_entries)} pending entries "
+                    f"waiting for device trees"
+                )
+                # Try immediate resolution in case trees just finished loading
+                self._resolve_pending_watchlist()
+            else:
+                logger.info(f"Loaded watch list from {filepath}")
             
         except Exception as e:
             logger.error(f"Failed to load watch list: {e}")
+
+    def _resolve_pending_watchlist(self, *args):
+        """Try to resolve any watchlist entries pending device tree population."""
+        if not self._pending_watchlist_entries:
+            return
+
+        unresolved = []
+        for sig_data in list(self._pending_watchlist_entries):
+            try:
+                device_name = sig_data['device_name']
+                signal_address = sig_data['signal_address']
+                device = self.device_manager.get_device(device_name)
+                if device and device.root_node:
+                    signal = self._find_signal_in_node(device.root_node, signal_address)
+                    if signal:
+                        self.add_signal(device_name, signal)
+                        continue
+                unresolved.append(sig_data)
+            except Exception:
+                unresolved.append(sig_data)
+
+        self._pending_watchlist_entries = unresolved
+        if not self._pending_watchlist_entries:
+            logger.info("Resolved all pending watch list entries")
 
     def rename_device(self, old_name: str, new_name: str):
         """Update in-memory watched signals when a device is renamed.

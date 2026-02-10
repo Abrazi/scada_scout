@@ -121,8 +121,8 @@ class DeviceManager(QObject):
     def get_all_devices(self) -> List[Device]:
         return self._core.get_all_devices()
 
-    def clear_all_devices(self):
-        return self._core.clear_all_devices()
+    def clear_all_devices(self, save: bool = True):
+        return self._core.clear_all_devices(save=save)
 
     def save_configuration(self, path: Optional[str] = None):
         return self._core.save_configuration(path)

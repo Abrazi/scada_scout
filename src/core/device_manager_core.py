@@ -2,6 +2,7 @@ import logging
 import json
 import os
 import threading
+import tempfile
 from typing import List, Dict, Optional, Any, TYPE_CHECKING
 
 from src.core.events import EventEmitter
@@ -433,15 +434,15 @@ class DeviceManagerCore(EventEmitter):
         fut.add_done_callback(_on_done)
         return fut
 
-    def clear_all_devices(self):
+    def clear_all_devices(self, save: bool = True):
         """Remove all devices and cleanup protocols and workers."""
         # Signal start of batch clear
         self.emit("batch_clear_started")
-        
+
         names = list(self._devices.keys())
         for name in names:
             try:
-                self.remove_device(name)
+                self.remove_device(name, save=False)
             except Exception:
                 logger.exception(f"Error removing device during clear_all_devices: {name}")
 
@@ -473,6 +474,12 @@ class DeviceManagerCore(EventEmitter):
             pass
 
         try:
+            if save:
+                self.save_configuration()
+        except Exception:
+            pass
+
+        try:
             self.emit("project_cleared")
         except Exception:
             pass
@@ -480,16 +487,34 @@ class DeviceManagerCore(EventEmitter):
     def save_configuration(self, path: Optional[str] = None):
         """Saves current state to a JSON file."""
         target_path = path or self.config_path
+        tmp_path = None
         try:
             configs = [d.config.to_dict() for d in self._devices.values()]
             data = {
                 'devices': configs,
                 'folders': self.folder_descriptions
             }
-            with open(target_path, 'w') as f:
-                json.dump(data, f, indent=4)
+            target_dir = os.path.dirname(os.path.abspath(target_path)) or "."
+            os.makedirs(target_dir, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                mode='w',
+                delete=False,
+                dir=target_dir,
+                prefix='.devices.',
+                suffix='.json'
+            ) as tmp_file:
+                tmp_path = tmp_file.name
+                json.dump(data, tmp_file, indent=4)
+                tmp_file.flush()
+                os.fsync(tmp_file.fileno())
+            os.replace(tmp_path, target_path)
             logger.info(f"Configuration saved to {target_path}")
         except Exception as e:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
             logger.error(f"Failed to save configuration: {e}")
 
     def load_configuration(self, path: Optional[str] = None):
@@ -498,8 +523,12 @@ class DeviceManagerCore(EventEmitter):
         if not os.path.exists(target_path):
             logger.info(f"No configuration file found at {target_path}")
             return
-            
-        self.emit("project_cleared")
+
+        # Clear existing state without persisting on disk.
+        try:
+            self.clear_all_devices(save=False)
+        except Exception:
+            pass
 
         try:
             with open(target_path, 'r') as f:
@@ -673,6 +702,11 @@ class DeviceManagerCore(EventEmitter):
         """Internal callback when a protocol pushes data."""
         if not getattr(signal, 'unique_address', ''):
             signal.unique_address = f"{device_name}::{signal.address}"
+        # Sync connection status based on signal quality (avoids stale UI state).
+        if signal.quality == SignalQuality.NOT_CONNECTED:
+            self.update_connection_status(device_name, False)
+        elif signal.quality == SignalQuality.GOOD:
+            self.update_connection_status(device_name, True)
         if self.event_logger:
             self.event_logger.debug("DeviceManager", f"Received update for {signal.address} Value={signal.value}")
         self.emit("signal_updated", device_name, signal)
@@ -680,6 +714,8 @@ class DeviceManagerCore(EventEmitter):
     def update_connection_status(self, device_name: str, connected: bool):
         device = self._devices.get(device_name)
         if device:
+            if device.connected == connected:
+                return
             device.connected = connected
             self.emit("device_status_changed", device_name, connected)
             logger.info(f"Device {device_name} connected: {connected}")
