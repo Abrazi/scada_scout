@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 # Verbosity and log level control
 # Set VERBOSE=True for DEBUG level; HEARTBEAT_LOG_LEVEL controls heartbeat (R192 bit 7) logging
 VERBOSE = False  # Toggle for more verbose logging (DEBUG)
-HEARTBEAT_LOG_LEVEL = 25  # Custom level between INFO(20) and WARNING(30)
+HEARTBEAT_LOG_LEVEL =  25 # Custom level between INFO(20) and WARNING(30) regular info() calls will stay at 20 (INFO), and only logs specifically using the level 25 will say HEARTBEAT.
 logging.addLevelName(HEARTBEAT_LOG_LEVEL, "HEARTBEAT")
 LOG_LEVEL = logging.DEBUG if VERBOSE else logging.INFO
 logger.setLevel(LOG_LEVEL)
@@ -133,6 +133,9 @@ class GeneratorController:
         self.FCB1 = True
         self.FCB2 = False
         self.previousR192 = 0  # Track R192 to detect actual changes
+        self.last_heartbeat_time = time.time()
+        self.heartbeat_failed = False
+        self.HEARTBEAT_TIMEOUT = 10.0 #10 seconds
 
         self.SSL = {
             'SSL425_ServiceSWOff': False,
@@ -208,10 +211,15 @@ class GeneratorController:
         self.sm.add_transition("fastTransfer", "faultDetected", "fault")
 
         self.lock = threading.Lock()
+        self._last_status_log = None
+        self._last_event_log = None
 
     def log(self, message: str):
         """Log generator events - uses INFO level for state transitions and important events"""
-        logger.info(f"[{self.id}] [{self.sm.state}] {message}")
+        log_msg = f"[{self.id}] [{self.sm.state}] {message}"
+        if log_msg != self._last_event_log:
+            logger.info(log_msg)
+            self._last_event_log = log_msg
 
     def ramp(self, value: float, target: float, rate: float, fail_flag: bool, param_type: str) -> float:
         if fail_flag:
@@ -243,7 +251,7 @@ class GeneratorController:
             ('SSL705_LoadRejectGenCBOpen_CMD', 4),
             ('SSL706_AuxPowSuppSource1_CMD', 5),
             ('SSL707_AuxPowSuppSource2_CMD', 6),
-            ('SSL708_ClockPulse_CMD', 7),
+            ('SSL708_ClockPulse_CMD', 7), #Heartbeat
             ('SSL709_GenExcitationOff_CMD', 8),
             ('SSL710_OthGCBClosedandExcitOn_CMD', 9)
         ]
@@ -278,7 +286,6 @@ class GeneratorController:
         self.SSL['SSL432_OperOff'] = False
         self.SSL['SSL448_ModuleisDemanded'] = True
         self.SSL['SSL592_EngineAtStandStill'] = False
-        # Fix: Set starting phase flag
         self.SSL['SSL443_EngineInStartingPhase'] = True
 
     def on_enter_running(self):
@@ -287,10 +294,8 @@ class GeneratorController:
         self.SSL['SSL547_GenDeexcited'] = True
         self.SSL['SSL448_ModuleisDemanded'] = True
         self.SSL['SSL444_ReadyforAutoDem'] = False
-        # Fix: Set engine running flag when entering running state
         self.SSL['SSL449_OperEngineisRunning'] = True
         self.SSL['SSL592_EngineAtStandStill'] = False
-        # Fix: Clear starting phase flag when entering running
         self.SSL['SSL443_EngineInStartingPhase'] = False
 
     def on_enter_shutdown(self):
@@ -505,13 +510,16 @@ class GeneratorController:
         self.SimulatedCurrent = float(f"{self.SimulatedCurrent:.2f}")
 
     def tick(self, datastore: ModbusDeviceContext):
-        logger.info(
-    f"{self.id} | State: {self.sm.state} | "
-    f"V={self.SimulatedVoltage:.1f} | "
-    f"F={self.SimulatedFrequency:.1f} | "
-    f"P={self.SimulatedActivePower:.1f} | "
-    f"CB={self.SSL['SSL429_GenCBClosed']}"
-)
+        status_line = (
+            f"{self.id} | State: {self.sm.state} | "
+            f"V={self.SimulatedVoltage:.1f} | "
+            f"F={self.SimulatedFrequency:.1f} | "
+            f"P={self.SimulatedActivePower:.1f} | "
+            f"CB={self.SSL['SSL429_GenCBClosed']}"
+        )
+        if status_line != self._last_status_log:
+            logger.info(status_line)
+            self._last_status_log = status_line
         with self.lock:
             # Fix: Read inputs and update state BEFORE calculating simulation dynamics
             # This prevents 1-cycle lag where physics use previous state
@@ -530,21 +538,31 @@ class GeneratorController:
             R192 = datastore.getValues(3, self.register_base + 192, count=1)
             if isinstance(R192, list):
                 current_R192 = R192[0]
+                
+                # Check for heartbeat (Bit 7 / SSL708_ClockPulse_CMD)
+                xor_diff = current_R192 ^ self.previousR192
+                heartbeat_changed = (xor_diff & 128) != 0
+                
+                if heartbeat_changed:
+                    self.last_heartbeat_time = time.time()
+                    if self.heartbeat_failed:
+                        self.log("Heartbeat restored (R192 Bit 7)")
+                        self.heartbeat_failed = False
+                
                 if current_R192 != self.previousR192:
-                    # Bit 7 (SSL708_ClockPulse_CMD) is a heartbeat bit
-                    # Only log heartbeat changes (0↔128) if log level > 5
-                    xor_diff = current_R192 ^ self.previousR192
                     is_heartbeat_only = xor_diff == 128
-                    
-                    if is_heartbeat_only:
-                        # Heartbeat messages are noisy; only emit when VERBOSE mode is enabled
-                        if VERBOSE:
-                            logger.log(HEARTBEAT_LOG_LEVEL, f"[{self.id}] R192 heartbeat: {self.previousR192} -> {current_R192}")
-                    else:
+                    # Log other register changes, but skip the heartbeat toggle noise
+                    if not is_heartbeat_only:
                         logger.info(f"[{self.id}] R192 changed: {self.previousR192} -> {current_R192}")
                     
                     self.parse_R192(current_R192)
                     self.previousR192 = current_R192
+            
+            # Supervision check
+            if not self.heartbeat_failed:
+                if (time.time() - self.last_heartbeat_time) > self.HEARTBEAT_TIMEOUT:
+                    self.log(f"Heartbeat failure: R192 Bit 7 stopped for > {self.HEARTBEAT_TIMEOUT}s")
+                    self.heartbeat_failed = True
 
             # Update state machine and flags first
             self.validate_ssl_flags()
