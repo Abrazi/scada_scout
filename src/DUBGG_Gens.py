@@ -7,6 +7,10 @@ from enum import IntEnum
 from pymodbus.server import StartAsyncTcpServer
 from pymodbus.datastore import ModbusSequentialDataBlock, ModbusDeviceContext, ModbusServerContext
 import asyncio
+import os
+import subprocess
+import tempfile
+from utils.network_utils import NetworkUtils, NetworkScriptGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -837,7 +841,122 @@ class ModbusTCPSlaveGenRun:
                 logger.error(f"Global simulation error: {e}")
             time.sleep(self.scan_interval)
 
+    def check_network_availability(self) -> bool:
+        """
+        Checks if the required IPs are available on the network or on the local computer.
+        Logs errors if an IP is occupied by another device on the network.
+        Asks user to select an adapter to add missing IPs.
+        """
+        all_ips = list(GEN_IP_MAP.values()) + list(SWG_IP_MAP.values())
+        unique_ips = sorted(list(set(all_ips)))
+        
+        try:
+            local_interfaces = NetworkUtils.get_network_interfaces()
+        except Exception as e:
+            logger.error(f"Failed to get network interfaces: {e}")
+            return True # Proceed anyway, maybe it works
+            
+        local_ips = [iface.ip_address for iface in local_interfaces]
+        
+        ips_to_add = []
+        occupied_on_network = []
+
+        logger.info("Checking network availability for simulation IPs...")
+        for ip in unique_ips:
+            if ip == "127.0.0.1" or ip == "0.0.0.0":
+                continue
+            
+            is_local = ip in local_ips
+            
+            # Check if reachable on network
+            is_reachable = NetworkUtils.check_host_reachable(ip)
+            
+            if is_reachable and not is_local:
+                logger.error(f"IP {ip} is available on network but NOT on this computer. This IP is NOT available for simulation!")
+                occupied_on_network.append(ip)
+            elif not is_reachable and not is_local:
+                ips_to_add.append(ip)
+
+        if occupied_on_network:
+             print(f"\nCRITICAL: The following IPs are occupied by other devices on the network:")
+             for ip in occupied_on_network:
+                 print(f" - {ip}")
+             print("These IPs will not be able to host Modbus servers on this machine.\n")
+
+        if ips_to_add:
+            print(f"\nThe following IP addresses are missing from this computer and need to be added:")
+            for ip in ips_to_add:
+                print(f" - {ip}")
+            
+            print(f"\nAvailable Network Adapters:")
+            # Filter for interfaces that are up and have an IP (ignoring loopback if possible)
+            valid_ifaces = [i for i in local_interfaces if i.is_up and i.ip_address != "127.0.0.1"]
+            if not valid_ifaces:
+                valid_ifaces = local_interfaces
+
+            for i, iface in enumerate(valid_ifaces):
+                print(f"{i+1}. {iface.name} (Current IP: {iface.ip_address})")
+            
+            while True:
+                choice = input(f"\nSelect adapter number to add these IPs (1-{len(valid_ifaces)}) or 's' to skip/cancel: ")
+                if choice.lower() == 's':
+                    logger.warning("Network adapter selection skipped by user.")
+                    return True # Continue anyway
+                
+                try:
+                    idx = int(choice) - 1
+                    if 0 <= idx < len(valid_ifaces):
+                        selected_adapter = valid_ifaces[idx].name
+                        return self.add_ips_to_adapter(ips_to_add, selected_adapter)
+                    else:
+                        print(f"Please enter a number between 1 and {len(valid_ifaces)}")
+                except ValueError:
+                    print("Invalid input. Please enter a number or 's'.")
+        
+        return True
+
+    def add_ips_to_adapter(self, ips: List[str], adapter_name: str) -> bool:
+        """Generates and runs a batch script as admin to add IPs to the selected adapter."""
+        logger.info(f"Adding {len(ips)} IP addresses to adapter '{adapter_name}'...")
+        script_content = NetworkScriptGenerator.generate_windows_batch(ips, adapter_name)
+        
+        # Write script to temporary file
+        temp_dir = tempfile.gettempdir()
+        temp_path = os.path.join(temp_dir, "scada_scout_network_config.bat")
+        
+        try:
+            with open(temp_path, "w") as f:
+                f.write(script_content)
+            
+            # Execute as administrator using PowerShell Start-Process
+            # -Wait ensures we wait for completion
+            # -Verb RunAs triggers elevation prompt
+            ps_cmd = f"Start-Process cmd -ArgumentList '/c', '{temp_path}' -Verb RunAs -Wait"
+            logger.info("Triggering Windows UAC elevation prompt for network configuration...")
+            result = subprocess.run(["powershell", "-Command", ps_cmd], capture_output=True)
+            
+            if result.returncode == 0:
+                logger.info("IP addition script completed successfully.")
+                # Brief pause to let OS catch up
+                time.sleep(1)
+                return True
+            else:
+                logger.error(f"Failed to run elevation command: {result.stderr.decode(errors='ignore')}")
+                return False
+        except Exception as e:
+            logger.error(f"Error while adding IP addresses: {e}")
+            return False
+        finally:
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except Exception:
+                    pass
+
     def start(self):
+        # Check network availability before starting servers
+        self.check_network_availability()
+        
         self.running = True
         logger.info("Starting all Modbus TCP servers...")
         
