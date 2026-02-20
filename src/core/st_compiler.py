@@ -478,7 +478,7 @@ class STParser:
                 initial_value = None
                 if i < len(tokens) and tokens[i][1] == ':=':
                     i += 1
-                    if i < len(tokens) and tokens[i][0] == 'NUMBER':
+                    if i < len(tokens) and tokens[i][0] in ('NUMBER', 'KEYWORD'):
                         initial_value = self._convert_value(tokens[i][1], var_type)
                         i += 1
                 

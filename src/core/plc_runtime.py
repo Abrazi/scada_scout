@@ -248,31 +248,37 @@ class PLCRuntime:
         dm_core = self._get_device_manager_core()
         if not dm_core:
             self._log("warning", "READ_DEVICE_SIGNAL: device manager not available")
-            return None
+            return 0
 
         if address is None:
             tag = self._resolve_tag_address(tag_or_device)
             if not tag:
-                return None
+                return 0
             device_name, addr = dm_core.parse_unique_address(tag)
             if not device_name or not addr:
-                return None
+                return 0
             sig = dm_core.get_signal_by_unique_address(f"{device_name}::{addr}")
         else:
             device_name = tag_or_device if isinstance(tag_or_device, str) else None
             addr = address
             if not device_name or not addr:
-                return None
+                return 0
             sig = dm_core.get_signal_by_unique_address(f"{device_name}::{addr}")
 
-        if not sig:
             self._log("warning", f"READ_DEVICE_SIGNAL: tag not found ({device_name}::{addr})")
-            return None
+            return 0
 
-        updated = dm_core.read_signal(device_name, sig)
+        val = None
         if updated is None:
-            return getattr(sig, "value", None)
-        return getattr(updated, "value", None)
+            val = getattr(sig, "value", None)
+        else:
+            val = getattr(updated, "value", None)
+            
+        if val is None:
+            # For PLC safety, return 0 instead of None to avoid arithmetic crashes.
+            # 0 is a reasonable default for most numeric and boolean context in PLC.
+            return 0
+        return val
 
     def _write_device_signal(self, tag_or_device: Any, address: Optional[str] = None, value: Any = None) -> bool:
         dm_core = self._get_device_manager_core()
@@ -503,8 +509,10 @@ class PLCRuntime:
             return 0
         elif 'REAL' in data_type.value:
             return 0.0
+        elif data_type == PLCDataType.STRING:
+            return ""
         else:
-            return None
+            return 0
     
     def _scan_loop(self):
         """Main PLC scan loop."""
@@ -647,6 +655,15 @@ class PLCRuntime:
             
             executable_code = '\n'.join(executable_lines)
             executable_code = self._strip_st_comments(executable_code)
+
+            # Resolve tag placeholders
+            dm_core = self._get_device_manager_core()
+            tag_mgr = getattr(dm_core, "_script_tag_manager", None) if dm_core else None
+            if tag_mgr:
+                try:
+                    executable_code = tag_mgr.resolve_code(executable_code)
+                except Exception as e:
+                    logger.warning(f"Failed to resolve tags in program {program.program_id}: {e}")
             
             # Convert ST syntax to Python
             python_code = self._st_to_python(executable_code)
