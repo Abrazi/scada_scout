@@ -226,10 +226,14 @@ class PLCIDEWindow(QMainWindow):
         if not self.device:
             raise ValueError(f"Device {device_name} not found")
         
-        # Initialize or get PLC extension
-        if not hasattr(self.device, 'plc_extension'):
-            self.device.plc_extension = PLCDeviceExtension()
-        self.plc_ext = self.device.plc_extension
+        # Initialize or get PLC extension on the configuration object for persistence
+        if not hasattr(self.device.config, 'plc_extension') or self.device.config.plc_extension is None:
+            from src.models.plc_models import PLCDeviceExtension
+            self.device.config.plc_extension = PLCDeviceExtension()
+        
+        # Keep a reference on the device object for runtime access if needed
+        self.device.plc_extension = self.device.config.plc_extension
+        self.plc_ext = self.device.config.plc_extension
         
         # Initialize compiler and runtime
         self.compiler = STCompiler()
@@ -744,6 +748,13 @@ END_PROGRAM
         self.plc_ext.add_program(program)
         self._refresh_project_tree()
         self._load_program(program)
+        
+        # Save configuration
+        try:
+            self.device_manager.save_configuration()
+        except Exception:
+            pass
+            
         self._log(f"Created program: {name}")
     
     def _new_task(self):
@@ -765,6 +776,13 @@ END_PROGRAM
         
         self.plc_ext.add_task(task)
         self._refresh_project_tree()
+        
+        # Save configuration
+        try:
+            self.device_manager.save_configuration()
+        except Exception:
+            pass
+            
         self._log(f"Created task: {name}")
     
     def _save_program(self):
@@ -774,6 +792,13 @@ END_PROGRAM
             return
         
         self.current_program.source_code = self.editor.toPlainText()
+        
+        # Save configuration
+        try:
+            self.device_manager.save_configuration()
+        except Exception:
+            pass
+            
         self._log(f"Saved program: {self.current_program.name}")
     
     def _export_program(self):
@@ -840,9 +865,15 @@ END_PROGRAM
                 )
                 
                 self.plc_ext.add_program(new_program)
-                self._update_program_tree()
+                self._refresh_project_tree()
                 self._load_program(new_program)
                 
+                # Save configuration
+                try:
+                    self.device_manager.save_configuration()
+                except Exception:
+                    pass
+                    
                 self._log(f"✓ Imported program: {program_name}")
                 QMessageBox.information(self, "Import Success", f"Program '{program_name}' imported successfully!")
                 
@@ -1401,3 +1432,9 @@ END_PROGRAM
             
             self._log(f"Task '{task.name}' configured: {task.task_type.value}, {task.interval_ms}ms")
             self._refresh_project_tree()
+            
+            # Save configuration
+            try:
+                self.device_manager.save_configuration()
+            except Exception:
+                pass

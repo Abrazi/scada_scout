@@ -285,6 +285,9 @@ class DeviceConfig:
     polling_enabled: bool = False
     poll_interval: float = 1.0  # seconds
     
+    # PLC Extension
+    plc_extension: Optional[Any] = None  # To be populated with PLCDeviceExtension
+    
     # Modbus TCP-specific parameters
     modbus_unit_id: int = 1
     modbus_timeout: float = 3.0
@@ -323,6 +326,7 @@ class DeviceConfig:
             'modbus_register_maps': [rm.to_dict() for rm in self.modbus_register_maps],
             'modbus_slave_mappings': [sm.to_dict() for sm in self.modbus_slave_mappings],
             'modbus_slave_blocks': [sb.to_dict() for sb in self.modbus_slave_blocks],
+            'plc_extension': self.plc_extension.to_dict() if self.plc_extension and hasattr(self.plc_extension, 'to_dict') else None,
             # RTU fields
             'rtu_transport': self.rtu_transport,
             'rtu_slave_address': self.rtu_slave_address,
@@ -380,6 +384,15 @@ class DeviceConfig:
             serial_timeout=data.get('serial_timeout', 1.0),
             rtu_simulator_config=data.get('rtu_simulator_config')
         )
+        
+        # Load PLC extension if present
+        plc_data = data.get('plc_extension')
+        if plc_data:
+            try:
+                from src.models.plc_models import PLCDeviceExtension
+                config.plc_extension = PLCDeviceExtension.from_dict(plc_data)
+            except ImportError:
+                config.plc_extension = None
         
         # Load nested objects
         config.modbus_register_maps = [

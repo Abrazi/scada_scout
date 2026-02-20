@@ -85,6 +85,35 @@ class PLCVariable:
     # Metadata
     comment: str = ""
 
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'name': self.name,
+            'data_type': self.data_type.value,
+            'address': self.address,
+            'initial_value': self.initial_value,
+            'retain': self.retain,
+            'constant': self.constant,
+            'comment': self.comment
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'PLCVariable':
+        data_type = PLCDataType.INT
+        for dt in PLCDataType:
+            if dt.value == data.get('data_type'):
+                data_type = dt
+                break
+        
+        return cls(
+            name=data['name'],
+            data_type=data_type,
+            address=data.get('address'),
+            initial_value=data.get('initial_value'),
+            retain=data.get('retain', False),
+            constant=data.get('constant', False),
+            comment=data.get('comment', "")
+        )
+
 
 @dataclass
 class VariableScope:
@@ -101,6 +130,18 @@ class VariableScope:
         # Remove existing if present
         self.variables = [v for v in self.variables if v.name != variable.name]
         self.variables.append(variable)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'variables': [v.to_dict() for v in self.variables]
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'VariableScope':
+        scope = cls()
+        for v_data in data.get('variables', []):
+            scope.variables.append(PLCVariable.from_dict(v_data))
+        return scope
 
 
 @dataclass
@@ -136,6 +177,65 @@ class PLCProgram:
     enabled: bool = True
     running: bool = False
 
+    def to_dict(self) -> Dict[str, Any]:
+        import base64
+        compiled_b64 = base64.b64encode(self.compiled_code).decode('utf-8') if self.compiled_code else None
+        
+        return {
+            'program_id': self.program_id,
+            'name': self.name,
+            'language': self.language.value,
+            'source_code': self.source_code,
+            'compiled_code': compiled_b64,
+            'parent_task_id': self.parent_task_id,
+            'priority': self.priority,
+            'local_variables': self.local_variables.to_dict(),
+            'input_variables': self.input_variables.to_dict(),
+            'output_variables': self.output_variables.to_dict(),
+            'inout_variables': self.inout_variables.to_dict(),
+            'author': self.author,
+            'version': self.version,
+            'enabled': self.enabled,
+            'breakpoints': list(self.breakpoints),
+            'watch_expressions': self.watch_expressions
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'PLCProgram':
+        import base64
+        lang = IEC61131Language.STRUCTURED_TEXT
+        for l in IEC61131Language:
+            if l.value == data.get('language'):
+                lang = l
+                break
+        
+        compiled_code = None
+        if data.get('compiled_code'):
+            try:
+                compiled_code = base64.b64decode(data['compiled_code'])
+            except Exception:
+                pass
+
+        prog = cls(
+            program_id=data['program_id'],
+            name=data['name'],
+            language=lang,
+            source_code=data.get('source_code', ""),
+            compiled_code=compiled_code,
+            parent_task_id=data.get('parent_task_id'),
+            priority=data.get('priority', 10),
+            local_variables=VariableScope.from_dict(data.get('local_variables', {})),
+            input_variables=VariableScope.from_dict(data.get('input_variables', {})),
+            output_variables=VariableScope.from_dict(data.get('output_variables', {})),
+            inout_variables=VariableScope.from_dict(data.get('inout_variables', {})),
+            author=data.get('author', ""),
+            version=data.get('version', "1.0"),
+            enabled=data.get('enabled', True)
+        )
+        prog.breakpoints = set(data.get('breakpoints', []))
+        prog.watch_expressions = data.get('watch_expressions', [])
+        return prog
+
 
 @dataclass
 class PLCTask:
@@ -160,6 +260,37 @@ class PLCTask:
     # State
     enabled: bool = True
     running: bool = False
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'task_id': self.task_id,
+            'name': self.name,
+            'task_type': self.task_type.value,
+            'priority': self.priority,
+            'interval_ms': self.interval_ms,
+            'event_source': self.event_source,
+            'program_ids': self.program_ids,
+            'enabled': self.enabled
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'PLCTask':
+        t_type = TaskType.CYCLIC
+        for tt in TaskType:
+            if tt.value == data.get('task_type'):
+                t_type = tt
+                break
+        
+        return cls(
+            task_id=data['task_id'],
+            name=data['name'],
+            task_type=t_type,
+            priority=data.get('priority', 10),
+            interval_ms=data.get('interval_ms'),
+            event_source=data.get('event_source'),
+            program_ids=data.get('program_ids', []),
+            enabled=data.get('enabled', True)
+        )
 
 
 @dataclass
@@ -217,6 +348,39 @@ class PLCDeviceExtension:
     
     def remove_task(self, task_id: str):
         self.tasks = [t for t in self.tasks if t.task_id != task_id]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'plc_type': self.plc_type,
+            'runtime_version': self.runtime_version,
+            'programs': [p.to_dict() for p in self.programs],
+            'tasks': [t.to_dict() for t in self.tasks],
+            'global_variables': self.global_variables.to_dict(),
+            'operating_mode': self.operating_mode.value
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'PLCDeviceExtension':
+        ext = cls(
+            plc_type=data.get('plc_type', "Simulated"),
+            runtime_version=data.get('runtime_version', "1.0.0"),
+            global_variables=VariableScope.from_dict(data.get('global_variables', {}))
+        )
+        
+        for p_data in data.get('programs', []):
+            ext.programs.append(PLCProgram.from_dict(p_data))
+            
+        for t_data in data.get('tasks', []):
+            ext.tasks.append(PLCTask.from_dict(t_data))
+            
+        mode = PLCMode.STOP
+        for m in PLCMode:
+            if m.value == data.get('operating_mode'):
+                mode = m
+                break
+        ext.operating_mode = mode
+        
+        return ext
 
 
 @dataclass
