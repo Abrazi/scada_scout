@@ -265,9 +265,11 @@ class PLCRuntime:
                 return 0
             sig = dm_core.get_signal_by_unique_address(f"{device_name}::{addr}")
 
+        if not sig:
             self._log("warning", f"READ_DEVICE_SIGNAL: tag not found ({device_name}::{addr})")
             return 0
 
+        updated = dm_core.read_signal(device_name, sig)
         val = None
         if updated is None:
             val = getattr(sig, "value", None)
@@ -276,7 +278,6 @@ class PLCRuntime:
             
         if val is None:
             # For PLC safety, return 0 instead of None to avoid arithmetic crashes.
-            # 0 is a reasonable default for most numeric and boolean context in PLC.
             return 0
         return val
 
@@ -524,18 +525,32 @@ class PLCRuntime:
             scan_count += 1
             
             try:
-                # Execute all enabled cyclic tasks by priority
-                tasks = sorted(
-                    [t for t in self.device.tasks if t.enabled and t.task_type == TaskType.CYCLIC],
-                    key=lambda t: t.priority
-                )
+                # Track last execution time if not already present
+                if not hasattr(self, "_last_task_run"):
+                    self._last_task_run = {} # task_id -> last_run_timestamp
+
+                # Execute all enabled cyclic tasks by priority if their interval elapsed
+                enabled_tasks = [t for t in self.device.tasks if t.enabled and t.task_type == TaskType.CYCLIC]
+                tasks_to_run = []
+                
+                now = time.time()
+                for task in enabled_tasks:
+                    last_run = self._last_task_run.get(task.task_id, 0)
+                    interval_sec = (task.interval_ms or 10.0) / 1000.0
+                    
+                    if now - last_run >= interval_sec:
+                        tasks_to_run.append(task)
+                
+                # Sort by priority (lower number = higher priority)
+                tasks_to_run.sort(key=lambda t: t.priority)
                 
                 if self.verbose_logging and scan_count % 10 == 0:
                     total_progs = len(self.device.programs)
-                    assigned_progs = sum(len(t.program_ids) for t in tasks)
-                    self._log("info", f"[SCAN {scan_count}] Executing {len(tasks)} tasks, {total_progs} programs total ({assigned_progs} assigned to tasks)")
+                    assigned_progs = sum(len(t.program_ids) for t in enabled_tasks)
+                    self._log("info", f"[SCAN {scan_count}] Scheduling {len(tasks_to_run)}/{len(enabled_tasks)} tasks, {total_progs} programs total")
                 
-                for task in tasks:
+                for task in tasks_to_run:
+                    self._last_task_run[task.task_id] = now
                     self._execute_task(task)
                 
                 # Update uptime
@@ -545,8 +560,8 @@ class PLCRuntime:
                 scan_duration = (time.time() - scan_start) * 1000  # ms
                 self.device.scan_time_ms = scan_duration
                 
-                # Sleep to maintain minimum scan rate (default 10ms)
-                min_scan_time = 0.010  # 10ms
+                # Sleep to maintain minimum scan rate (1ms resolution)
+                min_scan_time = 0.001  # 1ms
                 sleep_time = max(0, min_scan_time - (time.time() - scan_start))
                 if sleep_time > 0:
                     time.sleep(sleep_time)
