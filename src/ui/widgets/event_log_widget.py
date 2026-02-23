@@ -71,6 +71,13 @@ class EventLogWidget(QWidget):
         self.btn_capture.clicked.connect(self._toggle_capture)
         row2_layout.addWidget(self.btn_capture)
 
+        # Capture type selector
+        self.combo_capture_type = QComboBox()
+        self.combo_capture_type.addItem("Network", "network")
+        self.combo_capture_type.addItem("Serial", "serial")
+        self.combo_capture_type.currentTextChanged.connect(self._on_capture_type_changed)
+        row2_layout.addWidget(self.combo_capture_type)
+
         self.combo_capture_filter = QComboBox()
         self.combo_capture_filter.addItem("MMS (TCP 102)", "tcp port 102")
         self.combo_capture_filter.addItem("GOOSE (0x88b8)", "ether proto 0x88b8")
@@ -84,10 +91,24 @@ class EventLogWidget(QWidget):
         self.combo_iface.setMinimumWidth(120)
         row2_layout.addWidget(self.combo_iface)
 
+        # Serial port selector (initially hidden)
+        self.combo_serial_port = QComboBox()
+        self.combo_serial_port.setMinimumWidth(120)
+        self.combo_serial_port.hide()
+        row2_layout.addWidget(self.combo_serial_port)
+
+        # Serial baudrate selector (initially hidden)
+        self.combo_serial_baud = QComboBox()
+        self.combo_serial_baud.addItems(["9600", "19200", "38400", "57600", "115200"])
+        self.combo_serial_baud.setCurrentText("9600")
+        self.combo_serial_baud.setMaximumWidth(80)
+        self.combo_serial_baud.hide()
+        row2_layout.addWidget(self.combo_serial_baud)
+
         self.btn_refresh_ifaces = QPushButton("↻")
-        self.btn_refresh_ifaces.setToolTip("Refresh Network Interfaces")
+        self.btn_refresh_ifaces.setToolTip("Refresh Interfaces/Ports")
         self.btn_refresh_ifaces.setMaximumWidth(40)
-        self.btn_refresh_ifaces.clicked.connect(self._populate_ifaces)
+        self.btn_refresh_ifaces.clicked.connect(self._populate_interfaces)
         row2_layout.addWidget(self.btn_refresh_ifaces)
 
         self.chk_log_file = QCheckBox("Log to File")
@@ -137,7 +158,7 @@ class EventLogWidget(QWidget):
         layout.addLayout(row2_layout)
 
         # Populate interfaces initially
-        self._populate_ifaces()
+        self._populate_interfaces()
 
         self.is_paused = False
         self.source_filter = "All Sources" # or specific device name
@@ -180,41 +201,64 @@ class EventLogWidget(QWidget):
         try:
             if hasattr(self, '_pending_default_iface') and self._pending_default_iface:
                 # Populate interfaces then set selection if present
-                self._populate_ifaces()
-                idx = self.combo_iface.findText(self._pending_default_iface)
-                if idx >= 0:
-                    self.combo_iface.setCurrentIndex(idx)
+                self._populate_interfaces()
+                # Set selection based on capture type
+                capture_type = self.combo_capture_type.currentData()
+                if capture_type == "network":
+                    idx = self.combo_iface.findText(self._pending_default_iface)
+                    if idx >= 0:
+                        self.combo_iface.setCurrentIndex(idx)
         except Exception:
             pass
 
+        # Initialize capture type UI
+        self._on_capture_type_changed()
+
     def _toggle_capture(self):
         if self.btn_capture.isChecked():
-            # Check if scapy is available before proceeding
-            if not self.capture_worker._scapy_available:
-                import sys
-                if sys.platform.startswith('win'):
-                    error_msg = f"Scapy is not installed. Error: {self.capture_worker._scapy_error}\n\nTo enable packet capture, install scapy:\n  pip install scapy\n\nOn Windows, you also need Npcap (installed with Wireshark)."
-                else:
-                    error_msg = f"Scapy is not installed. Error: {self.capture_worker._scapy_error}\n\nTo enable packet capture, install scapy:\n  pip install scapy\n\nOn Linux, you may also need: sudo apt-get install tcpdump"
-                self.log_event("ERROR", "Network", error_msg)
-                self.btn_capture.setChecked(False)
-                QMessageBox.warning(self, "Scapy Not Available", error_msg)
-                return
-            # Check raw-socket / pcap privileges (only relevant on Linux)
-            priv_result = self._check_capture_privileges()
-            if priv_result:
-                self.log_event("WARNING", "Network", priv_result)
-                QMessageBox.warning(self, "Insufficient Capture Privileges", priv_result)
-                self.btn_capture.setChecked(False)
-                return
+            capture_type = self.combo_capture_type.currentData()
+            
+            if capture_type == "network":
+                # Check if scapy is available before proceeding
+                if not self.capture_worker._scapy_available:
+                    import sys
+                    if sys.platform.startswith('win'):
+                        error_msg = f"Scapy is not installed. Error: {self.capture_worker._scapy_error}\n\nTo enable packet capture, install scapy:\n  pip install scapy\n\nOn Windows, you also need Npcap (installed with Wireshark)."
+                    else:
+                        error_msg = f"Scapy is not installed. Error: {self.capture_worker._scapy_error}\n\nTo enable packet capture, install scapy:\n  pip install scapy\n\nOn Linux, you may also need: sudo apt-get install tcpdump"
+                    self.log_event("ERROR", "Network", error_msg)
+                    self.btn_capture.setChecked(False)
+                    QMessageBox.warning(self, "Scapy Not Available", error_msg)
+                    return
+                # Check raw-socket / pcap privileges (only relevant on Linux)
+                priv_result = self._check_capture_privileges()
+                if priv_result:
+                    self.log_event("WARNING", "Network", priv_result)
+                    QMessageBox.warning(self, "Insufficient Capture Privileges", priv_result)
+                    self.btn_capture.setChecked(False)
+                    return
+            elif capture_type == "serial":
+                # Check if pyserial is available
+                if not self.capture_worker._scapy_available and not hasattr(self.capture_worker, '_serial_available'):
+                    # We need to check pyserial availability
+                    try:
+                        import serial
+                        self.capture_worker._serial_available = True
+                    except ImportError:
+                        error_msg = "pyserial is not installed. Install with: pip install pyserial"
+                        self.log_event("ERROR", "Serial", error_msg)
+                        self.btn_capture.setChecked(False)
+                        QMessageBox.warning(self, "Serial Not Available", error_msg)
+                        return
             
             filter_str = self.combo_capture_filter.currentData()
+            
             # Apply logging and interface settings to worker
             log_to_file = self.chk_log_file.isChecked()
             log_path = self.le_log_file.text() if self.le_log_file.text() else None
             # If user requested logging but didn't provide a path, use default in cwd
             if log_to_file and not log_path:
-                default_path = os.path.join(os.getcwd(), "packets.log")
+                default_path = os.path.join(os.getcwd(), "capture.log")
                 self.le_log_file.setText(default_path)
                 log_path = default_path
             json_fmt = self.chk_log_json.isChecked()
@@ -222,7 +266,7 @@ class EventLogWidget(QWidget):
                 try:
                     self.capture_worker.set_log_file(log_path, json_format=json_fmt)
                 except Exception as e:
-                    self.log_event("ERROR", "Network", f"Failed to set log file: {e}")
+                    self.log_event("ERROR", "Capture", f"Failed to set log file: {e}")
 
             # Apply rotation settings now if provided
             try:
@@ -234,29 +278,43 @@ class EventLogWidget(QWidget):
             except Exception:
                 pass
 
-            iface = self.combo_iface.currentText()
-            if iface and iface != "(none)":
-                try:
-                    self.capture_worker.set_interface(iface)
-                except Exception as e:
-                    self.log_event("ERROR", "Network", f"Failed to set interface: {e}")
+            if capture_type == "network":
+                iface = self.combo_iface.currentText()
+                if iface and iface != "(none)":
+                    try:
+                        self.capture_worker.set_interface(iface)
+                    except Exception as e:
+                        self.log_event("ERROR", "Network", f"Failed to set interface: {e}")
+            else:  # serial
+                serial_port = self.combo_serial_port.currentData()
+                baudrate = int(self.combo_serial_baud.currentText())
+                if serial_port:
+                    try:
+                        self.capture_worker.set_serial_port(serial_port, baudrate)
+                    except Exception as e:
+                        self.log_event("ERROR", "Serial", f"Failed to configure serial port: {e}")
 
             try:
-                self.capture_worker.start_capture(filter_str)
-                self.log_event("INFO", "Network", f"Started capture with filter: {filter_str}")
+                self.capture_worker.start_capture(filter_str, capture_type=capture_type)
+                capture_desc = "network" if capture_type == "network" else f"serial ({serial_port}@{baudrate})"
+                self.log_event("INFO", "Capture", f"Started {capture_desc} capture with filter: {filter_str}")
                 self._update_capture_button_style(running=True)
             except Exception as e:
-                self.log_event("ERROR", "Network", f"Failed to start capture: {e}")
+                self.log_event("ERROR", "Capture", f"Failed to start capture: {e}")
                 QMessageBox.critical(self, "Capture Error", f"Failed to start capture: {e}")
                 self.btn_capture.setChecked(False)
                 self._update_capture_button_style(running=False, error=True)
         else:
             self.capture_worker.stop_capture()
-            self.log_event("INFO", "Network", "Stopped capture")
+            self.log_event("INFO", "Capture", "Stopped capture")
             self._update_capture_button_style(running=False)
 
     def _on_packet_captured(self, summary: str):
-        self.log_event("PACKET", "Network", summary)
+        # Determine if this is a network or serial packet
+        if "[SERIAL]" in summary:
+            self.log_event("PACKET", "Serial", summary)
+        else:
+            self.log_event("PACKET", "Network", summary)
 
     def _update_capture_button_style(self, running: bool, error: bool = False):
         """Visually update the capture button to indicate running/stopped/error."""
@@ -372,19 +430,67 @@ class EventLogWidget(QWidget):
         except Exception as e:
             self.log_event("ERROR", "Network", f"Failed to apply rotation: {e}")
 
-    def _populate_ifaces(self):
-        self.combo_iface.clear()
-        try:
-            addrs = psutil.net_if_addrs()
-            if not addrs:
+    def _populate_interfaces(self):
+        """Populate network interfaces or serial ports based on capture type."""
+        capture_type = self.combo_capture_type.currentData()
+        
+        if capture_type == "network":
+            self.combo_iface.clear()
+            self.combo_iface.show()
+            self.combo_serial_port.hide()
+            self.combo_serial_baud.hide()
+            
+            try:
+                addrs = psutil.net_if_addrs()
+                if not addrs:
+                    self.combo_iface.addItem("(none)")
+                    return
+                # Add an empty option for default
+                self.combo_iface.addItem("")
+                for name in sorted(addrs.keys()):
+                    self.combo_iface.addItem(name)
+            except Exception:
                 self.combo_iface.addItem("(none)")
-                return
-            # Add an empty option for default
-            self.combo_iface.addItem("")
-            for name in sorted(addrs.keys()):
-                self.combo_iface.addItem(name)
-        except Exception:
-            self.combo_iface.addItem("(none)")
+        else:  # serial
+            self.combo_iface.hide()
+            self.combo_serial_port.show()
+            self.combo_serial_baud.show()
+            
+            self.combo_serial_port.clear()
+            try:
+                ports = self.capture_worker.get_available_serial_ports()
+                if not ports:
+                    self.combo_serial_port.addItem("(none)")
+                    return
+                # Add an empty option for default
+                self.combo_serial_port.addItem("")
+                for device, description in ports:
+                    display_text = f"{device} - {description}" if description else device
+                    self.combo_serial_port.addItem(display_text, device)
+            except Exception:
+                self.combo_serial_port.addItem("(none)")
+
+    def _on_capture_type_changed(self):
+        """Handle capture type change between network and serial."""
+        self._populate_interfaces()
+        
+        # Update filter options based on type
+        self.combo_capture_filter.clear()
+        capture_type = self.combo_capture_type.currentData()
+        
+        if capture_type == "network":
+            self.combo_capture_filter.addItem("MMS (TCP 102)", "tcp port 102")
+            self.combo_capture_filter.addItem("GOOSE (0x88b8)", "ether proto 0x88b8")
+            self.combo_capture_filter.addItem("SV (0x88ba)", "ether proto 0x88ba")
+            self.combo_capture_filter.addItem("All TCP", "tcp")
+            self.combo_capture_filter.addItem("All Traffic", "")
+        else:  # serial
+            self.combo_capture_filter.addItem("Modbus RTU", "modbus")
+            self.combo_capture_filter.addItem("All Serial", "")
+
+    def _populate_ifaces(self):
+        """Legacy method for backward compatibility."""
+        self._populate_interfaces()
 
     def _on_capture_error(self, err: str):
         self.log_event("ERROR", "Network", err)

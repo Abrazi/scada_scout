@@ -12,6 +12,15 @@ import tempfile
 import time
 import signal
 
+# Serial port imports
+try:
+    import serial
+    import serial.tools.list_ports
+    HAS_PYSERIAL = True
+except ImportError:
+    HAS_PYSERIAL = False
+    serial = None
+
 
 class PacketCaptureWorker(QObject):
     """Background packet capture helper using scapy.
@@ -21,6 +30,7 @@ class PacketCaptureWorker(QObject):
     - Emits detailed packet text via `packet_captured` signal
     - Optional file logging (plain text or JSON)
     - Interface selection or local IP override for TX/RX detection
+    - Serial port capture for Modbus RTU and other serial protocols
     """
     packet_captured = Signal(str)
     error_occurred = Signal(str)
@@ -38,6 +48,16 @@ class PacketCaptureWorker(QObject):
         self._fifo_path = None
         self._dumpcap_thread = None
         self._stop_event = threading.Event()
+
+        # Serial capture
+        self._serial_port = None
+        self._serial_conn = None
+        self._serial_thread = None
+        self._serial_baudrate = 9600
+        self._serial_bytesize = 8
+        self._serial_parity = 'N'
+        self._serial_stopbits = 1
+        self._serial_available = HAS_PYSERIAL
 
         # Logging options
         self._log_file = None
@@ -132,16 +152,23 @@ class PacketCaptureWorker(QObject):
             # ignore invalid inputs
             pass
 
-    def override_local_ips(self, ips):
-        """Manually override local IP list. `ips` can be a string or iterable."""
-        self._local_ips.clear()
-        if not ips:
-            return
-        if isinstance(ips, str):
-            self._local_ips.add(ips)
-            return
-        for ip in ips:
-            self._local_ips.add(ip)
+    def set_serial_port(self, port: str, baudrate: int = 9600, bytesize: int = 8, parity: str = 'N', stopbits: int = 1):
+        """Configure serial port for capture."""
+        self._serial_port = port
+        self._serial_baudrate = baudrate
+        self._serial_bytesize = bytesize
+        self._serial_parity = parity
+        self._serial_stopbits = stopbits
+
+    def get_available_serial_ports(self):
+        """Return list of available serial ports as (device, description) tuples."""
+        if not HAS_PYSERIAL:
+            return []
+        try:
+            ports = serial.tools.list_ports.comports()
+            return [(p.device, p.description) for p in sorted(ports)]
+        except Exception:
+            return []
 
     def _emit_and_maybe_log(self, text: str, pkt=None):
         # Emit to UI
@@ -294,12 +321,20 @@ class PacketCaptureWorker(QObject):
             except Exception:
                 pass
 
-    def start_capture(self, filter_str: str = "", iface: str = None):
-        """Start capturing packets.
+    def start_capture(self, filter_str: str = "", iface: str = None, capture_type: str = "network"):
+        """Start capturing packets or serial data.
 
-        filter_str is a BPF-style filter (e.g., "tcp port 102"). Empty string means no filter.
-        `iface` optionally selects the network interface name for AsyncSniffer.
+        filter_str is a BPF-style filter (e.g., "tcp port 102") for network capture.
+        iface optionally selects the network interface name for AsyncSniffer.
+        capture_type can be "network" or "serial".
         """
+        if capture_type == "serial":
+            return self._start_serial_capture()
+        else:
+            return self._start_network_capture(filter_str, iface)
+
+    def _start_network_capture(self, filter_str: str = "", iface: str = None):
+        """Start network packet capture using scapy or dumpcap."""
         if not self._scapy_available:
             self.error_occurred.emit(f"Scapy not available: {self._scapy_error}")
             return
@@ -387,11 +422,131 @@ class PacketCaptureWorker(QObject):
         # final fallback: emit AsyncSniffer error
         self.error_occurred.emit(f"Failed to start sniffer: {err}")
 
-    def stop_capture(self):
-        """Stop capturing packets if running."""
-        if not self._scapy_available:
+    def _start_serial_capture(self):
+        """Start serial port data capture."""
+        if not HAS_PYSERIAL:
+            self.error_occurred.emit("pyserial not available. Install with: pip install pyserial")
             return
 
+        if self._serial_conn is not None:
+            # already running
+            return
+
+        if not self._serial_port:
+            self.error_occurred.emit("No serial port configured")
+            return
+
+        try:
+            # Convert parity and stopbits to pyserial constants
+            parity_map = {'N': serial.PARITY_NONE, 'E': serial.PARITY_EVEN, 'O': serial.PARITY_ODD}
+            stopbits_map = {1: serial.STOPBITS_ONE, 1.5: serial.STOPBITS_ONE_POINT_FIVE, 2: serial.STOPBITS_TWO}
+
+            self._serial_conn = serial.Serial(
+                port=self._serial_port,
+                baudrate=self._serial_baudrate,
+                bytesize=self._serial_bytesize,
+                parity=parity_map.get(self._serial_parity.upper(), serial.PARITY_NONE),
+                stopbits=stopbits_map.get(self._serial_stopbits, serial.STOPBITS_ONE),
+                timeout=0.1  # Short timeout for reading
+            )
+
+            # Start serial reader thread
+            self._stop_event.clear()
+            self._serial_thread = threading.Thread(target=self._serial_read_loop, daemon=True)
+            self._serial_thread.start()
+
+            try:
+                self.packet_captured.emit(f"DEBUG: started serial capture on {self._serial_port} at {self._serial_baudrate} baud")
+            except Exception:
+                pass
+
+        except Exception as e:
+            self._serial_conn = None
+            self.error_occurred.emit(f"Failed to start serial capture: {e}")
+
+    def _serial_read_loop(self):
+        """Continuously read data from serial port and emit as packets."""
+        buffer = bytearray()
+        last_data_time = time.time()
+
+        while not self._stop_event.is_set() and self._serial_conn:
+            try:
+                # Read available data
+                if self._serial_conn.in_waiting > 0:
+                    data = self._serial_conn.read(self._serial_conn.in_waiting)
+                    if data:
+                        buffer.extend(data)
+                        last_data_time = time.time()
+
+                # Check for frame completion (silence detection)
+                if buffer and (time.time() - last_data_time) > 0.01:  # 10ms silence
+                    # Process complete frame
+                    self._process_serial_frame(bytes(buffer))
+                    buffer.clear()
+
+                time.sleep(0.001)  # Small sleep to prevent busy loop
+
+            except Exception as e:
+                try:
+                    self.error_occurred.emit(f"Serial read error: {e}")
+                except Exception:
+                    pass
+                break
+
+        # Close serial connection
+        try:
+            if self._serial_conn:
+                self._serial_conn.close()
+                self._serial_conn = None
+        except Exception:
+            pass
+
+    def _process_serial_frame(self, data: bytes):
+        """Process a complete serial frame and emit it."""
+        try:
+            ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+
+            # Create display text
+            hex_data = binascii.hexlify(data).decode()
+            ascii_data = data.decode('ascii', errors='replace')
+
+            details = []
+            details.append(f"[{ts}] [SERIAL] FRAME ({len(data)} bytes)\n")
+            details.append(f"  PORT: {self._serial_port}\n")
+            details.append(f"  BAUD: {self._serial_baudrate}\n")
+            details.append(f"  HEX : {hex_data}\n")
+            details.append(f"  ASCII: {ascii_data}\n")
+
+            # Try to parse as Modbus RTU if it looks like it
+            if len(data) >= 4:  # Minimum Modbus RTU frame
+                try:
+                    # Check CRC
+                    from src.protocols.modbus.rtu.frame_handler import ModbusRTUFrameHandler
+                    if len(data) >= 2:
+                        received_crc = int.from_bytes(data[-2:], 'little')
+                        calculated_crc = ModbusRTUFrameHandler.calculate_crc(data[:-2])
+                        crc_ok = received_crc == calculated_crc
+                        details.append(f"  CRC : {'OK' if crc_ok else 'BAD'} (0x{received_crc:04X} vs 0x{calculated_crc:04X})\n")
+
+                        # Parse Modbus function if CRC is OK
+                        if crc_ok and len(data) >= 4:
+                            slave_id = data[0]
+                            function_code = data[1]
+                            details.append(f"  MODBUS: Slave={slave_id}, Function={function_code}\n")
+                except Exception:
+                    pass  # Not Modbus or parsing failed
+
+            full = "".join(details)
+            self._emit_and_maybe_log(full)
+
+        except Exception as e:
+            try:
+                self.error_occurred.emit(f"Serial frame processing error: {e}")
+            except Exception:
+                pass
+
+    def stop_capture(self):
+        """Stop capturing packets or serial data if running."""
         try:
             # Stop AsyncSniffer if running
             if self._sniffer is not None:
@@ -437,8 +592,26 @@ class PacketCaptureWorker(QObject):
                     pass
                 finally:
                     self._fifo_path = None
+
+            # Stop serial capture if active
+            if self._serial_conn is not None or self._serial_thread is not None:
+                try:
+                    # signal termination
+                    self._stop_event.set()
+                    # wait for thread to finish
+                    if self._serial_thread is not None:
+                        self._serial_thread.join(timeout=2)
+                except Exception:
+                    pass
+                finally:
+                    self._serial_thread = None
+                    # Serial connection is closed in the read loop
+
         except Exception as e:
-            self.error_occurred.emit(f"Failed to stop sniffer: {e}")
+            try:
+                self.error_occurred.emit(f"Failed to stop capture: {e}")
+            except Exception:
+                pass
 
     # --- dumpcap FIFO helpers ---
     def _start_dumpcap_fifo(self, filter_str: str = "", iface: str = None) -> bool:
