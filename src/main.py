@@ -155,11 +155,11 @@ def main():
         _warn_missing_iec61850_library()
 
         # Defer heavy GUI imports until after env validation to avoid crashing the process
-        from PySide6.QtWidgets import QApplication
-        from PySide6.QtGui import QFont
-        from src.ui.main_window import MainWindow
-        from src.core.device_manager import DeviceManager
-        from src.core.app_controller import AppController
+        from PySide6.QtWidgets import QApplication  # type: ignore
+        from PySide6.QtGui import QFont  # type: ignore
+        from src.ui.main_window import MainWindow  # type: ignore
+        from src.core.device_manager import DeviceManager  # type: ignore
+        from src.core.app_controller import AppController  # type: ignore
 
         print("Initializing QApplication...")
         app = QApplication(sys.argv)
@@ -180,7 +180,7 @@ def main():
         
         # Connect Python Logging to event log widget
         # Centralized via QtLogHandler which signals the UI
-        from src.core.logging_handler import QtLogHandler
+        from src.core.logging_handler import QtLogHandler  # type: ignore
         qt_handler = QtLogHandler()
         if hasattr(window, 'event_log_widget'):
             # This is the only place Python logs are connected to the UI

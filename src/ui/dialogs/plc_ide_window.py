@@ -5,7 +5,7 @@ from PySide6.QtWidgets import (
     QTextEdit, QLabel, QMessageBox, QInputDialog, QTabWidget,
     QTableWidget, QTableWidgetItem, QComboBox, QLineEdit, QMenuBar, QMenu,
     QDockWidget, QPlainTextEdit, QListWidget, QCheckBox, QSpinBox,
-    QDialog, QFormLayout, QDialogButtonBox, QListWidgetItem
+    QDialog, QFormLayout, QDialogButtonBox, QListWidgetItem, QStackedWidget
 )
 from PySide6.QtCore import Qt, QTimer, Signal, QRect, QSize
 from PySide6.QtGui import (
@@ -354,19 +354,75 @@ class PLCIDEWindow(QMainWindow):
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(0, 0, 0, 0)
         
+        # Tools layout for SFC toggle
+        tools_layout = QHBoxLayout()
+        tools_layout.setContentsMargins(5, 5, 5, 5)
+        self.btn_toggle_sfc = QPushButton("View SFC Flowchart")
+        self.btn_toggle_sfc.setCheckable(True)
+        self.btn_toggle_sfc.clicked.connect(self._toggle_sfc_view)
+        tools_layout.addWidget(self.btn_toggle_sfc)
+        tools_layout.addStretch()
+        layout.addLayout(tools_layout)
+        
         # Editor tabs
         self.editor_tabs = QTabWidget()
+        
+        self.editor_stack = QStackedWidget()
         
         # Main editor with breakpoints
         self.editor = CodeEditor()
         self.editor.setFont(QFont("Consolas", 10))
         self.highlighter = STSyntaxHighlighter(self.editor.document())
+        self.editor_stack.addWidget(self.editor)
         
-        self.editor_tabs.addTab(self.editor, "No Program Loaded")
+        try:
+            from src.ui.widgets.sfc_editor import SFCEditor
+            self.sfc_editor = SFCEditor()
+            self.sfc_editor.graph_changed.connect(lambda _: self._mark_sfc_dirty())
+            self.editor_stack.addWidget(self.sfc_editor)
+        except Exception as e:
+            logger.error(f"Failed to load SFC editor: {e}")
+            
+        self.editor_tabs.addTab(self.editor_stack, "No Program Loaded")
         
         layout.addWidget(self.editor_tabs)
         
         return widget
+        
+    def _toggle_sfc_view(self):
+        """Toggle between code view and SFC view."""
+        if not hasattr(self, 'sfc_editor'):
+            self._log("SFC Editor is not available.")
+            self.btn_toggle_sfc.setChecked(False)
+            return
+            
+        if self.btn_toggle_sfc.isChecked():
+            try:
+                from src.core.sfc_parser import SFCParser
+                code = self.editor.toPlainText()
+                nodes = SFCParser.parse(code)
+                self.sfc_editor.set_sfc_data(nodes)
+                self.editor_stack.setCurrentIndex(1)
+            except Exception as e:
+                logger.error(f"Error parsing SFC: {e}")
+                self._log(f"Failed to parse SFC: {str(e)}")
+                self.btn_toggle_sfc.setChecked(False)
+        else:
+            if self.current_program and self.current_program.language == IEC61131Language.SEQUENTIAL_FUNCTION_CHART:
+                # If it's natively an SFC program, update the underlying ST code before switching to view it
+                try:
+                    from src.core.sfc_parser import SFCParser
+                    nodes = self.sfc_editor.get_sfc_data()
+                    st_code = SFCParser.generate_st(nodes, device_name=self.device_name)
+                    self.editor.setPlainText(st_code)
+                except Exception as e:
+                    logger.error(f"Error generating ST from SFC: {e}")
+            self.editor_stack.setCurrentIndex(0)
+            
+    def _mark_sfc_dirty(self):
+        """Called when the user edits the graph."""
+        if self.current_program:
+             self.editor_tabs.setTabText(0, f"{self.current_program.name} *")
     
     def _create_variable_panel(self) -> QWidget:
         """Create variable inspector panel."""
@@ -712,21 +768,67 @@ class PLCIDEWindow(QMainWindow):
         self.current_program = program
         self.editor.setPlainText(program.source_code)
         self.editor_tabs.setTabText(0, program.name)
+        
+        # Reset view based on language
+        if hasattr(self, 'btn_toggle_sfc') and hasattr(self, 'editor_stack'):
+            if program.language == IEC61131Language.SEQUENTIAL_FUNCTION_CHART:
+                self.btn_toggle_sfc.setChecked(True)
+                self._toggle_sfc_view()  # Force parse and switch to SFC editor
+            else:
+                self.btn_toggle_sfc.setChecked(False)
+                self.editor_stack.setCurrentIndex(0)
+            
         self._update_variable_table()
         self._log(f"Loaded program: {program.name}")
     
     def _new_program(self):
         """Create new program."""
-        name, ok = QInputDialog.getText(self, "New Program", "Program name:")
-        if not ok or not name:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("New Program")
+        layout = QFormLayout(dialog)
+        
+        name_input = QLineEdit()
+        layout.addRow("Program name:", name_input)
+        
+        lang_input = QComboBox()
+        lang_input.addItem("Structured Text (ST)", IEC61131Language.STRUCTURED_TEXT)
+        lang_input.addItem("Sequential Function Chart (SFC)", IEC61131Language.SEQUENTIAL_FUNCTION_CHART)
+        layout.addRow("Language:", lang_input)
+        
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addRow(buttons)
+        
+        if not dialog.exec() or not name_input.text():
             return
+            
+        name = name_input.text()
+        language = lang_input.currentData()
         
         # Generate unique ID
         import uuid
         program_id = f"prog_{uuid.uuid4().hex[:8]}"
         
         # Create program with template
-        template = """PROGRAM NewProgram
+        if language == IEC61131Language.SEQUENTIAL_FUNCTION_CHART:
+             template = f"""PROGRAM {name}
+VAR
+    STATE_INIT : INT := 0;
+    state : INT;
+END_VAR
+
+IF state = 0 THEN
+    state := STATE_INIT;
+END_IF;
+
+IF state = STATE_INIT THEN
+    ;
+END_IF;
+
+END_PROGRAM"""
+        else:
+             template = f"""PROGRAM {name}
 VAR
     counter : DINT := 0;
 END_VAR
@@ -741,7 +843,7 @@ END_PROGRAM
         program = PLCProgram(
             program_id=program_id,
             name=name,
-            language=IEC61131Language.STRUCTURED_TEXT,
+            language=language,
             source_code=template
         )
         
@@ -791,7 +893,18 @@ END_PROGRAM
             QMessageBox.warning(self, "No Program", "No program loaded to save.")
             return
         
+        # If in SFC graphical editor, serialize first
+        if hasattr(self, 'btn_toggle_sfc') and self.btn_toggle_sfc.isChecked() and hasattr(self, 'sfc_editor'):
+             try:
+                 from src.core.sfc_parser import SFCParser
+                 nodes = self.sfc_editor.get_sfc_data()
+                 st_code = SFCParser.generate_st(nodes, device_name=self.current_program.name)
+                 self.editor.setPlainText(st_code)
+             except Exception as e:
+                 logger.error(f"Error generating ST from SFC on save: {e}")
+                 
         self.current_program.source_code = self.editor.toPlainText()
+        self.editor_tabs.setTabText(0, self.current_program.name) # Clear the dirty star
         
         # Save configuration
         try:
