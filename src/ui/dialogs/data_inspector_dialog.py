@@ -21,22 +21,53 @@ class DataInspectorDialog(QDialog):
         
         self.raw_registers = [0, 0, 0, 0] # 4 registers default
         
+        # Set default register selection based on signal data type
+        self._update_register_selection_default()
+        
         self._setup_ui()
         self._load_data()
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
-        
+
         # Header / Controls
         top_layout = QHBoxLayout()
         top_layout.addWidget(QLabel(f"<b>Address:</b> {self.signal.address}"))
         top_layout.addStretch()
-        
+
         btn_refresh = QPushButton("Read Again")
         btn_refresh.clicked.connect(self._load_data)
         top_layout.addWidget(btn_refresh)
         layout.addLayout(top_layout)
-        
+
+        # Register Range Selection Controls
+        register_group = QGroupBox("Register Range Selection")
+        register_layout = QHBoxLayout(register_group)
+        register_layout.addWidget(QLabel("Registers to inspect:"))
+
+        self.combo_range = QComboBox()
+        self.combo_range.addItem("Current (1 register)", 1)
+        self.combo_range.addItem("Current + Next (2 registers, 32-bit)", 2)
+        self.combo_range.addItem("Current + Previous (2 registers, 32-bit)", 5)
+        self.combo_range.addItem("Prev + Current + Next (3 registers)", 3)
+        self.combo_range.addItem("Prev + Current + Next + Next2 (4 registers, 64-bit)", 4)
+        # Set default based on signal type
+        default_range = 1
+        data_type = getattr(self.signal, 'modbus_data_type', '') or getattr(self.signal, 'data_type', '')
+        if isinstance(data_type, str):
+            data_type = data_type.upper()
+        else:
+            data_type = str(data_type).upper()
+        if '64' in data_type or 'DOUBLE' in data_type:
+            default_range = 4
+        elif '32' in data_type or 'FLOAT' in data_type:
+            default_range = 2
+        self.combo_range.setCurrentIndex(default_range - 1)
+        self.combo_range.currentIndexChanged.connect(self._on_range_selection_changed)
+        register_layout.addWidget(self.combo_range)
+        register_layout.addStretch()
+        layout.addWidget(register_group)
+
         # Raw Data View
         group_raw = QGroupBox("Raw Registers (Hex)")
         raw_layout = QHBoxLayout(group_raw)
@@ -44,28 +75,56 @@ class DataInspectorDialog(QDialog):
         self.lbl_raw.setProperty("class", "code-strong")
         raw_layout.addWidget(self.lbl_raw)
         layout.addWidget(group_raw)
-        
+
         # Interpretations Tabs
         self.tabs = QTabWidget()
-        
         self.tab_16 = self._create_table_tab(["Type", "Value", "Description"])
         self.tabs.addTab(self.tab_16, "16-Bit")
-        
         self.tab_32 = self._create_table_tab(["Type", "Endianness", "Value", "Notes"])
         self.tabs.addTab(self.tab_32, "32-Bit")
-        
         self.tab_64 = self._create_table_tab(["Type", "Endianness", "Value", "Notes"])
         self.tabs.addTab(self.tab_64, "64-Bit")
-        
         self.tab_other = self._create_table_tab(["Type", "Value", "Notes"])
         self.tabs.addTab(self.tab_other, "Strings/Time")
-        
         layout.addWidget(self.tabs)
-        
+
         # Close
         btn_close = QPushButton("Close")
         btn_close.clicked.connect(self.accept)
         layout.addWidget(btn_close)
+
+    def _on_range_selection_changed(self):
+        self._load_data()
+
+    def _update_register_selection_default(self):
+        """Set default register selection based on signal data type."""
+        data_type = getattr(self.signal, 'modbus_data_type', '') or getattr(self.signal, 'data_type', '')
+        if isinstance(data_type, str):
+            data_type = data_type.upper()
+        else:
+            data_type = str(data_type).upper()
+        
+        # For 32-bit types, default to current + next register
+        if '32' in data_type or 'FLOAT' in data_type:
+            self.register_selection = "current_next"
+        # For 64-bit types, default to previous + current + next
+        elif '64' in data_type or 'DOUBLE' in data_type:
+            self.register_selection = "prev_current_next"
+        else:
+            # For 16-bit and other types, default to current only
+            self.register_selection = "current"
+        
+        # Update combo box selection if it exists
+        if hasattr(self, 'chk_base'):
+            index = self.chk_base.findData(self.register_selection)
+            if index >= 0:
+                self.chk_base.setCurrentIndex(index)
+    
+    def _on_register_selection_changed(self):
+        """Handle register selection change."""
+        self.register_selection = self.chk_base.currentData()
+        # Reload data with new selection
+        self._load_data()
 
     def _create_table_tab(self, headers):
         widget = QWidget()
@@ -80,7 +139,7 @@ class DataInspectorDialog(QDialog):
         return widget
 
     def _load_data(self):
-        """Reads 4 registers starting from signal address."""
+        """Reads N registers starting from signal address, where N is user-selected (1-4)."""
         try:
             protocol = self.device_manager.get_protocol(self.device_name)
             if not protocol:
@@ -108,155 +167,160 @@ class DataInspectorDialog(QDialog):
                 func_code = int(parts[1])
                 start_addr = int(parts[2])
             elif len(parts) == 2:
-                # Server-style address: "type:addr"
-                func_map = {
-                    "coils": 1,
-                    "discrete": 2,
-                    "holding": 3,
-                    "input": 4
-                }
+                func_map = {"coils": 1, "discrete": 2, "holding": 3, "input": 4}
                 func_code = func_map.get(parts[0].lower())
                 start_addr = int(parts[1])
                 unit_id = getattr(protocol, "unit_id", 1)
             else:
                 self.lbl_raw.setText("Error: Invalid address format")
                 return
-            
-            # Decide function code for reading. 
-            # If FC is 1 or 2 (Coils), we can't really do "register" inspection properly 
-            # unless we read 16 coils? Let's stick to registers if possible.
-            # If original was FC 3 or 4, use that.
+
+            # Decide function code for reading
             read_fc = func_code
             if func_code not in [3, 4]:
-                # Attempt to use FC3 (Holding) by default if it was a Coil signal
-                # This might fail if device doesn't support it, but Inspector is usually for registers.
                 read_fc = 3
-            
-            # Prefer internal pymodbus client if available
+
+            # Determine register range from combo
+            num_regs = self.combo_range.currentData()
+            # 1: current, 2: current+next, 5: current+previous, 3: prev+current+next, 4: prev+current+next+next2
+            if num_regs == 1:
+                read_start = start_addr
+                read_count = 1
+            elif num_regs == 2:
+                read_start = start_addr
+                read_count = 2
+            elif num_regs == 5:
+                read_start = max(0, start_addr - 1)
+                read_count = 2
+            elif num_regs == 3:
+                read_start = max(0, start_addr - 1)
+                read_count = 3
+            elif num_regs == 4:
+                read_start = max(0, start_addr - 1)
+                read_count = 4
+            else:
+                read_start = start_addr
+                read_count = 1
+
             client = getattr(protocol, 'client', None)
             if client and getattr(protocol, "connected", True):
-                # Read 4 registers (64 bits)
-                count = 4
                 result = None
                 if read_fc == 4:
-                    result = client.read_input_registers(start_addr, count=count, device_id=unit_id)
+                    result = client.read_input_registers(read_start, count=read_count, device_id=unit_id)
                 else:
-                    result = client.read_holding_registers(start_addr, count=count, device_id=unit_id)
-                
+                    result = client.read_holding_registers(read_start, count=read_count, device_id=unit_id)
                 if result.isError():
                     self.lbl_raw.setText(f"Read Error: {result}")
                     return
-                
                 self.raw_registers = result.registers
             else:
-                # Fall back to adapter methods for single-connection devices (e.g., RTU)
                 if read_fc == 4 and hasattr(protocol, "read_input_registers"):
-                    regs = protocol.read_input_registers(unit_id, start_addr, 4)
+                    regs = protocol.read_input_registers(unit_id, read_start, read_count)
                 elif read_fc == 3 and hasattr(protocol, "read_holding_registers"):
-                    regs = protocol.read_holding_registers(unit_id, start_addr, 4)
+                    regs = protocol.read_holding_registers(unit_id, read_start, read_count)
                 elif read_fc == 1 and hasattr(protocol, "read_coils"):
-                    regs = protocol.read_coils(unit_id, start_addr, 16)
+                    regs = protocol.read_coils(unit_id, read_start, read_count * 16)
                 elif read_fc == 2 and hasattr(protocol, "read_discrete_inputs"):
-                    regs = protocol.read_discrete_inputs(unit_id, start_addr, 16)
+                    regs = protocol.read_discrete_inputs(unit_id, read_start, read_count * 16)
                 else:
                     regs = None
-
                 if regs is None:
                     self.lbl_raw.setText("Read Error: No compatible read method available")
                     return
-
                 if read_fc in [1, 2]:
-                    # Coils/Discrete Inputs: represent as a single register bitmask
-                    bitmask = 0
-                    for i, b in enumerate(regs[:16]):
-                        if b:
-                            bitmask |= (1 << i)
-                    self.raw_registers = [bitmask, 0, 0, 0]
+                    self.raw_registers = []
+                    for i in range(read_count):
+                        bitmask = 0
+                        start_bit = i * 16
+                        end_bit = min(start_bit + 16, len(regs))
+                        for j in range(start_bit, end_bit):
+                            if regs[j]:
+                                bitmask |= (1 << (j - start_bit))
+                        self.raw_registers.append(bitmask)
                 else:
                     self.raw_registers = regs
-            
-            # Update Raw Display
+
             hex_strs = [f"[{i:04X}]" for i in self.raw_registers]
             self.lbl_raw.setText(" ".join(hex_strs))
-            
             self._update_interpretations()
-            
         except Exception as e:
             self.lbl_raw.setText(f"Error: {e}")
 
     def _update_interpretations(self):
         regs = self.raw_registers
-        # Pad if we got fewer than 4 (e.g. end of memory)
-        while len(regs) < 4:
-            regs.append(0)
-            
-        # 16-BIT TAB
-        # Only look at first register (Reg 0)
+        num_regs = len(regs)
+        
+        # Clear all tabs if we have no data
+        if num_regs == 0:
+            self._fill_table(self.tab_16.table, [])
+            self._fill_table(self.tab_32.table, [])
+            self._fill_table(self.tab_64.table, [])
+            self._fill_table(self.tab_other.table, [])
+            return
+        
+        # 16-BIT TAB - Always available for first register
         r0 = regs[0]
         rows16 = []
         rows16.append(["UInt16", f"{r0}", "0 ... 65535"])
         rows16.append(["Int16", f"{self._to_signed(r0, 16)}", "-32768 ... 32767"])
         rows16.append(["Hex", f"0x{r0:04X}", ""])
         rows16.append(["Binary", f"{r0:016b}", "Bit mask"])
-        # BCD
         rows16.append(["BCD (16-bit)", self._decode_bcd(r0), "0x1234 -> 1234"])
         self._fill_table(self.tab_16.table, rows16)
 
-        # 32-BIT TAB
-        # Uses Reg 0 and Reg 1
-        r0, r1 = regs[0], regs[1]
-        
-        # Combinations
-        # ABCD (Big Endian): High=r0, Low=r1
-        # CDAB (Word Swap): High=r1, Low=r0
-        # BADC (Byte Swap): Swap bytes in r0 and r1, then High=r0, Low=r1
-        # DCBA (Byte+Word Swap): Swap bytes, then High=r1, Low=r0
-        
-        variants32 = [
-            ("ABCD (Big-Endian)", r0, r1),
-            ("CDAB (Word-Swap)", r1, r0),
-            ("BADC (Byte-Swap)", self._swap_bytes(r0), self._swap_bytes(r1)),
-            ("DCBA (All-Swap)", self._swap_bytes(r1), self._swap_bytes(r0))
-        ]
-        
-        rows32 = []
-        for name, high, low in variants32:
-            val32 = (high << 16) | low
-            # Float
-            fval = self._to_float(val32)
-            rows32.append(["Float32", name, f"{fval:.6g}", "IEEE-754 Single"])
+        # 32-BIT TAB - Available if we have at least 2 registers
+        if num_regs >= 2:
+            r0, r1 = regs[0], regs[1]
             
-            # Int32
-            i32 = self._to_signed(val32, 32)
-            rows32.append(["Int32", name, f"{i32}", ""])
+            variants32 = [
+                ("ABCD (Big-Endian)", r0, r1),
+                ("CDAB (Word-Swap)", r1, r0),
+                ("BADC (Byte-Swap)", self._swap_bytes(r0), self._swap_bytes(r1)),
+                ("DCBA (All-Swap)", self._swap_bytes(r1), self._swap_bytes(r0))
+            ]
             
-            # UInt32
-            rows32.append(["UInt32", name, f"{val32}", ""])
+            rows32 = []
+            for name, high, low in variants32:
+                val32 = (high << 16) | low
+                # Float
+                fval = self._to_float(val32)
+                rows32.append(["Float32", name, f"{fval:.6g}", "IEEE-754 Single"])
+                
+                # Int32
+                i32 = self._to_signed(val32, 32)
+                rows32.append(["Int32", name, f"{i32}", ""])
+                
+                # UInt32
+                rows32.append(["UInt32", name, f"{val32}", ""])
             
-        self._fill_table(self.tab_32.table, rows32)
+            self._fill_table(self.tab_32.table, rows32)
+        else:
+            # Not enough registers for 32-bit
+            self._fill_table(self.tab_32.table, [["", "Not enough registers", "", ""]])
 
-        # 64-BIT TAB
-        # Uses Reg 0, 1, 2, 3
-        # Standard Big Endian: r0 r1 r2 r3
-        val64_be = (regs[0] << 48) | (regs[1] << 32) | (regs[2] << 16) | regs[3]
-        rows64 = []
-        
-        # Just creating a few common ones for brevity
-        # Big Endian
-        rows64.append(["UInt64", "Big-Endian", f"{val64_be}", ""])
-        rows64.append(["Int64", "Big-Endian", f"{self._to_signed(val64_be, 64)}", ""])
-        rows64.append(["Float64", "Big-Endian", f"{self._to_double(val64_be):.10g}", "IEEE-754 Double"])
-        
-        # Word Swapped (CDAB GHEF -> r1 r0 r3 r2) usually? 
-        # Actually standard modbus "Word Swap" for 64 bit usually implies 32-bit words swapped?
-        # Let's simple support Big Endian and "Little Endian" (reverse all registers) for now to hit main cases.
-        
-        val64_le = (regs[3] << 48) | (regs[2] << 32) | (regs[1] << 16) | regs[0]
-        rows64.append(["UInt64", "Little-Endian", f"{val64_le}", ""])
-        rows64.append(["Float64", "Little-Endian", f"{self._to_double(val64_le):.10g}", ""])
+        # 64-BIT TAB - Available if we have at least 4 registers, or show partial for 3
+        if num_regs >= 4:
+            # Full 64-bit interpretation
+            val64_be = (regs[0] << 48) | (regs[1] << 32) | (regs[2] << 16) | regs[3]
+            rows64 = []
+            
+            rows64.append(["UInt64", "Big-Endian", f"{val64_be}", ""])
+            rows64.append(["Int64", "Big-Endian", f"{self._to_signed(val64_be, 64)}", ""])
+            rows64.append(["Float64", "Big-Endian", f"{self._to_double(val64_be):.10g}", "IEEE-754 Double"])
+            
+            val64_le = (regs[3] << 48) | (regs[2] << 32) | (regs[1] << 16) | regs[0]
+            rows64.append(["UInt64", "Little-Endian", f"{val64_le}", ""])
+            rows64.append(["Float64", "Little-Endian", f"{self._to_double(val64_le):.10g}", ""])
+            
+            self._fill_table(self.tab_64.table, rows64)
+        elif num_regs == 3:
+            # Partial 64-bit - can show some interpretations
+            rows64 = [["", "Partial 64-bit data", "", ""], ["", f"Available: {num_regs}/4 registers", "", ""]]
+            self._fill_table(self.tab_64.table, rows64)
+        else:
+            # Not enough registers for 64-bit
+            self._fill_table(self.tab_64.table, [["", "Not enough registers", "", ""]])
 
-        self._fill_table(self.tab_64.table, rows64)
-        
         # STRINGS / OTHERS TAB
         rows_other = []
         
@@ -269,17 +333,17 @@ class DataInspectorDialog(QDialog):
         full_str = "".join([c if 32 <= ord(c) <= 126 else '.' for c in chars])
         rows_other.append(["String (ASCII)", full_str, "Regs interpret as chars"])
         
-        # UNIX Timestamp (if 32-bit valid)
-        # Try Big Endian UInt32 from first 2 regs
-        ts_val = (regs[0] << 16) | regs[1]
-        import datetime
-        try:
-            # Sane range for timestamp (1970 to 2100)
-            if 0 < ts_val < 4102444800: 
-                dt = datetime.datetime.utcfromtimestamp(ts_val)
-                rows_other.append(["UNIX Timestamp", dt.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3] + " UTC", "Ref: 32-bit BE"])
-        except:
-             pass
+        # UNIX Timestamp (if we have at least 2 registers)
+        if num_regs >= 2:
+            ts_val = (regs[0] << 16) | regs[1]
+            import datetime
+            try:
+                # Sane range for timestamp (1970 to 2100)
+                if 0 < ts_val < 4102444800: 
+                    dt = datetime.datetime.utcfromtimestamp(ts_val)
+                    rows_other.append(["UNIX Timestamp", dt.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3] + " UTC", "Ref: 32-bit BE"])
+            except:
+                pass
 
         self._fill_table(self.tab_other.table, rows_other)
 

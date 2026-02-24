@@ -1396,6 +1396,11 @@ class DeviceTreeWidget(QWidget):
                     server_action = QAction("Configure Registers...", self)
                     server_action.triggered.connect(lambda: self._show_modbus_slave_dialog(device_name))
                     menu.addAction(server_action)
+                elif device.config.device_type in (DeviceType.MODBUS_RTU_MASTER, DeviceType.MODBUS_RTU_SLAVE, DeviceType.MODBUS_RTU_SIMULATOR):
+                    # RTU devices: Define Address Ranges
+                    range_action = QAction("Define Address Ranges...", self)
+                    range_action.triggered.connect(lambda: self._show_modbus_range_dialog(device_name))
+                    menu.addAction(range_action)
 
                 # Edit and Remove
                 menu.addSeparator()
@@ -1614,6 +1619,11 @@ class DeviceTreeWidget(QWidget):
                         inspector_action = QAction("Data Inspector...", self)
                         inspector_action.triggered.connect(lambda: self._show_data_inspector(signal, device_name))
                         menu.addAction(inspector_action)
+                    elif device and device.config.device_type in (DeviceType.MODBUS_RTU_MASTER, DeviceType.MODBUS_RTU_SLAVE, DeviceType.MODBUS_RTU_SIMULATOR):
+                        # For RTU signals: Define Address Range
+                        range_action = QAction("Define Address Range...", self)
+                        range_action.triggered.connect(lambda: self._show_modbus_range_dialog(device_name))
+                        menu.addAction(range_action)
 
                     # Enumeration Inspection
                     enum_action = QAction("Show Enumeration", self)
@@ -2037,7 +2047,10 @@ class DeviceTreeWidget(QWidget):
             # Use Modbus-specific control UI for Modbus devices
             from src.models.device_models import DeviceType
             device = self.device_manager.get_device(device_name)
-            if device and device.config.device_type in (DeviceType.MODBUS_TCP, DeviceType.MODBUS_SERVER):
+            modbus_types = (DeviceType.MODBUS_TCP, DeviceType.MODBUS_SERVER, 
+                          DeviceType.MODBUS_RTU_MASTER, DeviceType.MODBUS_RTU_SLAVE, 
+                          DeviceType.MODBUS_RTU_SIMULATOR)
+            if device and device.config.device_type in modbus_types:
                 from src.ui.widgets.modbus_write_dialog import ModbusWriteDialog
                 dlg = ModbusWriteDialog(signal, self.device_manager, device_name, self)
                 dlg.exec()

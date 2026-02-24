@@ -68,43 +68,102 @@ class ModbusControlDialog(QDialog):
                         'value': proto.server.get_mapped_value(addr)
                     })
             else:
-                # Use device config: try several common config attributes
-                # 1) modbus_slave_mappings (explicit mapping objects)
-                if device and device.config and getattr(device.config, 'modbus_slave_mappings', None):
-                    for m in device.config.modbus_slave_mappings:
-                        mappings.append({
-                            'addr': m.address,
-                            'name': getattr(m, 'name', f"Map_{m.address}"),
-                            'type': getattr(m, 'data_type', str(getattr(m, 'data_type', ''))),
-                            'endian': getattr(m, 'endianness', None),
-                            'value': None
+                # For RTU/master devices, get signals from device root node
+                if device and device.root_node:
+                    def collect_modbus_signals(node):
+                        signals = []
+                        if hasattr(node, 'signals') and node.signals:
+                            for sig in node.signals:
+                                # Only include Modbus signals (with address format unit:function:address)
+                                if hasattr(sig, 'address') and sig.address and ':' in sig.address:
+                                    parts = sig.address.split(':')
+                                    if len(parts) == 3:
+                                        try:
+                                            unit_id = int(parts[0])
+                                            func_code = int(parts[1])
+                                            address = int(parts[2])
+                                            signals.append({
+                                                'addr': address,
+                                                'name': getattr(sig, 'name', f"Reg_{address}"),
+                                                'type': getattr(sig, 'modbus_data_type', None),
+                                                'endian': getattr(sig, 'modbus_endianness', None),
+                                                'value': getattr(sig, 'value', None),
+                                                'access': getattr(sig, 'access', 'RO'),
+                                                'signal': sig  # Keep reference to signal object
+                                            })
+                                        except (ValueError, IndexError):
+                                            pass
+                        if hasattr(node, 'children') and node.children:
+                            for child in node.children:
+                                signals.extend(collect_modbus_signals(child))
+                        return signals
+                    
+                    mappings = collect_modbus_signals(device.root_node)
+                    # Sort by address
+                    mappings.sort(key=lambda x: x['addr'])
+
+            # Use device config: try several common config attributes for all Modbus devices
+            # First collect configured mappings
+            configured_mappings = []
+            
+            # 1) modbus_slave_mappings (explicit mapping objects)
+            if device and device.config and getattr(device.config, 'modbus_slave_mappings', None):
+                for m in device.config.modbus_slave_mappings:
+                    configured_mappings.append({
+                        'addr': m.address,
+                        'name': getattr(m, 'name', f"Map_{m.address}"),
+                        'type': getattr(m, 'data_type', str(getattr(m, 'data_type', ''))),
+                        'endian': getattr(m, 'endianness', None),
+                        'value': None,
+                        'signal': None  # No signal object for configured mappings
+                    })
+            
+            # 2) modbus_register_maps (legacy mapping)
+            if device and device.config and getattr(device.config, 'modbus_register_maps', None):
+                for reg_map in device.config.modbus_register_maps:
+                    start = reg_map.start_address
+                    count = reg_map.count
+                    for i in range(count):
+                        addr = start + i
+                        configured_mappings.append({
+                            'addr': addr,
+                            'name': f"{reg_map.name_prefix or 'Map'}_{addr}",
+                            'type': str(reg_map.data_type.value if hasattr(reg_map.data_type, 'value') else reg_map.data_type),
+                            'endian': str(reg_map.endianness.value if hasattr(reg_map.endianness, 'value') else reg_map.endianness),
+                            'value': None,
+                            'signal': None  # No signal object for configured mappings
                         })
-                # 2) modbus_register_maps (legacy mapping)
-                elif device and device.config and getattr(device.config, 'modbus_register_maps', None):
-                    for reg_map in device.config.modbus_register_maps:
-                        start = reg_map.start_address
-                        count = reg_map.count
-                        for i in range(count):
-                            addr = start + i
-                            mappings.append({
-                                'addr': addr,
-                                'name': f"{reg_map.name_prefix or 'Map'}_{addr}",
-                                'type': str(reg_map.data_type.value if hasattr(reg_map.data_type, 'value') else reg_map.data_type),
-                                'endian': str(reg_map.endianness.value if hasattr(reg_map.endianness, 'value') else reg_map.endianness),
-                                'value': None
-                            })
-                # 3) modbus_slave_blocks (server blocks)
-                elif device and device.config and getattr(device.config, 'modbus_slave_blocks', None):
-                    for block in device.config.modbus_slave_blocks:
-                        for i in range(block.count):
-                            addr = block.start_address + i
-                            mappings.append({
-                                'addr': addr,
-                                'name': f"{block.name}_{addr}",
-                                'type': str(getattr(block, 'data_type', '-')),
-                                'endian': str(getattr(block, 'endianness', '-')),
-                                'value': None
-                            })
+            
+            # 3) modbus_slave_blocks (server blocks)
+            if device and device.config and getattr(device.config, 'modbus_slave_blocks', None):
+                for block in device.config.modbus_slave_blocks:
+                    for i in range(block.count):
+                        addr = block.start_address + i
+                        configured_mappings.append({
+                            'addr': addr,
+                            'name': f"{block.name}_{addr}",
+                            'type': str(getattr(block, 'data_type', '-')),
+                            'endian': str(getattr(block, 'endianness', '-')),
+                            'value': None,
+                            'signal': None  # No signal object for configured mappings
+                        })
+            
+            # Merge configured mappings with discovered signals
+            # Use a dict to avoid duplicates, preferring discovered signals
+            all_mappings = {}
+            
+            # Add discovered signals first (they have priority)
+            for mapping in mappings:
+                all_mappings[mapping['addr']] = mapping
+            
+            # Add configured mappings (only if not already present)
+            for mapping in configured_mappings:
+                if mapping['addr'] not in all_mappings:
+                    all_mappings[mapping['addr']] = mapping
+            
+            # Convert back to list and sort
+            mappings = list(all_mappings.values())
+            mappings.sort(key=lambda x: x['addr'])
 
             # Update UI on main thread
             def update_ui():
@@ -150,12 +209,12 @@ class ModbusControlDialog(QDialog):
                         # Default to 16-bit unsigned range
                         spin.setRange(0, 65535)
                     btn = QPushButton("Write")
-                    def make_write(addr, spinbox):
+                    def make_write(addr, spinbox, sig=None):
                         def do_write():
                             v = spinbox.value()
-                            self._write_address(addr, v)
+                            self._write_address(addr, v, sig)
                         return do_write
-                    btn.clicked.connect(make_write(m['addr'], spin))
+                    btn.clicked.connect(make_write(m['addr'], spin, m.get('signal')))
                     container = QHBoxLayout()
                     container_widget = QWidget()
                     container.addWidget(spin)
@@ -196,7 +255,8 @@ class ModbusControlDialog(QDialog):
                                     if addr_item:
                                         addr = int(addr_item.text())
                                         # If float, pass as float to write; the server adapter will handle encoding
-                                        self._write_address(addr, write_val)
+                                        sig = self.mappings[row].get('signal') if row < len(self.mappings) else None
+                                        self._write_address(addr, write_val, sig)
                                 except Exception:
                                     pass
                     except Exception:
@@ -218,21 +278,25 @@ class ModbusControlDialog(QDialog):
                 self.btn_refresh.setEnabled(True)
             QTimer.singleShot(0, fail_ui)
 
-    def _write_address(self, address, value):
+    def _write_address(self, address, value, signal=None):
         try:
             proto = self.device_manager.get_or_create_protocol(self.device_name)
             if not proto:
                 QMessageBox.warning(self, "Error", "Protocol not available")
                 return
 
-            # Build a temporary Signal-like object expected by protocol.write_signal
-            from types import SimpleNamespace
-            sig = SimpleNamespace()
-            # Attempt to use unit:function:addr format; assume function 3 (holding registers)
-            unit = getattr(proto, 'unit_id', 1)
-            sig.address = f"{unit}:3:{address}"
-            sig.modbus_data_type = None
-            sig.modbus_endianness = None
+            # Use the actual signal if provided, otherwise build a temporary one
+            if signal:
+                sig = signal
+            else:
+                # Build a temporary Signal-like object expected by protocol.write_signal
+                from types import SimpleNamespace
+                sig = SimpleNamespace()
+                # Attempt to use unit:function:addr format; assume function 3 (holding registers)
+                unit = getattr(proto, 'unit_id', 1)
+                sig.address = f"{unit}:3:{address}"
+                sig.modbus_data_type = None
+                sig.modbus_endianness = None
 
             # Call write (in background)
             def do_write():

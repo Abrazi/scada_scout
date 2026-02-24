@@ -182,37 +182,61 @@ class ModbusTCPAdapter(BaseProtocol):
             description=reg_map.description or f"FC{reg_map.function_code}: {reg_map.start_address}-{reg_map.start_address + reg_map.count - 1}"
         )
         
-        # Calculate register increment based on data type
-        reg_size = self._get_register_size(reg_map.data_type)
-        
-        for i in range(0, reg_map.count, reg_size):
+        # Always create 16-bit signals for each register
+        for i in range(reg_map.count):
             addr = reg_map.start_address + i
-            signal_name = f"{node_name}_{addr}"
-            
-            # Determine signal type
-            if reg_map.function_code in [1, 2]:
-                sig_type = SignalType.COIL if reg_map.function_code == 1 else SignalType.DISCRETE_INPUT
-            else:
-                sig_type = SignalType.HOLDING_REGISTER if reg_map.function_code == 3 else SignalType.INPUT_REGISTER
-            
-            # Determine access
+            sig_type = SignalType.HOLDING_REGISTER if reg_map.function_code == 3 else (
+                SignalType.INPUT_REGISTER if reg_map.function_code == 4 else (
+                SignalType.COIL if reg_map.function_code == 1 else SignalType.DISCRETE_INPUT))
             access = "RW" if reg_map.function_code in [1, 3] else "RO"
-            
             signal = Signal(
-                name=signal_name,
+                name=f"{node_name}_16_{addr}",
                 address=f"{self.unit_id}:{reg_map.function_code}:{addr}",
                 signal_type=sig_type,
-                description=f"Modbus {func_names.get(reg_map.function_code)} @ {addr}",
+                description=f"Modbus {func_names.get(reg_map.function_code)} 16-bit @ {addr}",
                 access=access,
-                modbus_data_type=reg_map.data_type,
+                modbus_data_type=ModbusDataType.UINT16,
                 modbus_scale=reg_map.scale,
                 modbus_offset=reg_map.offset,
                 modbus_endianness=reg_map.endianness,
                 fc=str(reg_map.function_code)
             )
-            
             node.signals.append(signal)
-        
+
+        # Always create 32-bit signals for every possible pair
+        for i in range(0, reg_map.count - 1):
+            addr = reg_map.start_address + i
+            signal = Signal(
+                name=f"{node_name}_32_{addr}",
+                address=f"{self.unit_id}:{reg_map.function_code}:{addr}",
+                signal_type=sig_type,
+                description=f"Modbus {func_names.get(reg_map.function_code)} 32-bit @ {addr}",
+                access=access,
+                modbus_data_type=ModbusDataType.UINT32,
+                modbus_scale=reg_map.scale,
+                modbus_offset=reg_map.offset,
+                modbus_endianness=reg_map.endianness,
+                fc=str(reg_map.function_code)
+            )
+            node.signals.append(signal)
+
+        # Always create 64-bit signals for every possible group of 4
+        for i in range(0, reg_map.count - 3):
+            addr = reg_map.start_address + i
+            signal = Signal(
+                name=f"{node_name}_64_{addr}",
+                address=f"{self.unit_id}:{reg_map.function_code}:{addr}",
+                signal_type=sig_type,
+                description=f"Modbus {func_names.get(reg_map.function_code)} 64-bit @ {addr}",
+                access=access,
+                modbus_data_type=ModbusDataType.UINT64,
+                modbus_scale=reg_map.scale,
+                modbus_offset=reg_map.offset,
+                modbus_endianness=reg_map.endianness,
+                fc=str(reg_map.function_code)
+            )
+            node.signals.append(signal)
+
         return node
     
     def _default_discovery(self) -> List[Node]:

@@ -777,7 +777,9 @@ class ConnectionDialog(QDialog):
                 DeviceType.MODBUS_RTU_SIMULATOR,
             ]
         except Exception:
-            is_modbus = device_type in [DeviceType.MODBUS_TCP, DeviceType.MODBUS_SERVER]
+            is_modbus = device_type in [DeviceType.MODBUS_TCP, DeviceType.MODBUS_SERVER,
+                                       DeviceType.MODBUS_RTU_MASTER, DeviceType.MODBUS_RTU_SLAVE,
+                                       DeviceType.MODBUS_RTU_SIMULATOR]
         self.unit_id_input.setVisible(is_modbus)
         self.unit_id_label.setVisible(is_modbus)
         

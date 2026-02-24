@@ -687,7 +687,10 @@ class SignalsViewWidget(QWidget):
         # For Modbus devices, open Modbus-specific control dialog
         from src.models.device_models import DeviceType
         device = self.device_manager.get_device(device_name)
-        if device and device.config.device_type in (DeviceType.MODBUS_TCP, DeviceType.MODBUS_SERVER):
+        modbus_types = (DeviceType.MODBUS_TCP, DeviceType.MODBUS_SERVER, 
+                      DeviceType.MODBUS_RTU_MASTER, DeviceType.MODBUS_RTU_SLAVE, 
+                      DeviceType.MODBUS_RTU_SIMULATOR)
+        if device and device.config.device_type in modbus_types:
             from src.ui.dialogs.modbus_control_dialog import ModbusControlDialog
             dlg = ModbusControlDialog(device_name, self.device_manager, self)
             dlg.exec()
