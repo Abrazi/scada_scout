@@ -44,11 +44,10 @@ class EventLogWidget(QWidget):
         self.btn_pause.clicked.connect(self._toggle_pause)
         row1_layout.addWidget(self.btn_pause)
         
-        # Filter Source
+        # Filter Source  — populated with All Sources / Application / separator / <device names>
         self.combo_source = QComboBox()
         self.combo_source.addItem("All Sources")
         self.combo_source.addItem("Application")
-        self.combo_source.addItem("Devices")
         self.combo_source.currentTextChanged.connect(self._apply_source_filter)
         self.combo_source.setMinimumWidth(120)
         row1_layout.addWidget(self.combo_source)
@@ -162,7 +161,8 @@ class EventLogWidget(QWidget):
         self._populate_interfaces()
 
         self.is_paused = False
-        self.source_filter = "All Sources" # or specific device name
+        self.source_filter = "All Sources"  # or specific device name
+        self._known_device_names: set = set()  # updated by update_device_list()
         self._last_event_sig = None
         
         self.capture_worker = PacketCaptureWorker()
@@ -544,25 +544,26 @@ class EventLogWidget(QWidget):
         """Updates the source filter with available devices."""
         # preserve current selection
         current = self.combo_source.currentText()
-        
+
         self.combo_source.blockSignals(True)
         self.combo_source.clear()
         self.combo_source.addItem("All Sources")
-        self.combo_source.addItem("Application") 
+        self.combo_source.addItem("Application")
         self.combo_source.insertSeparator(2)
-        
+
+        self._known_device_names = set()
         for dev in devices:
-            # Handle if dev is a Device object or a string name
             name = dev.config.name if hasattr(dev, 'config') else str(dev)
+            self._known_device_names.add(name)
             self.combo_source.addItem(name)
-            
+
         # restore selection if possible
         idx = self.combo_source.findText(current)
         if idx >= 0:
             self.combo_source.setCurrentIndex(idx)
         else:
             self.combo_source.setCurrentIndex(0)
-            
+
         self.combo_source.blockSignals(False)
 
     def update_font(self, font_family="Consolas", font_size=9):
@@ -642,16 +643,19 @@ class EventLogWidget(QWidget):
 
         # Source Filtering
         if self.source_filter == "All Sources":
-            pass # Show all
+            pass  # show everything
+
         elif self.source_filter == "Application":
-            # Show specific sources
-            app_sources = ["Main", "AppController", "DeviceManager", "IEC61850Adapter", "EventLog", "SCDImport"]
-            if source not in app_sources:
-                # If source is likely a device name (not in this list), skip
-                if not any(k in str(source) for k in ("Manager", "Main")):
-                    return
+            # "Application" means: NOT a device event.
+            # Any source that matches a known device name is excluded.
+            if self._known_device_names and source in self._known_device_names:
+                return
+            # Also exclude packet events (they belong to capture, not application)
+            if level == "PACKET":
+                return
+
         else:
-            # Specific Device selected
+            # Specific device selected — exact match on source
             if source != self.source_filter:
                 return
         if level == "ERROR":
