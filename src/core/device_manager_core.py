@@ -606,7 +606,9 @@ class DeviceManagerCore(EventEmitter):
                 
                 self.protocol_workers[device_name] = iec_worker
 
-        elif device.config.device_type in [DeviceType.MODBUS_TCP, DeviceType.MODBUS_SERVER]:
+        elif device.config.device_type in [DeviceType.MODBUS_TCP, DeviceType.MODBUS_SERVER,
+                                            DeviceType.MODBUS_RTU_MASTER, DeviceType.MODBUS_RTU_SLAVE,
+                                            DeviceType.MODBUS_RTU_SIMULATOR]:
             modbus_worker = ModbusWorker(protocol, device_name)
             t_mb = threading.Thread(target=modbus_worker.run, daemon=True)
             t_mb.start()

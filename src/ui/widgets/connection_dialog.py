@@ -681,7 +681,11 @@ class ConnectionDialog(QDialog):
             pass            
         self.chk_polling.setChecked(config.polling_enabled)
         self.spin_interval.setValue(config.poll_interval)
-        self.unit_id_input.setValue(config.modbus_unit_id)
+        # For RTU devices, prefer rtu_slave_address over modbus_unit_id
+        if hasattr(config, 'rtu_slave_address') and config.rtu_slave_address != 1:
+            self.unit_id_input.setValue(config.rtu_slave_address)
+        else:
+            self.unit_id_input.setValue(config.modbus_unit_id)
         
         # RTU Configuration
         if hasattr(config, 'rtu_transport') and config.rtu_transport:
@@ -710,39 +714,6 @@ class ConnectionDialog(QDialog):
         
         self.type_input.blockSignals(False)
         self.blockSignals(False)
-
-    def get_config(self) -> DeviceConfig:
-        try:
-            port = int(self.port_input.text())
-        except ValueError:
-            port = 102
-            
-        # Get IP from active widget
-        if self.ip_container.currentWidget() == self.ip_select:
-            ip = self.ip_select.currentText()
-        else:
-            ip = self.ip_input.text()
-            
-        # Get name from input or generate if empty
-        name = self.name_input.text().strip()
-        if not name:
-            name = f"IED_{ip.replace('.', '_')}"
-
-        role = self.role_input.currentData() or DeviceRole.CLIENT
-            
-        return DeviceConfig(
-            name=name,
-            description=self.desc_input.text(),
-            folder=self.folder_input.text(),
-            ip_address=ip,
-            port=port,
-            device_type=self.type_input.currentData(),
-            device_role=role,
-            scd_file_path=self.scd_input.text() if self.scd_input.text() else None,
-            polling_enabled=self.chk_polling.isChecked(),
-            poll_interval=self.spin_interval.value(),
-            modbus_unit_id=self.unit_id_input.value()
-        )
 
     def _update_form_labels(self, type_text):
         """Dynamic label updates based on device type."""
@@ -996,6 +967,30 @@ class ConnectionDialog(QDialog):
             self.modbus_register_maps = dialog.get_register_maps()
             self._update_register_map_status()
 
+    def _get_clean_serial_port(self) -> str:
+        """Extract clean serial port name from combo box.
+        
+        The combo box displays items like 'COM4 - USB Serial Port (COM4)'
+        but pyserial needs just 'COM4'. We try currentData() first (which
+        stores the clean port name), then fall back to parsing the display text.
+        """
+        # currentData() stores the clean port name set by _refresh_serial_ports
+        port = self.serial_port_combo.currentData()
+        if port:
+            return port
+        
+        # Fallback: parse the display text
+        text = self.serial_port_combo.currentText().strip()
+        if not text:
+            return ''
+        
+        # If text contains ' - ', the port name is before the separator
+        if ' - ' in text:
+            port = text.split(' - ')[0].strip()
+            return port
+        
+        return text
+
     def get_config(self) -> DeviceConfig:
         try:
             port = int(self.port_input.text())
@@ -1029,7 +1024,8 @@ class ConnectionDialog(QDialog):
             modbus_unit_id=self.unit_id_input.value(),
             # RTU Configuration
             rtu_transport='serial' if self.rtu_transport_combo.currentIndex() == 0 else 'rtu_over_tcp',
-            serial_port=self.serial_port_combo.currentData() or self.serial_port_combo.currentText(),
+            rtu_slave_address=self.unit_id_input.value(),
+            serial_port=self._get_clean_serial_port(),
             serial_baudrate=int(self.baud_rate_combo.currentText()) if self.baud_rate_combo.currentText().isdigit() else 9600,
             serial_bytesize=int(self.data_bits_combo.currentText()),
             serial_parity=self.parity_combo.currentText()[0] if self.parity_combo.currentText() else 'N',

@@ -146,6 +146,7 @@ class DataInspectorDialog(QDialog):
                 self.lbl_raw.setText("Error: Device not connected")
                 return
 
+            # Check connection status
             connected = getattr(protocol, "connected", None)
             if connected is None and hasattr(protocol, "is_connected"):
                 try:
@@ -182,7 +183,8 @@ class DataInspectorDialog(QDialog):
 
             # Determine register range from combo
             num_regs = self.combo_range.currentData()
-            # 1: current, 2: current+next, 5: current+previous, 3: prev+current+next, 4: prev+current+next+next2
+            # 1: current, 2: current+next, 5: current+previous,
+            # 3: prev+current+next, 4: prev+current+next+next2
             if num_regs == 1:
                 read_start = start_addr
                 read_count = 1
@@ -202,49 +204,66 @@ class DataInspectorDialog(QDialog):
                 read_start = start_addr
                 read_count = 1
 
+            regs = None
+
+            # --- Path 1: Modbus TCP via pymodbus client ---
             client = getattr(protocol, 'client', None)
-            if client and getattr(protocol, "connected", True):
+            if client is not None and getattr(protocol, "connected", True):
                 result = None
                 if read_fc == 4:
                     result = client.read_input_registers(read_start, count=read_count, device_id=unit_id)
                 else:
                     result = client.read_holding_registers(read_start, count=read_count, device_id=unit_id)
-                if result.isError():
+                if result is not None and not result.isError():
+                    regs = result.registers
+                else:
                     self.lbl_raw.setText(f"Read Error: {result}")
                     return
-                self.raw_registers = result.registers
-            else:
+
+            # --- Path 2: Modbus RTU (or any adapter with direct read methods) ---
+            elif hasattr(protocol, "read_holding_registers") or hasattr(protocol, "read_input_registers"):
                 if read_fc == 4 and hasattr(protocol, "read_input_registers"):
                     regs = protocol.read_input_registers(unit_id, read_start, read_count)
-                elif read_fc == 3 and hasattr(protocol, "read_holding_registers"):
+                elif hasattr(protocol, "read_holding_registers"):
                     regs = protocol.read_holding_registers(unit_id, read_start, read_count)
-                elif read_fc == 1 and hasattr(protocol, "read_coils"):
-                    regs = protocol.read_coils(unit_id, read_start, read_count * 16)
-                elif read_fc == 2 and hasattr(protocol, "read_discrete_inputs"):
-                    regs = protocol.read_discrete_inputs(unit_id, read_start, read_count * 16)
-                else:
-                    regs = None
+                
                 if regs is None:
-                    self.lbl_raw.setText("Read Error: No compatible read method available")
+                    self.lbl_raw.setText("Read Error: Device returned no data (timeout or exception)")
                     return
-                if read_fc in [1, 2]:
-                    self.raw_registers = []
-                    for i in range(read_count):
-                        bitmask = 0
-                        start_bit = i * 16
-                        end_bit = min(start_bit + 16, len(regs))
-                        for j in range(start_bit, end_bit):
-                            if regs[j]:
-                                bitmask |= (1 << (j - start_bit))
-                        self.raw_registers.append(bitmask)
-                else:
-                    self.raw_registers = regs
 
+            # --- Path 3: Generic read_signal fallback ---
+            else:
+                # Build a temporary signal to call read_signal
+                from src.models.device_models import Signal, ModbusDataType
+                import copy
+                temp_signal = copy.copy(self.signal)
+                temp_signal.address = f"{unit_id}:{read_fc}:{read_start}"
+                temp_signal.modbus_data_type = ModbusDataType.UINT16
+                # Read read_count registers one by one
+                regs = []
+                for i in range(read_count):
+                    temp_signal.address = f"{unit_id}:{read_fc}:{read_start + i}"
+                    result = protocol.read_signal(temp_signal)
+                    raw = result.value if result and result.value is not None else 0
+                    try:
+                        regs.append(int(raw) & 0xFFFF)
+                    except Exception:
+                        regs.append(0)
+
+            if not regs:
+                self.lbl_raw.setText("Read Error: Empty response")
+                return
+
+            self.raw_registers = regs
             hex_strs = [f"[{i:04X}]" for i in self.raw_registers]
             self.lbl_raw.setText(" ".join(hex_strs))
             self._update_interpretations()
+
         except Exception as e:
+            import traceback
             self.lbl_raw.setText(f"Error: {e}")
+
+
 
     def _update_interpretations(self):
         regs = self.raw_registers

@@ -13,6 +13,7 @@ from src.models.device_models import (
     ModbusDataType, ModbusEndianness
 )
 
+from src.protocols.modbus.register_mapping import get_register_count, decode_mapped_value
 from .transport import SerialTransport, RTUoverTCPTransport, SerialConfig
 from .frame_handler import (
     ModbusRTUFrameHandler, ModbusFunctionCode, ModbusExceptionCode
@@ -292,10 +293,16 @@ class ModbusRTUMasterAdapter(BaseProtocol):
         return nodes
     
     def read_signal(self, signal: Signal) -> Signal:
-        """Read a specific signal synchronously"""
+        """Read a specific signal synchronously.
+        
+        Reads the correct number of registers for the signal's data type
+        (e.g. 2 registers for FLOAT32/INT32, 4 for INT64) and decodes them
+        using the configured endianness, scale, and offset.
+        """
         if not self.connected or not self.transport:
             signal.quality = SignalQuality.NOT_CONNECTED
             signal.error = "Not connected"
+            self._emit_update(signal)
             return signal
         
         try:
@@ -308,42 +315,76 @@ class ModbusRTUMasterAdapter(BaseProtocol):
             func_code = int(parts[1])
             reg_addr = int(parts[2])
             
-            # Read based on function code
-            if func_code == 1:  # Read Coils
-                values = self.read_coils(slave_addr, reg_addr, 1)
-                if values:
+            # Determine how many registers this data type requires
+            data_type = signal.modbus_data_type or ModbusDataType.UINT16
+            count = get_register_count(data_type)
+            
+            if self.event_logger:
+                self.event_logger.transaction(
+                    self.config.name,
+                    f"→ READ FC{func_code} Slave={slave_addr} Addr={reg_addr} Count={count} Type={data_type.value}"
+                )
+
+            raw_values = None
+
+            if func_code == 1:  # Read Coils (bit, always 1)
+                values = self.read_coils(slave_addr, reg_addr, count)
+                if values is not None:
                     signal.value = values[0]
                     signal.quality = SignalQuality.GOOD
-            
-            elif func_code == 2:  # Read Discrete Inputs
-                values = self.read_discrete_inputs(slave_addr, reg_addr, 1)
-                if values:
+                    signal.timestamp = datetime.now()
+                    signal.error = ""
+                    self._emit_update(signal)
+                    return signal
+
+            elif func_code == 2:  # Read Discrete Inputs (bit, always 1)
+                values = self.read_discrete_inputs(slave_addr, reg_addr, count)
+                if values is not None:
                     signal.value = values[0]
                     signal.quality = SignalQuality.GOOD
-            
+                    signal.timestamp = datetime.now()
+                    signal.error = ""
+                    self._emit_update(signal)
+                    return signal
+
             elif func_code == 3:  # Read Holding Registers
-                values = self.read_holding_registers(slave_addr, reg_addr, 1)
-                if values:
-                    signal.value = values[0]
-                    signal.quality = SignalQuality.GOOD
-            
+                raw_values = self.read_holding_registers(slave_addr, reg_addr, count)
+
             elif func_code == 4:  # Read Input Registers
-                values = self.read_input_registers(slave_addr, reg_addr, 1)
-                if values:
-                    signal.value = values[0]
-                    signal.quality = SignalQuality.GOOD
-            
+                raw_values = self.read_input_registers(slave_addr, reg_addr, count)
+
             else:
                 raise ValueError(f"Unsupported function code: {func_code}")
-            
+
+            # Decode the raw register words into a typed value
+            if raw_values is not None:
+                decoded = decode_mapped_value(
+                    raw_values,
+                    data_type,
+                    signal.modbus_endianness,
+                    signal.modbus_scale  if signal.modbus_scale  is not None else 1.0,
+                    signal.modbus_offset if signal.modbus_offset is not None else 0.0
+                )
+                # Track last_changed
+                if signal.value != decoded:
+                    signal.last_changed = datetime.now()
+                signal.value = decoded
+                signal.quality = SignalQuality.GOOD
+            else:
+                signal.quality = SignalQuality.INVALID
+                signal.error = "No response from device"
+
             signal.timestamp = datetime.now()
-            signal.error = ""
+            if signal.quality == SignalQuality.GOOD:
+                signal.error = ""
         
         except Exception as e:
             logger.error(f"Error reading signal {signal.address}: {e}")
             signal.quality = SignalQuality.INVALID
             signal.error = str(e)
         
+        # Notify subscribers (WatchList, UI)
+        self._emit_update(signal)
         return signal
     
     # ========================================================================
