@@ -690,7 +690,7 @@ class MainWindow(QMainWindow):
         self.dock_events.setAllowedAreas(Qt.AllDockWidgetAreas)
         self.dock_events.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetClosable)
         
-        self.event_log_widget = EventLogWidget()
+        self.event_log_widget = EventLogWidget(device_manager=self.device_manager)
         if self.event_logger:
             self.event_log_widget.set_event_logger(self.event_logger)
         self.event_log_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)

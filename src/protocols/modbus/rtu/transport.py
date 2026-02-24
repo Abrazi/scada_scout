@@ -69,32 +69,53 @@ class BaseTransport(ABC):
     def __init__(self):
         self._is_open = False
         self._lock = threading.RLock()  # Reentrant lock for thread safety
-    
+        self._tap_callbacks = []  # (direction: str, data: bytes) -> None
+
+    def add_tap_callback(self, cb):
+        """Register a callback to receive raw bytes. cb(direction, data) where direction is 'TX' or 'RX'."""
+        if cb not in self._tap_callbacks:
+            self._tap_callbacks.append(cb)
+
+    def remove_tap_callback(self, cb):
+        """Remove a previously registered tap callback."""
+        try:
+            self._tap_callbacks.remove(cb)
+        except ValueError:
+            pass
+
+    def _fire_tap(self, direction: str, data: bytes):
+        """Notify all tap callbacks (best-effort, silently ignores errors)."""
+        for cb in list(self._tap_callbacks):
+            try:
+                cb(direction, data)
+            except Exception:
+                pass
+
     @abstractmethod
     def open(self) -> bool:
         """Open the transport connection"""
         pass
-    
+
     @abstractmethod
     def close(self):
         """Close the transport connection"""
         pass
-    
+
     @abstractmethod
     def send_frame(self, frame: bytes) -> bool:
         """Send a complete RTU frame"""
         pass
-    
+
     @abstractmethod
     def receive_frame(self, timeout: Optional[float] = None) -> Optional[bytes]:
         """Receive a complete RTU frame with timeout"""
         pass
-    
+
     @abstractmethod
     def flush(self):
         """Flush input and output buffers"""
         pass
-    
+
     @property
     def is_open(self) -> bool:
         """Check if transport is open"""
@@ -189,6 +210,8 @@ class SerialTransport(BaseTransport):
                     return False
                 
                 logger.debug(f"Sent {len(frame)} bytes: {frame.hex()}")
+                # Notify tap listeners (non-blocking)
+                self._fire_tap('TX', frame)
                 return True
                 
             except serial.SerialTimeoutException:
@@ -248,8 +271,11 @@ class SerialTransport(BaseTransport):
                 self._serial.timeout = original_timeout
                 
                 if len(frame) > 0:
-                    logger.debug(f"Received {len(frame)} bytes: {bytes(frame).hex()}")
-                    return bytes(frame)
+                    frame_bytes = bytes(frame)
+                    logger.debug(f"Received {len(frame_bytes)} bytes: {frame_bytes.hex()}")
+                    # Notify tap listeners
+                    self._fire_tap('RX', frame_bytes)
+                    return frame_bytes
                 
                 return None
                 

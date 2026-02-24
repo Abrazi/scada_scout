@@ -13,7 +13,7 @@ from src.models.device_models import (
     ModbusDataType, ModbusEndianness
 )
 
-from src.protocols.modbus.register_mapping import get_register_count, decode_mapped_value
+from src.protocols.modbus.register_mapping import get_register_count, decode_mapped_value, encode_mapped_value
 from .transport import SerialTransport, RTUoverTCPTransport, SerialConfig
 from .frame_handler import (
     ModbusRTUFrameHandler, ModbusFunctionCode, ModbusExceptionCode
@@ -391,6 +391,82 @@ class ModbusRTUMasterAdapter(BaseProtocol):
     # Modbus RTU Function Code Implementations
     # ========================================================================
     
+    def write_signal(self, signal: Signal, value) -> bool:
+        """Write a value to a Modbus RTU signal.
+
+        Handles all data types including multi-register types (FLOAT32, INT32,
+        INT64, FLOAT64) by encoding via encode_mapped_value and issuing
+        FC06 (single) or FC16 (multiple) write requests as appropriate.
+        """
+        if not self.connected:
+            if self.event_logger:
+                self.event_logger.error(self.config.name, "Cannot write: not connected")
+            return False
+
+        try:
+            parts = signal.address.split(':')
+            if len(parts) != 3:
+                raise ValueError(f"Invalid address format: {signal.address}")
+
+            slave_addr = int(parts[0])
+            func_code  = int(parts[1])
+            reg_addr   = int(parts[2])
+
+            if self.event_logger:
+                self.event_logger.transaction(
+                    self.config.name,
+                    f"→ WRITE FC{func_code} Slave={slave_addr} Addr={reg_addr} Value={value}"
+                )
+
+            # --- Coil write (FC01 signal type → FC05 Write Single Coil) ---
+            if func_code == 1:
+                ok = self.write_single_coil(slave_addr, reg_addr, bool(value))
+
+            # --- Holding register write (FC03 → FC06 / FC16) ---
+            elif func_code == 3:
+                data_type  = signal.modbus_data_type  or ModbusDataType.UINT16
+                endianness = signal.modbus_endianness or ModbusEndianness.BIG_ENDIAN
+                scale      = signal.modbus_scale  if signal.modbus_scale  is not None else 1.0
+                offset_val = signal.modbus_offset if signal.modbus_offset is not None else 0.0
+
+                registers = encode_mapped_value(value, data_type, endianness, scale, offset_val)
+
+                if len(registers) == 1:
+                    ok = self.write_single_register(slave_addr, reg_addr, registers[0])
+                else:
+                    ok = self.write_multiple_registers(slave_addr, reg_addr, registers)
+
+            else:
+                if self.event_logger:
+                    self.event_logger.error(
+                        self.config.name,
+                        f"Cannot write to FC{func_code} (read-only function code)"
+                    )
+                signal.error = "Read-Only"
+                signal.quality = SignalQuality.INVALID
+                return False
+
+            if ok:
+                if self.event_logger:
+                    self.event_logger.transaction(self.config.name, "← WRITE SUCCESS")
+                signal.error = ""
+                signal.quality = SignalQuality.GOOD
+            else:
+                if self.event_logger:
+                    self.event_logger.error(self.config.name, "← WRITE FAILED (device returned error)")
+                signal.error = "Write failed"
+                signal.quality = SignalQuality.INVALID
+
+            return ok
+
+        except Exception as e:
+            if self.event_logger:
+                self.event_logger.error(self.config.name, f"← WRITE EXCEPTION: {e}")
+            logger.error(f"Error writing RTU signal {signal.address}: {e}")
+            signal.error = str(e)
+            signal.quality = SignalQuality.INVALID
+            return False
+
     def read_coils(self, slave_address: int, start_address: int, count: int) -> Optional[List[bool]]:
         """FC01: Read Coils"""
         request = self.frame_handler.build_read_coils_request(slave_address, start_address, count)
@@ -572,29 +648,5 @@ class ModbusRTUMasterAdapter(BaseProtocol):
         return None
     
     def send_command(self, signal: Signal, value, params: Optional[dict] = None) -> bool:
-        """High-level command interface for writing signals"""
-        if params is None:
-            params = {}
-        try:
-            # Parse address
-            parts = signal.address.split(':')
-            if len(parts) != 3:
-                raise ValueError(f"Invalid address format: {signal.address}")
-            
-            slave_addr = int(parts[0])
-            func_code = int(parts[1])
-            reg_addr = int(parts[2])
-            
-            # Write based on function code/signal type
-            if func_code == 1 or signal.signal_type == SignalType.COIL:
-                return self.write_single_coil(slave_addr, reg_addr, bool(value))
-            
-            elif func_code == 3 or signal.signal_type == SignalType.HOLDING_REGISTER:
-                return self.write_single_register(slave_addr, reg_addr, int(value))
-            
-            else:
-                raise ValueError(f"Signal type {signal.signal_type} is read-only")
-        
-        except Exception as e:
-            logger.error(f"Error sending command: {e}")
-            return False
+        """High-level command interface — delegates to write_signal for proper type encoding."""
+        return self.write_signal(signal, value)

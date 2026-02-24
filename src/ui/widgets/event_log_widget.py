@@ -15,8 +15,9 @@ class EventLogWidget(QWidget):
     """
     Widget for displaying diagnostic events and IEC 61850 transactions.
     """
-    def __init__(self, parent=None):
+    def __init__(self, device_manager=None, parent=None):
         super().__init__(parent)
+        self.device_manager = device_manager
         self._setup_ui()
         
     def _setup_ui(self):
@@ -295,8 +296,19 @@ class EventLogWidget(QWidget):
                         self.log_event("ERROR", "Serial", f"Failed to configure serial port: {e}")
 
             try:
+                # --- RTU tap mode: try eavesdropping on an existing transport first ---
+                if capture_type == "serial" and self.device_manager:
+                    transport = self._find_rtu_transport()
+                    if transport is not None:
+                        if self.capture_worker.start_rtu_tap(transport):
+                            port_name = getattr(getattr(transport, 'config', None), 'port', '?')
+                            self.log_event("INFO", "Capture",
+                                           f"Started RTU tap on {port_name} (eavesdrop mode — port stays open)")
+                            self._update_capture_button_style(running=True)
+                            return
+
                 self.capture_worker.start_capture(filter_str, capture_type=capture_type)
-                capture_desc = "network" if capture_type == "network" else f"serial ({serial_port}@{baudrate})"
+                capture_desc = "network" if capture_type == "network" else f"serial ({self.combo_serial_port.currentData()}@{self.combo_serial_baud.currentText()})"
                 self.log_event("INFO", "Capture", f"Started {capture_desc} capture with filter: {filter_str}")
                 self._update_capture_button_style(running=True)
             except Exception as e:
@@ -308,6 +320,28 @@ class EventLogWidget(QWidget):
             self.capture_worker.stop_capture()
             self.log_event("INFO", "Capture", "Stopped capture")
             self._update_capture_button_style(running=False)
+
+    def _find_rtu_transport(self):
+        """Search connected devices for a Modbus RTU transport that is open.
+
+        Returns the first open SerialTransport (or any transport with
+        add_tap_callback), or None.
+        """
+        if not self.device_manager:
+            return None
+        try:
+            for device in self.device_manager.get_all_devices():
+                protocol = self.device_manager.get_protocol(device.config.name)
+                if protocol is None:
+                    continue
+                transport = getattr(protocol, 'transport', None)
+                if transport is None:
+                    continue
+                if hasattr(transport, 'add_tap_callback') and getattr(transport, 'is_open', False):
+                    return transport
+        except Exception:
+            pass
+        return None
 
     def _on_packet_captured(self, summary: str):
         # Determine if this is a network or serial packet

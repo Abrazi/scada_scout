@@ -1444,30 +1444,11 @@ END_PROGRAM
         QTimer.singleShot(100, self._update_variable_table)
     
     def _configure_tasks(self):
-        """Open task configuration dialog."""
+        """Open task configuration dialog — lets the user pick AND edit any task."""
         from PySide6.QtWidgets import QDialog, QFormLayout, QSpinBox, QDialogButtonBox
-        
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Task Configuration")
-        dialog.resize(400, 300)
-        
-        layout = QVBoxLayout(dialog)
-        
-        # Add warning label about program assignment
-        warning_label = QLabel("📋 Tasks execute programs. Check programs below to assign them to this task.\n"
-                              "⚠️ Tasks with NO programs assigned will run but do NOTHING!")
-        warning_label.setStyleSheet("QLabel { background-color: #FFF3CD; padding: 10px; border: 1px solid #FFC107; border-radius: 3px; }")
-        warning_label.setWordWrap(True)
-        layout.addWidget(warning_label)
-        
-        form_layout = QFormLayout()
-        
-        # Get or create main task
-        task = None
-        if self.plc_ext.tasks:
-            task = self.plc_ext.tasks[0]
-        else:
-            # Create default task
+
+        # Ensure at least a default task exists
+        if not self.plc_ext.tasks:
             task = PLCTask(
                 task_id="MainTask",
                 name="MainTask",
@@ -1476,77 +1457,115 @@ END_PROGRAM
                 program_ids=[]
             )
             self.plc_ext.add_task(task)
-        
-        # Task Name
-        task_name = QLineEdit(task.name)
-        form_layout.addRow("Task Name:", task_name)
-        
-        # Task Type
-        task_type_combo = QComboBox()
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Task Configuration")
+        dialog.resize(480, 420)
+        layout = QVBoxLayout(dialog)
+
+        # ── Warning banner (dark-theme compatible) ──────────────────────────
+        warning_label = QLabel(
+            "📋  Tasks execute programs. Check programs below to assign them to this task.\n"
+            "⚠️  A task with NO programs assigned will run but do NOTHING!"
+        )
+        warning_label.setStyleSheet(
+            "QLabel { background-color: #7A4B00; color: #FFD580; "
+            "padding: 10px; border: 1px solid #FFC107; border-radius: 4px; font-weight: bold; }"
+        )
+        warning_label.setWordWrap(True)
+        layout.addWidget(warning_label)
+
+        # ── Task selector ───────────────────────────────────────────────────
+        selector_layout = QHBoxLayout()
+        selector_layout.addWidget(QLabel("Edit Task:"))
+        task_selector = QComboBox()
+        for t in self.plc_ext.tasks:
+            task_selector.addItem(t.name, t)
+        selector_layout.addWidget(task_selector, 1)
+        layout.addLayout(selector_layout)
+
+        # ── Form fields ─────────────────────────────────────────────────────
+        form_layout = QFormLayout()
+
+        task_name    = QLineEdit()
+        task_type_combo  = QComboBox()
         task_type_combo.addItems([t.value for t in TaskType])
-        task_type_combo.setCurrentText(task.task_type.value)
-        form_layout.addRow("Task Type:", task_type_combo)
-        
-        # Interval (ms)
         interval_spin = QSpinBox()
         interval_spin.setRange(1, 10000)
-        interval_spin.setValue(int(task.interval_ms))
         interval_spin.setSuffix(" ms")
-        form_layout.addRow("Scan Interval:", interval_spin)
-        
-        # Priority
         priority_spin = QSpinBox()
         priority_spin.setRange(0, 255)
-        priority_spin.setValue(task.priority)
-        form_layout.addRow("Priority:", priority_spin)
-        
-        # Enabled checkbox
         enabled_check = QCheckBox()
-        enabled_check.setChecked(task.enabled)
-        form_layout.addRow("Enabled:", enabled_check)
-        
-        # Program assignment
-        # Ensure current program is registered if user created/edited before opening task config
+
+        form_layout.addRow("Task Name:",    task_name)
+        form_layout.addRow("Task Type:",    task_type_combo)
+        form_layout.addRow("Scan Interval:", interval_spin)
+        form_layout.addRow("Priority:",     priority_spin)
+        form_layout.addRow("Enabled:",      enabled_check)
+
+        # Ensure current program is registered if it has not been saved yet
         if not self.plc_ext.programs and self.current_program is not None:
             self.plc_ext.add_program(self.current_program)
 
         program_list = QListWidget()
         program_list.setSelectionMode(QListWidget.MultiSelection)
-        for prog in self.plc_ext.programs:
-            item = QListWidgetItem(prog.name)
-            item.setData(Qt.UserRole, prog.program_id)
-            program_list.addItem(item)
-            if prog.program_id in task.program_ids:
-                item.setSelected(True)
         form_layout.addRow("Assigned Programs:", program_list)
-        
+
         layout.addLayout(form_layout)
-        
-        # Buttons
+
+        # ── Helper: populate form from a task object ────────────────────────
+        def _populate(task):
+            task_name.setText(task.name)
+            idx = task_type_combo.findText(task.task_type.value)
+            task_type_combo.setCurrentIndex(max(0, idx))
+            interval_spin.setValue(int(task.interval_ms))
+            priority_spin.setValue(task.priority)
+            enabled_check.setChecked(task.enabled)
+
+            program_list.clear()
+            for prog in self.plc_ext.programs:
+                item = QListWidgetItem(prog.name)
+                item.setData(Qt.UserRole, prog.program_id)
+                program_list.addItem(item)
+                if prog.program_id in task.program_ids:
+                    item.setSelected(True)
+
+        # Populate with first task immediately
+        _populate(self.plc_ext.tasks[0])
+
+        # Reload form whenever user picks a different task
+        def _on_task_selected(index):
+            _populate(task_selector.itemData(index))
+
+        task_selector.currentIndexChanged.connect(_on_task_selected)
+
+        # ── OK / Cancel ─────────────────────────────────────────────────────
         button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         button_box.accepted.connect(dialog.accept)
         button_box.rejected.connect(dialog.reject)
         layout.addWidget(button_box)
-        
+
         if dialog.exec():
-            # Save settings
-            task.name = task_name.text()
-            task.task_type = TaskType(task_type_combo.currentText())
+            # Save settings back to the currently selected task
+            task = task_selector.currentData()
+            task.name        = task_name.text()
+            task.task_type   = TaskType(task_type_combo.currentText())
             task.interval_ms = float(interval_spin.value())
-            task.priority = priority_spin.value()
-            task.enabled = enabled_check.isChecked()
-            
-            # Update program assignments
+            task.priority    = priority_spin.value()
+            task.enabled     = enabled_check.isChecked()
+
             task.program_ids = []
             for i in range(program_list.count()):
                 item = program_list.item(i)
                 if item.isSelected():
                     task.program_ids.append(item.data(Qt.UserRole))
-            
-            self._log(f"Task '{task.name}' configured: {task.task_type.value}, {task.interval_ms}ms")
+
+            self._log(
+                f"Task '{task.name}' configured: {task.task_type.value}, "
+                f"{task.interval_ms}ms, programs={task.program_ids}"
+            )
             self._refresh_project_tree()
-            
-            # Save configuration
+
             try:
                 self.device_manager.save_configuration()
             except Exception:

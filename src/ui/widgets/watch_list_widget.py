@@ -1,15 +1,84 @@
-from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, 
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QTableWidget,
                                 QTableWidgetItem, QPushButton, QSpinBox, QLabel,
-                                QHeaderView, QFileDialog, QMessageBox)
+                                QHeaderView, QFileDialog, QMessageBox,
+                                QStyledItemDelegate, QComboBox, QApplication)
 from PySide6.QtCore import Qt, Signal as QtSignal, QTimer
 from PySide6.QtGui import QBrush, QColor
 from src.core.watch_list_manager import WatchListManager, WatchedSignal
 import datetime
-from src.models.device_models import Signal, SignalQuality
+from src.models.device_models import Signal, SignalQuality, ModbusDataType, ModbusEndianness
 import logging
 import re
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Columns that support inline combo-box editing
+# ---------------------------------------------------------------------------
+COL_MODBUS_TYPE  = 4
+COL_ENDIANNESS   = 5
+
+_MODBUS_TYPE_LABELS = [
+    (ModbusDataType.UINT16,   "Unsigned 16-bit"),
+    (ModbusDataType.INT16,    "Signed 16-bit"),
+    (ModbusDataType.HEX16,    "Hex 16-bit"),
+    (ModbusDataType.BINARY16, "Binary 16-bit"),
+    (ModbusDataType.UINT32,   "Unsigned 32-bit"),
+    (ModbusDataType.INT32,    "Signed 32-bit"),
+    (ModbusDataType.FLOAT32,  "Float 32-bit"),
+    (ModbusDataType.UINT64,   "Unsigned 64-bit"),
+    (ModbusDataType.INT64,    "Signed 64-bit"),
+    (ModbusDataType.FLOAT64,  "Double 64-bit"),
+    (ModbusDataType.BOOL,     "Boolean"),
+    (ModbusDataType.BCD16,    "BCD 16-bit"),
+    (ModbusDataType.BCD32,    "BCD 32-bit"),
+    (ModbusDataType.STRING,   "ASCII (Packed)"),
+]
+
+_ENDIANNESS_LABELS = [
+    (ModbusEndianness.BIG_ENDIAN,              "Big-endian (ABCD)"),
+    (ModbusEndianness.LITTLE_ENDIAN,           "Little-endian (CDAB)"),
+    (ModbusEndianness.BIG_ENDIAN_BYTE_SWAP,    "Big-endian byte swap (BADC)"),
+    (ModbusEndianness.LITTLE_ENDIAN_BYTE_SWAP, "Little-endian byte swap (DCBA)"),
+]
+
+
+class _ModbusComboDelegate(QStyledItemDelegate):
+    """Delegate that shows a QComboBox for Modbus Type (col 4) and Endianness (col 5).
+    All other columns are non-editable.
+    """
+    # Emitted when the user commits a change: (row, column, new_enum_value)
+    valueChanged = QtSignal(int, int, object)
+
+    def createEditor(self, parent, option, index):
+        col = index.column()
+        if col == COL_MODBUS_TYPE:
+            cb = QComboBox(parent)
+            for enum_val, label in _MODBUS_TYPE_LABELS:
+                cb.addItem(label, enum_val)
+            return cb
+        if col == COL_ENDIANNESS:
+            cb = QComboBox(parent)
+            for enum_val, label in _ENDIANNESS_LABELS:
+                cb.addItem(label, enum_val)
+            return cb
+        return None  # non-editable
+
+    def setEditorData(self, editor, index):
+        current_text = index.data(Qt.DisplayRole) or ""
+        idx = editor.findText(current_text)
+        if idx >= 0:
+            editor.setCurrentIndex(idx)
+
+    def setModelData(self, editor, model, index):
+        col = index.column()
+        new_val = editor.currentData()
+        new_text = editor.currentText()
+        model.setData(index, new_text, Qt.DisplayRole)
+        self.valueChanged.emit(index.row(), col, new_val)
+
+    def updateEditorGeometry(self, editor, option, index):
+        editor.setGeometry(option.rect)
 
 class WatchListWidget(QWidget):
     """
@@ -82,14 +151,21 @@ class WatchListWidget(QWidget):
         header.setSectionResizeMode(QHeaderView.Interactive)
         header.setStretchLastSection(True)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.table.setSelectionMode(QTableWidget.ExtendedSelection)  # Enable Ctrl/Shift multi-selection
-        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setSelectionMode(QTableWidget.ExtendedSelection)
+        # Allow double-click editing (delegate returns None for non-editable cols)
+        self.table.setEditTriggers(QTableWidget.DoubleClicked)
         
         # Context menu for table
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._show_context_menu)
         
         layout.addWidget(self.table)
+
+        # Inline-edit delegate for Modbus Type and Endianness columns
+        self._combo_delegate = _ModbusComboDelegate(self.table)
+        self._combo_delegate.valueChanged.connect(self._on_inline_type_changed)
+        self.table.setItemDelegate(self._combo_delegate)
+
         # Accept drops from Device Tree
         try:
             self.setAcceptDrops(True)
@@ -432,7 +508,49 @@ class WatchListWidget(QWidget):
     def _on_interval_changed(self, value: int):
         """Handle poll interval change."""
         self.watch_manager.set_poll_interval(value)
-    
+
+    def _on_inline_type_changed(self, row: int, col: int, new_enum_val):
+        """Called when the user picks a new Modbus Type or Endianness in the table.
+
+        Updates the underlying signal object and immediately triggers a re-read
+        so the Value column reflects the new interpretation.
+        """
+        try:
+            # Identify which watched signal owns this row
+            item = self.table.item(row, 0)
+            if not item:
+                return
+            watch_id = item.data(Qt.UserRole)
+            if not watch_id:
+                return
+
+            watched = self.watch_manager.get_watched(watch_id)
+            if not watched:
+                return
+
+            signal = watched.signal
+
+            if col == COL_MODBUS_TYPE and isinstance(new_enum_val, ModbusDataType):
+                signal.modbus_data_type = new_enum_val
+                logger.debug(f"Set modbus_data_type={new_enum_val} for {watch_id}")
+
+            elif col == COL_ENDIANNESS and isinstance(new_enum_val, ModbusEndianness):
+                signal.modbus_endianness = new_enum_val
+                logger.debug(f"Set modbus_endianness={new_enum_val} for {watch_id}")
+
+            else:
+                return
+
+            # Force an immediate re-read so Value updates instantly
+            if self.device_manager:
+                protocol = self.device_manager.get_protocol(watched.device_name)
+                if protocol and getattr(protocol, 'connected', False):
+                    # Enqueue via the normal worker path (non-blocking)
+                    self.device_manager.read_signal(watched.device_name, signal)
+
+        except Exception:
+            logger.exception("Failed to apply inline Modbus type/endianness change")
+
     def _on_polling_progress(self, current: int, total: int):
         """Show polling progress for large watch lists."""
         if total > 100:

@@ -59,6 +59,10 @@ class PacketCaptureWorker(QObject):
         self._serial_stopbits = 1
         self._serial_available = HAS_PYSERIAL
 
+        # RTU tap (eavesdrop through existing open transport - Windows-safe)
+        self._rtu_tap_transport = None  # SerialTransport being tapped
+        self._rtu_tap_callback = None   # bound method registered on transport
+
         # Logging options
         self._log_file = None
         self._log_json = False
@@ -422,6 +426,48 @@ class PacketCaptureWorker(QObject):
         # final fallback: emit AsyncSniffer error
         self.error_occurred.emit(f"Failed to start sniffer: {err}")
 
+    def start_rtu_tap(self, transport) -> bool:
+        """Eavesdrop on an already-open SerialTransport instead of opening the port again.
+
+        This is the correct approach on Windows where COM ports are exclusive.
+        ``transport`` must be a ``SerialTransport`` instance (or any object that
+        exposes ``add_tap_callback`` / ``remove_tap_callback``).
+
+        Returns True if tapping started successfully.
+        """
+        if transport is None or not hasattr(transport, 'add_tap_callback'):
+            return False
+
+        # Clean up any previous tap
+        self.stop_rtu_tap()
+
+        def _on_tap(direction: str, data: bytes):
+            self._process_serial_frame(data, direction=direction)
+
+        self._rtu_tap_callback = _on_tap
+        self._rtu_tap_transport = transport
+        transport.add_tap_callback(_on_tap)
+
+        port = getattr(getattr(transport, 'config', None), 'port', '?')
+        baud = getattr(getattr(transport, 'config', None), 'baudrate', '?')
+        try:
+            self.packet_captured.emit(
+                f"[SERIAL] Tap started on {port} @ {baud} baud (eavesdrop mode — port stays open)"
+            )
+        except Exception:
+            pass
+        return True
+
+    def stop_rtu_tap(self):
+        """Remove the eavesdrop callback from the transport."""
+        if self._rtu_tap_transport is not None and self._rtu_tap_callback is not None:
+            try:
+                self._rtu_tap_transport.remove_tap_callback(self._rtu_tap_callback)
+            except Exception:
+                pass
+        self._rtu_tap_transport = None
+        self._rtu_tap_callback = None
+
     def _start_serial_capture(self):
         """Start serial port data capture."""
         if not HAS_PYSERIAL:
@@ -456,7 +502,9 @@ class PacketCaptureWorker(QObject):
             self._serial_thread.start()
 
             try:
-                self.packet_captured.emit(f"DEBUG: started serial capture on {self._serial_port} at {self._serial_baudrate} baud")
+                self.packet_captured.emit(
+                    f"[SERIAL] Opened {self._serial_port} at {self._serial_baudrate} baud (standalone mode)"
+                )
             except Exception:
                 pass
 
@@ -501,7 +549,7 @@ class PacketCaptureWorker(QObject):
         except Exception:
             pass
 
-    def _process_serial_frame(self, data: bytes):
+    def _process_serial_frame(self, data: bytes, direction: str = 'RX'):
         """Process a complete serial frame and emit it."""
         try:
             ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
@@ -510,12 +558,14 @@ class PacketCaptureWorker(QObject):
             hex_data = binascii.hexlify(data).decode()
             ascii_data = data.decode('ascii', errors='replace')
 
+            # Direction arrow
+            arrow = '→' if direction == 'TX' else '←'
+
             details = []
-            details.append(f"[{ts}] [SERIAL] FRAME ({len(data)} bytes)\n")
-            details.append(f"  PORT: {self._serial_port}\n")
-            details.append(f"  BAUD: {self._serial_baudrate}\n")
-            details.append(f"  HEX : {hex_data}\n")
-            details.append(f"  ASCII: {ascii_data}\n")
+            details.append(f"[{ts}] [SERIAL] [{direction}] FRAME ({len(data)} bytes)\n")
+            details.append(f"  PORT: {self._serial_port or getattr(getattr(self._rtu_tap_transport, 'config', None), 'port', '?')}\n")
+            details.append(f"  {arrow}  HEX : {hex_data}\n")
+            details.append(f"  {arrow}  ASCII: {ascii_data}\n")
 
             # Try to parse as Modbus RTU if it looks like it
             if len(data) >= 4:  # Minimum Modbus RTU frame
@@ -607,11 +657,15 @@ class PacketCaptureWorker(QObject):
                     self._serial_thread = None
                     # Serial connection is closed in the read loop
 
+            # Stop RTU tap (eavesdrop mode) if active
+            self.stop_rtu_tap()
+
         except Exception as e:
             try:
                 self.error_occurred.emit(f"Failed to stop capture: {e}")
             except Exception:
                 pass
+
 
     # --- dumpcap FIFO helpers ---
     def _start_dumpcap_fifo(self, filter_str: str = "", iface: str = None) -> bool:
