@@ -2233,31 +2233,39 @@ class IEC61850ServerAdapter(BaseProtocol):
                             # For safety, let's search all CILO nodes in our signal definitions for this LD.
                             cilo_lns = []
                             for sig_ref in self._value_cache.keys():
-                                # e.g. ABBK3A03A1CTRL/DCCILO1.EnaOpn.stVal
-                                if "CILO" in sig_ref and "Ena" in sig_ref:
+                                # Ensure the CILO is in the exact same Logical Device
+                                if sig_ref.startswith(ld_name + '/') and "CILO" in sig_ref and "Ena" in sig_ref:
                                     cilo_lns.append(sig_ref)
                             
                             target_ena = "EnaCls.stVal" if is_close else "EnaOpn.stVal"
+                            logger.info(f"[SBO] Interlock check requested. Direction Close={is_close}. Searching for {target_ena} in {ld_name}")
                             
-                            # Extremely simple heuristic: check the first matching EnaOpn or EnaCls
-                            # in a real system, you map the specific SWI to a specific CILO via ExtRef.
-                            # Here, we just look for any matching stVal in the device.
                             interlock_passed = True # Default pass if no interlocking node found
                             
                             for c_ref in cilo_lns:
                                 if target_ena in c_ref:
                                     # Found an interlocking node for this direction!
+                                    logger.info(f"[SBO] Found matching interlock node: {c_ref}")
+                                    
                                     # Check its value in the local C model directly
                                     node_ptr = lib.IedModel_getModelNodeByObjectReference(self.model, c_ref.encode('utf-8'))
+                                    if not node_ptr and c_ref.startswith(self.ied_name):
+                                        stripped_ref = c_ref[len(self.ied_name):]
+                                        node_ptr = lib.IedModel_getModelNodeByObjectReference(self.model, stripped_ref.encode('utf-8'))
+                                        
                                     if node_ptr:
                                         da_ptr = ctypes.cast(node_ptr, ctypes.POINTER(lib.DataAttribute))
                                         mms_val = lib.IedServer_getAttributeValue(self.server, da_ptr)
                                         if mms_val and lib.MmsValue_getType(mms_val) == lib.MMS_BOOLEAN:
                                             ena_val = lib.MmsValue_getBoolean(mms_val)
-                                            logger.info(f"[SBO] Interlock check {c_ref} -> {ena_val}")
+                                            logger.info(f"[SBO] Interlock check {c_ref} physical value -> {ena_val}")
                                             if not ena_val:
                                                 interlock_passed = False
-                                            break
+                                        else:
+                                            logger.warning(f"[SBO] Could not read boolean from {c_ref}")
+                                    else:
+                                        logger.warning(f"[SBO] Node pointer not found in C-model for {c_ref}")
+                                    break
                             
                             if not interlock_passed:
                                 logger.warning(f"[SBO] Interlocking condition blocked Operate for {ref}")
