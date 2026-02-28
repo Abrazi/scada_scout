@@ -771,13 +771,23 @@ class DeviceManagerCore(EventEmitter):
             return None
 
     def write_signal(self, device_name: str, signal: Signal, value: Any) -> bool:
+        print(f"[DM DEBUG] write_signal called for device: {device_name}, signal: {signal.address}")
         protocol = self._protocols.get(device_name)
-        if not protocol or not hasattr(protocol, 'write_signal'):
+        if not protocol:
+            print(f"[DM DEBUG] protocol not found for {device_name}")
             return False
+        if not hasattr(protocol, 'write_signal'):
+            print(f"[DM DEBUG] protocol {type(protocol)} has no write_signal")
+            return False
+            
+        print(f"[DM DEBUG] delegating write to protocol {type(protocol)}")
         try:
-            return bool(protocol.write_signal(signal, value))
+            res = protocol.write_signal(signal, value)
+            print(f"[DM DEBUG] protocol.write_signal returned {res}")
+            return bool(res)
         except Exception as e:
             logger.warning(f"Failed to write signal {signal.address} to {device_name}: {e}")
+            print(f"[DM DEBUG] exception in write: {e}")
             return False
 
     def parse_unique_address(self, unique_address: str):

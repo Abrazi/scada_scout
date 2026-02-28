@@ -4,7 +4,7 @@ import os
 import sys
 import tempfile
 import xml.etree.ElementTree as ET
-from typing import Optional
+from typing import Optional, Any
 
 from src.protocols.base_protocol import BaseProtocol
 from src.models.device_models import DeviceConfig, Node, Signal, SignalQuality
@@ -658,11 +658,167 @@ class IEC61850ServerAdapter(BaseProtocol):
         return parser.get_structure(self.ied_name)
 
     def read_signal(self, signal: Signal) -> Signal:
-        """Return cached value (if any) for UI reads."""
+        """Return cached value or direct C-level value for UI reads."""
+        import ctypes
+        
+        # Try direct read if server is active
+        if self.server:
+            target_addr = signal.address
+            if target_addr.startswith(self.ied_name):
+                target_addr = target_addr[len(self.ied_name):]
+                
+            node_ptr = lib.IedModel_getModelNodeByObjectReference(self.model, signal.address.encode('utf-8'))
+            if not node_ptr:
+                node_ptr = lib.IedModel_getModelNodeByObjectReference(self.model, target_addr.encode('utf-8'))
+                
+            if node_ptr:
+                da_ptr = ctypes.cast(node_ptr, ctypes.POINTER(lib.DataAttribute))
+                mms_val = lib.IedServer_getAttributeValue(self.server, da_ptr)
+                if mms_val:
+                    parsed_val = self._parse_mms_value(mms_val)
+                    if parsed_val is not None:
+                        signal.value = parsed_val
+                        signal.quality = SignalQuality.GOOD
+                        self._value_cache[signal.address] = parsed_val
+                        return signal
+
+        # Fallback to cache
         value = self._value_cache.get(signal.address)
         signal.value = value
         signal.quality = SignalQuality.GOOD
         return signal
+
+    def _parse_mms_value(self, mms_val) -> Any:
+        if not mms_val:
+            return None
+        vtype = lib.MmsValue_getType(mms_val)
+        if vtype == lib.MMS_BOOLEAN:
+            return lib.MmsValue_getBoolean(mms_val)
+        elif vtype in (lib.MMS_INTEGER, lib.MMS_UNSIGNED):
+            return lib.MmsValue_toInt32(mms_val)
+        elif vtype == lib.MMS_FLOAT:
+            return lib.MmsValue_toFloat(mms_val)
+        elif vtype == lib.MMS_VISIBLE_STRING:
+            # MMS string might need decoding
+            s = lib.MmsValue_toString(mms_val)
+            if hasattr(s, 'decode'):
+                return s.decode('utf-8')
+            return s
+        elif vtype == lib.MMS_BIT_STRING:
+            if hasattr(lib, "MmsValue_getBitStringAsInteger"):
+                return lib.MmsValue_getBitStringAsInteger(mms_val)
+            size = lib.MmsValue_getBitStringSize(mms_val)
+            val = 0
+            for i in range(size):
+                if lib.MmsValue_getBitStringBit(mms_val, i): val |= (1 << i)
+            return val
+        return f"[MmsType {vtype}]"
+
+    def write_signal(self, signal: Signal, value: Any) -> bool:
+        """
+        Manually inject a raw value into a server attribute (e.g. stVal via UI or Python Scripts).
+        Because this is a simulated server, we directly update the underlying MmsValue.
+        """
+        try:
+            if not self.server:
+                return False
+
+            # libiec61850 expects the address starting with the Logical Device (e.g. CTRL/...)
+            # The signal.address might be pre-fixed with IED name (e.g. ABBK3A03A1CTRL/...)
+            target_addr = signal.address
+            if target_addr.startswith(self.ied_name):
+                target_addr = target_addr[len(self.ied_name):]
+
+            import ctypes
+
+            # 1. Resolve string address to ModelNode pointer using the IedModel
+            # Object reference format is e.g. "CTRL/DCCILO1.EnaOpn.stVal" or "ABBK3A03A1CTRL/DCCILO1.EnaOpn.stVal"
+            # IedModel_getModelNodeByObjectReference usually DOES expect the IED name prefix!
+            node_ptr = lib.IedModel_getModelNodeByObjectReference(self.model, signal.address.encode('utf-8'))
+            if not node_ptr:
+                print(f"[DEBUG WRITE] Target attribute {signal.address} not found in model by full ObjectReference.", flush=True)
+                
+                # Fallback: try with the IED name stripped just in case
+                node_ptr = lib.IedModel_getModelNodeByObjectReference(self.model, target_addr.encode('utf-8'))
+                if not node_ptr:
+                    print(f"[DEBUG WRITE] Target attribute {target_addr} not found in model by stripped ObjectReference.", flush=True)
+                    logger.warning(f"write_signal: Target attribute {signal.address} does not exist.")
+                    return False
+
+            # Cast the ModelNode pointer to a DataAttribute pointer
+            # In libiec61850's object model, DataAttribute extends ModelNode
+            da_ptr = ctypes.cast(node_ptr, ctypes.POINTER(lib.DataAttribute))
+
+            # 2. Get the exact node type to build the right MmsValue
+            target_mms_val = lib.IedServer_getAttributeValue(self.server, da_ptr)
+            if not target_mms_val:
+                print(f"[DEBUG WRITE] Target attribute {target_addr} exists but couldn't get MmsValue.", flush=True)
+                logger.warning(f"write_signal: Could not read MmsValue for {target_addr}.")
+                return False
+
+            target_type = lib.MmsValue_getType(target_mms_val)
+            val_str = str(value).lower().strip()
+            
+            # Helper to parse boolean from common UI inputs
+            is_truthy = val_str in ("true", "1", "on", "yes", "high")
+            
+            new_mms_val = None
+            handled_dbpos = False
+
+            try:
+                if target_type == lib.MMS_BOOLEAN:
+                    new_mms_val = lib.MmsValue_newBoolean(is_truthy)
+                
+                elif target_type in (lib.MMS_INTEGER, lib.MMS_UNSIGNED):
+                    val_int = int(float(value)) if not isinstance(value, str) or value.isnumeric() else (1 if is_truthy else 0)
+                    if hasattr(lib, "MmsValue_newIntegerFromInt32"):
+                        new_mms_val = lib.MmsValue_newIntegerFromInt32(val_int)
+                    elif hasattr(lib, "MmsValue_newInteger"):
+                        new_mms_val = lib.MmsValue_newInteger(val_int)
+                
+                elif target_type == lib.MMS_BIT_STRING:
+                    # Specific exception for Dbpos (2-bit string)
+                    if hasattr(lib, "MmsValue_getBitStringSize") and lib.MmsValue_getBitStringSize(target_mms_val) == 2:
+                        val_int = int(float(value)) if not isinstance(value, str) or value.isnumeric() else (2 if is_truthy else 1)
+                        if hasattr(lib, "IedServer_updateDbposValue"):
+                            lib.IedServer_updateDbposValue(self.server, da_ptr, val_int)
+                            logger.debug(f"[SERVER_WRITE] Handled Dbpos BitString override for {target_addr}")
+                            print(f"[DEBUG WRITE] Dbpos handled, returning True")
+                            handled_dbpos = True
+                
+                elif target_type == lib.MMS_FLOAT:
+                    val_float = float(value)
+                    if hasattr(lib, "MmsValue_newFloat"):
+                        new_mms_val = lib.MmsValue_newFloat(val_float)
+                
+                elif target_type == lib.MMS_VISIBLE_STRING:
+                    if hasattr(lib, "MmsValue_newVisibleString"):
+                        new_mms_val = lib.MmsValue_newVisibleString(val_str.encode('utf-8'))
+                
+            except ValueError as ve:
+                logger.error(f"write_signal: Cannot cast '{value}' for MmsType {target_type}: {ve}")
+                print(f"[DEBUG WRITE] ValueError during parsing/writing MMS value: {ve}, returning False")
+                return False
+
+            if new_mms_val and not handled_dbpos:
+                lib.IedServer_updateAttributeValue(self.server, da_ptr, new_mms_val)
+                lib.MmsValue_delete(new_mms_val)
+                logger.info(f"[SERVER_WRITE] Injected {value} into {signal.address}")
+                print(f"[DEBUG WRITE] Injected new_mms_val into {signal.address}, returning True")
+                return True
+            elif handled_dbpos:
+                logger.info(f"[SERVER_WRITE] Injected Dbpos state {value} into {signal.address}")
+                print(f"[DEBUG WRITE] Injected Dbpos state into {signal.address}, returning True")
+                return True
+            else:
+                logger.warning(f"[SERVER_WRITE] Unsupported target MMS type {target_type} for manual write")
+                print(f"[DEBUG WRITE] Unsupported target MMS type {target_type} for {signal.address}, returning False")
+                return False
+                
+        except Exception as e:
+            logger.exception(f"Exception during server_adapter.write_signal: {e}")
+            print(f"[DEBUG WRITE] Exception during parsing/writing MMS value: {e}, returning False")
+            return False
 
     def _create_filtered_scd(self, scd_path: str, ied_name: str) -> str:
         """Create a temporary SCD containing only the selected IED and its Communication entries."""
@@ -1452,7 +1608,7 @@ class IEC61850ServerAdapter(BaseProtocol):
         """Register SBO select/operate handlers for control DOs defined in the SCD."""
         disable_sbo = os.environ.get(
             "IEC61850_DISABLE_SBO_REGISTRATION",
-            "true" if os.name != "nt" else "false",
+            "false",  # Enabled on all platforms by default
         ).lower() == "true"
         if disable_sbo:
             print("[SBO_REGISTER] Disabled via IEC61850_DISABLE_SBO_REGISTRATION", flush=True)
@@ -1587,10 +1743,38 @@ class IEC61850ServerAdapter(BaseProtocol):
                 ctl_model_da = None  # Will search for it
             
             print(f"[SBO_REGISTER] Processing {ref}: ctlModel={ctl_model_val}, DA={ctl_model_da}", flush=True)
-            
-            # Only register handlers for SBO controls (not status-only or direct)
+
+            # --- Direct control (no SBO): register a simple control handler only ---
             if "sbo" not in ctl_model_str.lower():
-                print(f"[SBO_REGISTER] Skipping non-SBO control: {ref} ({ctl_model_str})", flush=True)
+                if "status" in ctl_model_str.lower():
+                    print(f"[SBO_REGISTER] Skipping status-only: {ref} ({ctl_model_str})", flush=True)
+                    continue
+                try:
+                    if not data_object:
+                        continue
+                    direct_ctx = {
+                        "ref": ref,
+                        "st_val": self._get_child_attribute(data_object, "stVal"),
+                        "op_ok": self._get_child_attribute(data_object, "opOk"),
+                        "t": self._get_child_attribute(data_object, "t"),
+                    }
+                    try:
+                        lib.IedServer_updateCtlModel(self.server, data_object, ctl_model_val)
+                    except Exception as e:
+                        logger.debug(f"[DIRECT] Failed to set ctlModel for {ref}: {e}")
+                    direct_handler = self._make_sbo_control_handler(direct_ctx)
+                    direct_param = ctypes.py_object(direct_ctx)
+                    direct_p_obj = ctypes.pointer(direct_param)
+                    direct_param_ptr = ctypes.cast(direct_p_obj, ctypes.c_void_p)
+                    lib.IedServer_setControlHandler(self.server, data_object, direct_handler, direct_param_ptr)
+                    self._control_handlers.append((None, direct_handler))
+                    self._control_handler_params.append(direct_param)
+                    self._control_handler_ptrs.append(direct_p_obj)
+                    logger.info(f"✓ Registered direct-control handler for {ref} (ctlModel={ctl_model_str})")
+                    print(f"[SBO_REGISTER] ✓ Direct-control handler for {ref}", flush=True)
+                    registered_count += 1
+                except Exception as e:
+                    logger.error(f"[DIRECT] Failed to register handler for {ref}: {e}", exc_info=True)
                 continue
 
             required_attrs = sorted(self._required_sbo_dais(ctl_model_str))
@@ -1622,7 +1806,7 @@ class IEC61850ServerAdapter(BaseProtocol):
                 try:
                     update_ctlmodel_da = os.environ.get(
                         "IEC61850_SBO_UPDATE_CTLMODEL_DA",
-                        "true" if os.name == "nt" else "false",
+                        "true",  # Enabled on all platforms by default
                     ).lower() == "true"
                     if not update_ctlmodel_da:
                         print(f"[SBO_REGISTER] Skipping ctlModel DA update for {ref}", flush=True)
@@ -1844,8 +2028,48 @@ class IEC61850ServerAdapter(BaseProtocol):
             lib.DataAttribute_create(b"t", do_node, lib.IEC61850_TIMESTAMP, lib.IEC61850_FC_ST, 0, 0, 0)
             
             # Create control attributes (FC=CO)
+            # SBOw struct (required for sbo-with-enhanced-security)
+            sbow = lib.DataAttribute_create(b"SBOw", do_node, lib.IEC61850_CONSTRUCTED, lib.IEC61850_FC_CO, 0, 0, 0)
+            if sbow:
+                sbow_node = ctypes.cast(sbow, ctypes.POINTER(lib.ModelNode))
+                lib.DataAttribute_create(b"ctlVal", sbow_node, lib.IEC61850_ENUMERATED, lib.IEC61850_FC_CO, 0, 0, 0)
+                sbow_origin = lib.DataAttribute_create(b"origin", sbow_node, lib.IEC61850_CONSTRUCTED, lib.IEC61850_FC_CO, 0, 0, 0)
+                if sbow_origin:
+                    sbow_orig_node = ctypes.cast(sbow_origin, ctypes.POINTER(lib.ModelNode))
+                    lib.DataAttribute_create(b"orCat", sbow_orig_node, lib.IEC61850_ENUMERATED, lib.IEC61850_FC_CO, 0, 0, 0)
+                    lib.DataAttribute_create(b"orIdent", sbow_orig_node, lib.IEC61850_OCTET_STRING_64, lib.IEC61850_FC_CO, 0, 0, 0)
+                lib.DataAttribute_create(b"ctlNum", sbow_node, lib.IEC61850_INT8U, lib.IEC61850_FC_CO, 0, 0, 0)
+                lib.DataAttribute_create(b"T", sbow_node, lib.IEC61850_TIMESTAMP, lib.IEC61850_FC_CO, 0, 0, 0)
+                lib.DataAttribute_create(b"Test", sbow_node, lib.IEC61850_BOOLEAN, lib.IEC61850_FC_CO, 0, 0, 0)
+                lib.DataAttribute_create(b"Check", sbow_node, lib.IEC61850_CHECK, lib.IEC61850_FC_CO, 0, 0, 0)
+
+            # Oper struct (required by all clients for the operate service)
+            oper = lib.DataAttribute_create(b"Oper", do_node, lib.IEC61850_CONSTRUCTED, lib.IEC61850_FC_CO, 0, 0, 0)
+            if oper:
+                oper_node = ctypes.cast(oper, ctypes.POINTER(lib.ModelNode))
+                lib.DataAttribute_create(b"ctlVal", oper_node, lib.IEC61850_ENUMERATED, lib.IEC61850_FC_CO, 0, 0, 0)
+                oper_origin = lib.DataAttribute_create(b"origin", oper_node, lib.IEC61850_CONSTRUCTED, lib.IEC61850_FC_CO, 0, 0, 0)
+                if oper_origin:
+                    oper_orig_node = ctypes.cast(oper_origin, ctypes.POINTER(lib.ModelNode))
+                    lib.DataAttribute_create(b"orCat", oper_orig_node, lib.IEC61850_ENUMERATED, lib.IEC61850_FC_CO, 0, 0, 0)
+                    lib.DataAttribute_create(b"orIdent", oper_orig_node, lib.IEC61850_OCTET_STRING_64, lib.IEC61850_FC_CO, 0, 0, 0)
+                lib.DataAttribute_create(b"ctlNum", oper_node, lib.IEC61850_INT8U, lib.IEC61850_FC_CO, 0, 0, 0)
+                lib.DataAttribute_create(b"T", oper_node, lib.IEC61850_TIMESTAMP, lib.IEC61850_FC_CO, 0, 0, 0)
+                lib.DataAttribute_create(b"Test", oper_node, lib.IEC61850_BOOLEAN, lib.IEC61850_FC_CO, 0, 0, 0)
+                lib.DataAttribute_create(b"Check", oper_node, lib.IEC61850_CHECK, lib.IEC61850_FC_CO, 0, 0, 0)
+
+            # Cancel struct
+            cancel = lib.DataAttribute_create(b"Cancel", do_node, lib.IEC61850_CONSTRUCTED, lib.IEC61850_FC_CO, 0, 0, 0)
+            if cancel:
+                cancel_node = ctypes.cast(cancel, ctypes.POINTER(lib.ModelNode))
+                lib.DataAttribute_create(b"ctlVal", cancel_node, lib.IEC61850_ENUMERATED, lib.IEC61850_FC_CO, 0, 0, 0)
+                lib.DataAttribute_create(b"ctlNum", cancel_node, lib.IEC61850_INT8U, lib.IEC61850_FC_CO, 0, 0, 0)
+                lib.DataAttribute_create(b"T", cancel_node, lib.IEC61850_TIMESTAMP, lib.IEC61850_FC_CO, 0, 0, 0)
+                lib.DataAttribute_create(b"Test", cancel_node, lib.IEC61850_BOOLEAN, lib.IEC61850_FC_CO, 0, 0, 0)
+
+            # ctlVal at top-level for direct/SBO-normal modes
             lib.DataAttribute_create(b"ctlVal", do_node, lib.IEC61850_ENUMERATED, lib.IEC61850_FC_CO, 0, 0, 0)
-            
+
             # Create origin structure (FC=CO)
             origin = lib.DataAttribute_create(b"origin", do_node, lib.IEC61850_CONSTRUCTED, lib.IEC61850_FC_CO, 0, 0, 0)
             if origin:
@@ -1935,6 +2159,7 @@ class IEC61850ServerAdapter(BaseProtocol):
         @lib.ControlPerformCheckHandler
         def _handler(action, _param, value, _test, _interlock_check):
             try:
+                import ctypes
                 ref = ctx["ref"]
                 now = int(lib.Hal_getTimeInMs())
 
@@ -1954,28 +2179,105 @@ class IEC61850ServerAdapter(BaseProtocol):
                     return lib.CONTROL_ACCEPTED
 
                 # Operate: require prior selection
-                if lib.ControlAction_isOperate(action):
+                if not lib.ControlAction_isSelect(action):
                     logger.info(f"[SBO] Operate request received for {ref}")
                     selected_at = self._sbo_state.get(ref)
                     
                     if not selected_at:
                         logger.warning(f"[SBO] {ref} not selected - rejecting operate")
-                        lib.ControlAction_setAddCause(action, lib.ADD_CAUSE_OBJECT_NOT_SELECTED)
+                        try:
+                            # Not all versions have setAddCause
+                            if hasattr(lib, "ControlAction_setAddCause"):
+                                lib.ControlAction_setAddCause(action, lib.ADD_CAUSE_OBJECT_NOT_SELECTED)
+                        except Exception:
+                            pass
                         return lib.CONTROL_WAITING_FOR_SELECT
                     
                     if (now - selected_at) > self._sbo_select_timeout_ms:
                         logger.warning(f"[SBO] {ref} selection expired (age={(now-selected_at)}ms)")
-                        lib.ControlAction_setAddCause(action, lib.ADD_CAUSE_OBJECT_NOT_SELECTED)
+                        try:
+                            if hasattr(lib, "ControlAction_setAddCause"):
+                                lib.ControlAction_setAddCause(action, lib.ADD_CAUSE_OBJECT_NOT_SELECTED)
+                        except Exception:
+                            pass
                         return lib.CONTROL_WAITING_FOR_SELECT
 
-                    logger.info(f"[SBO] ✓ Operate ACCEPTED for {ref} (selected {now-selected_at}ms ago)")
-                    return lib.CONTROL_ACCEPTED
+                # Process Interlocking Check
+                if _interlock_check and hasattr(lib, "MmsValue_getBoolean"):
+                    # ref is e.g. "ABBK3A03A1CTRL/CBCSWI1.Pos" or "CTRL/CBCSWI1.Pos"
+                    # We need to find the equivalent CILO e.g. "CTRL/DCCILO1.EnaOpn.stVal"
+                    try:
+                        cmd_val_type = lib.MmsValue_getType(value)
+                        is_close = False # True = Close (1/On/True), False = Open (0/Off/False)
+                        
+                        if cmd_val_type == lib.MMS_BOOLEAN:
+                            is_close = lib.MmsValue_getBoolean(value)
+                        elif cmd_val_type in (lib.MMS_INTEGER, lib.MMS_UNSIGNED):
+                            is_close = bool(lib.MmsValue_toInt32(value))
+                        elif cmd_val_type == lib.MMS_BIT_STRING:
+                            # Usually 2-bit for Pos: 01=Off(Open), 10=On(Close)
+                            if hasattr(lib, "MmsValue_getBitStringAsInteger"):
+                                bit_val = lib.MmsValue_getBitStringAsInteger(value)
+                                if bit_val == 2: is_close = True  # 10=on
+                                elif bit_val == 1: is_close = False # 01=off
+                        
+                        # Find LD and Prefix of the control object
+                        # "CTRL/CBCSWI1.Pos" -> ld="CTRL", ln="CBCSWI1"
+                        ref_parts = ref.split('/')
+                        if len(ref_parts) == 2:
+                            ld_name = ref_parts[0]
+                            ln_part = ref_parts[1].split('.')[0] # CBCSWI1
+                            
+                            # Guess the CILO name. Often it shares inst or prefix. Or it's just 'CILO1'
+                            # e.g. if we are CBCSWI1, look for CILO1 in the same LD.
+                            # For safety, let's search all CILO nodes in our signal definitions for this LD.
+                            cilo_lns = []
+                            for sig_ref in self._value_cache.keys():
+                                # e.g. ABBK3A03A1CTRL/DCCILO1.EnaOpn.stVal
+                                if "CILO" in sig_ref and "Ena" in sig_ref:
+                                    cilo_lns.append(sig_ref)
+                            
+                            target_ena = "EnaCls.stVal" if is_close else "EnaOpn.stVal"
+                            
+                            # Extremely simple heuristic: check the first matching EnaOpn or EnaCls
+                            # in a real system, you map the specific SWI to a specific CILO via ExtRef.
+                            # Here, we just look for any matching stVal in the device.
+                            interlock_passed = True # Default pass if no interlocking node found
+                            
+                            for c_ref in cilo_lns:
+                                if target_ena in c_ref:
+                                    # Found an interlocking node for this direction!
+                                    # Check its value in the local C model directly
+                                    node_ptr = lib.IedModel_getModelNodeByObjectReference(self.model, c_ref.encode('utf-8'))
+                                    if node_ptr:
+                                        da_ptr = ctypes.cast(node_ptr, ctypes.POINTER(lib.DataAttribute))
+                                        mms_val = lib.IedServer_getAttributeValue(self.server, da_ptr)
+                                        if mms_val and lib.MmsValue_getType(mms_val) == lib.MMS_BOOLEAN:
+                                            ena_val = lib.MmsValue_getBoolean(mms_val)
+                                            logger.info(f"[SBO] Interlock check {c_ref} -> {ena_val}")
+                                            if not ena_val:
+                                                interlock_passed = False
+                                            break
+                            
+                            if not interlock_passed:
+                                logger.warning(f"[SBO] Interlocking condition blocked Operate for {ref}")
+                                try:
+                                    if hasattr(lib, "ControlAction_setAddCause"):
+                                        lib.ControlAction_setAddCause(action, lib.ADD_CAUSE_BLOCKED_BY_INTERLOCKING)
+                                except Exception:
+                                    pass
+                                return lib.CONTROL_OBJECT_ACCESS_DENIED
+                                
+                    except Exception as ie:
+                        logger.error(f"[SBO] Interlock evaluation error: {ie}")
+
+                logger.info(f"[SBO] ✓ Operate ACCEPTED for {ref} (selected {now-selected_at}ms ago)")
+                return lib.CONTROL_ACCEPTED
                 
                 logger.debug(f"[SBO] Unknown action type for {ref}")
                 return lib.CONTROL_ACCEPTED
             except Exception as e:
                 logger.error(f"[SBO] Exception in check handler for {ref}: {e}", exc_info=True)
-                return lib.CONTROL_OBJECT_ACCESS_DENIED
         return _handler
 
     def _make_sbo_control_handler(self, ctx):
@@ -1985,26 +2287,63 @@ class IEC61850ServerAdapter(BaseProtocol):
                 ref = ctx["ref"]
                 logger.info(f"[SBO] Control handler invoked for {ref}")
                 
-                state = False
+                val_type = lib.MmsValue_getType(value) if value else None
+                state_bool = False
+                state_int = -1
+                
+                # First extract the raw value intent
                 try:
-                    state = bool(lib.MmsValue_getBoolean(value)) if value else False
-                    logger.debug(f"[SBO] Control value for {ref}: {state}")
+                    if val_type == lib.MMS_BOOLEAN:
+                        state_bool = bool(lib.MmsValue_getBoolean(value))
+                        state_int = 2 if state_bool else 1  # Standard Dbpos mapping: 2=ON, 1=OFF
+                        logger.debug(f"[SBO] Control value (bool) for {ref}: {state_bool}")
+                    elif val_type in (lib.MMS_INTEGER, lib.MMS_UNSIGNED):
+                        if hasattr(lib, "MmsValue_toInt32"):
+                            state_int = int(lib.MmsValue_toInt32(value))
+                        elif hasattr(lib, "MmsValue_toUint32"):
+                            state_int = int(lib.MmsValue_toUint32(value))
+                        state_bool = True if state_int > 0 else False
+                        logger.debug(f"[SBO] Control value (int) for {ref}: {state_int}")
+                    else:
+                        logger.warning(f"[SBO] Unhandled value type {val_type} for {ref}")
                 except Exception as e:
                     logger.warning(f"[SBO] Failed to read control value: {e}")
 
-                # Update opOk if available
+                # Update opOk if available (usually boolean)
                 if ctx.get("op_ok"):
                     op_ok_val = lib.MmsValue_newBoolean(True)
                     lib.IedServer_updateAttributeValue(self.server, ctx["op_ok"], op_ok_val)
                     lib.MmsValue_delete(op_ok_val)
                     logger.debug(f"[SBO] Updated opOk for {ref}")
 
-                # Update stVal if available
+                # Update stVal if available by inspecting its target type
                 if ctx.get("st_val"):
-                    st_val = lib.MmsValue_newBoolean(state)
-                    lib.IedServer_updateAttributeValue(self.server, ctx["st_val"], st_val)
-                    lib.MmsValue_delete(st_val)
-                    logger.debug(f"[SBO] Updated stVal={state} for {ref}")
+                    target_mms_val = lib.IedServer_getAttributeValue(self.server, ctx["st_val"])
+                    target_type = lib.MmsValue_getType(target_mms_val) if target_mms_val else None
+                    new_mms_val = None
+                    handled_dbpos = False
+
+                    if target_type == lib.MMS_BOOLEAN:
+                        new_mms_val = lib.MmsValue_newBoolean(state_bool)
+                    elif target_type in (lib.MMS_INTEGER, lib.MMS_UNSIGNED):
+                        if hasattr(lib, "MmsValue_newIntegerFromInt32"):
+                            new_mms_val = lib.MmsValue_newIntegerFromInt32(state_int)
+                        elif hasattr(lib, "MmsValue_newInteger"):
+                            new_mms_val = lib.MmsValue_newInteger(state_int)
+                    elif target_type == lib.MMS_BIT_STRING:
+                        # Dbpos is represented as a 2-bit bitstring
+                        if hasattr(lib, "MmsValue_getBitStringSize") and lib.MmsValue_getBitStringSize(target_mms_val) == 2:
+                            if hasattr(lib, "IedServer_updateDbposValue"):
+                                lib.IedServer_updateDbposValue(self.server, ctx["st_val"], state_int)
+                                logger.debug(f"[SBO] Updated stVal via IedServer_updateDbposValue for {ref}")
+                                handled_dbpos = True
+
+                    if new_mms_val and not handled_dbpos:
+                        lib.IedServer_updateAttributeValue(self.server, ctx["st_val"], new_mms_val)
+                        lib.MmsValue_delete(new_mms_val)
+                        logger.debug(f"[SBO] Updated stVal (type {target_type}) for {ref}")
+                    elif not handled_dbpos:
+                        logger.warning(f"[SBO] Could not create stVal update for target_type={target_type}")
 
                 # Update timestamp if available
                 if ctx.get("t"):
@@ -2014,7 +2353,7 @@ class IEC61850ServerAdapter(BaseProtocol):
 
                 # Clear selection on operate
                 self._sbo_state.pop(ref, None)
-                logger.info(f"[SBO] ✓ Control operation completed for {ref} (state={state})")
+                logger.info(f"[SBO] ✓ Control operation completed for {ref} (state={state_bool})")
                 return lib.CONTROL_RESULT_OK
             except Exception as e:
                 logger.error(f"[SBO] Exception in control handler for {ref}: {e}", exc_info=True)

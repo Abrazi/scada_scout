@@ -1323,7 +1323,7 @@ class DeviceTreeWidget(QWidget):
                     
                     # Control Switchgear (Global search)
                     control_all_action = QAction("Control Switchgear (Global Discovery)...", self)
-                    control_all_action.triggered.connect(lambda d=device_name, n=device.root_node: self._invoke_switchgear_control_flow(d, n))
+                    control_all_action.triggered.connect(lambda checked=False, d=device_name, n=device.root_node: self._invoke_switchgear_control_flow(d, n))
                     menu.addAction(control_all_action)
                     
                     menu.addSeparator()
@@ -1613,6 +1613,15 @@ class DeviceTreeWidget(QWidget):
                     read_action.triggered.connect(lambda: self._manual_read_signal(device_name, signal))
                     menu.addAction(read_action)
                     
+                    # Context menu for manual ST injection on simulated servers
+                    device = self._resolve_device(device_name, root_item)
+                    if device and getattr(device.config, 'device_type', None) == DeviceType.IEC61850_SERVER:
+                        inject_action = QAction("Set Value / Inject...", self)
+                        # We use signal as target_node and construct full_address
+                        full_address_sig = f"{device_name}::{signal.address}"
+                        inject_action.triggered.connect(lambda checked=False, d=device_name, n=signal, a=full_address_sig: self._prompt_inject_value(d, n, a))
+                        menu.addAction(inject_action)
+                    
                     # Data Inspector (for Modbus signals only)
                     device = self._resolve_device(device_name, root_item)
                     if device and device.config.device_type in (DeviceType.MODBUS_TCP, DeviceType.MODBUS_SERVER):
@@ -1644,11 +1653,12 @@ class DeviceTreeWidget(QWidget):
 
                 # Logical Device specific: Control Switchgear (CSWI Pos.Oper.ctlVal)
                 is_logical_device = bool(device_name and full_address and "/" not in full_address)
+                device = self._resolve_device(device_name, root_item) if device_name else None
+                
                 if is_logical_device:
-                    device = self._resolve_device(device_name, root_item) if device_name else None
                     if device and device.config.device_type in (DeviceType.IEC61850_IED, DeviceType.IEC61850_SERVER):
                         control_switchgear_action = QAction("Control Switchgear...", self)
-                        control_switchgear_action.triggered.connect(lambda d=device_name, n=node: self._invoke_switchgear_control_flow(d, n))
+                        control_switchgear_action.triggered.connect(lambda checked=False, d=device_name, n=node: self._invoke_switchgear_control_flow(d, n))
                         menu.addAction(control_switchgear_action)
                         menu.addSeparator()
                 
@@ -1656,11 +1666,18 @@ class DeviceTreeWidget(QWidget):
                 copy_action.triggered.connect(lambda: self._copy_to_clipboard(full_address))
                 menu.addAction(copy_action)
                 
+                # Context menu for manual ST injection on simulated servers
+                if device and getattr(device.config, 'device_type', None) == DeviceType.IEC61850_SERVER:
+                    inject_action = QAction("Set Value / Inject...", self)
+                    inject_action.triggered.connect(lambda checked=False, d=device_name, n=node, a=full_address: self._prompt_inject_value(d, n, a))
+                    # Optionally only enable if we think it's a DA/ST node or DO, but typically any node address is fine
+                    menu.addAction(inject_action)
+
                 # Add to Live Data
                 if hasattr(self, 'signals_view') and self.signals_view and device_name:
                     menu.addSeparator()
                     live_data_action = QAction("Add to Live Data", self)
-                    live_data_action.triggered.connect(lambda n=node, d=device_name: self._add_node_to_live_data(n, d))
+                    live_data_action.triggered.connect(lambda checked=False, n=node, d=device_name: self._add_node_to_live_data(n, d))
                     menu.addAction(live_data_action)
                 
                 # Expand/Collapse for generic node
@@ -1675,6 +1692,40 @@ class DeviceTreeWidget(QWidget):
         
         if menu.actions():
             menu.exec(self.tree_view.viewport().mapToGlobal(position))
+
+    def _prompt_inject_value(self, device_name: str, target_node, full_address: str):
+        """Prompt user for a value and manually inject it into the simulated server attribute."""
+        from PySide6.QtWidgets import QInputDialog, QMessageBox
+
+        # Determine the signal to write to (assume the node itself if it's an attribute)
+        signal = None
+        
+        # If target_node is already a Signal object
+        if hasattr(target_node, 'address') and hasattr(target_node, 'value') and not hasattr(target_node, 'signals'):
+            signal = target_node
+        elif hasattr(target_node, 'signals') and target_node.signals:
+            if len(target_node.signals) == 1:
+                signal = target_node.signals[0]
+            else:
+                # Find the stVal signal if it's a DO
+                signal = next((s for s in target_node.signals if ".stVal" in s.address), None)
+                if not signal and full_address.endswith(".stVal"):
+                    signal = next((s for s in target_node.signals if s.address == full_address.split("::")[-1]), None)
+
+        if not signal:
+            QMessageBox.warning(self, "Injection Error", "Could not determine target signal for injection. Select an attribute node (like stVal).")
+            return
+
+        current_val = getattr(signal, 'value', '')
+        val_str, ok = QInputDialog.getText(self, "Set Value", f"Inject value for {signal.address}:", text=str(current_val))
+        
+        if ok and val_str:
+            success = self.device_manager.write_signal(device_name, signal, val_str)
+            if success:
+                # Immediately poll the value back to reflect UI
+                self._manual_read_signal(device_name, signal)
+            else:
+                QMessageBox.critical(self, "Injection Failed", f"Failed to inject value '{val_str}' into {signal.address}.")
 
     def _invoke_switchgear_control_flow(self, device_name: str, target_node):
         """
