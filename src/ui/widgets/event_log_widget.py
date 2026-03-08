@@ -30,6 +30,26 @@ class EventLogWidget(QWidget):
         self.text_edit.setObjectName("eventLog")
         layout.addWidget(self.text_edit)
         
+        # Filter bar (like Wireshark)
+        filter_bar_layout = QHBoxLayout()
+        
+        lbl_filter = QLabel("Filter:")
+        filter_bar_layout.addWidget(lbl_filter)
+        
+        self.le_filter = QLineEdit()
+        self.le_filter.setPlaceholderText("Filter events (e.g., 'error', 'level:ERROR', 'source:DeviceName', 'connection')")
+        self.le_filter.setMaximumHeight(25)
+        self.le_filter.textChanged.connect(self._on_filter_text_changed)
+        filter_bar_layout.addWidget(self.le_filter)
+        
+        self.btn_filter_clear = QPushButton("✕")
+        self.btn_filter_clear.setMaximumWidth(30)
+        self.btn_filter_clear.setToolTip("Clear filter")
+        self.btn_filter_clear.clicked.connect(lambda: self.le_filter.clear())
+        filter_bar_layout.addWidget(self.btn_filter_clear)
+        
+        layout.addLayout(filter_bar_layout)
+        
         # Control buttons in two rows for better flexibility
         # Row 1: Basic controls
         row1_layout = QHBoxLayout()
@@ -49,8 +69,14 @@ class EventLogWidget(QWidget):
         self.combo_source.addItem("All Sources")
         self.combo_source.addItem("Application")
         self.combo_source.currentTextChanged.connect(self._apply_source_filter)
-        self.combo_source.setMinimumWidth(120)
+        self.combo_source.setMinimumWidth(300)  # Wider to show device details in dropdown
         row1_layout.addWidget(self.combo_source)
+        
+        # Device details label — shows connection info for selected device
+        self.lbl_device_details = QLabel("")
+        self.lbl_device_details.setStyleSheet("color: #808080; font-size: 9px; margin-left: 8px;")
+        self.lbl_device_details.setMinimumWidth(200)
+        row1_layout.addWidget(self.lbl_device_details)
         
         self.btn_clear = QPushButton("🗑️ Clear")
         self.btn_clear.clicked.connect(self.clear_log)
@@ -162,7 +188,9 @@ class EventLogWidget(QWidget):
 
         self.is_paused = False
         self.source_filter = "All Sources"  # or specific device name
+        self.text_filter = ""  # Free-text filter from filter bar
         self._known_device_names: set = set()  # updated by update_device_list()
+        self._device_details: dict = {}  # Maps device name to config details
         self._last_event_sig = None
         
         self.capture_worker = PacketCaptureWorker()
@@ -541,7 +569,11 @@ class EventLogWidget(QWidget):
                 f"{err}\n\nPacket capture requires elevated privileges.\nOn Linux: Try running with sudo\nOn Windows: Run as Administrator")
 
     def update_device_list(self, devices):
-        """Updates the source filter with available devices."""
+        """Updates the source filter with available devices.
+        
+        Displays device names with connection details (IP:port or serial port info).
+        Stores device configs for filtering later.
+        """
         # preserve current selection
         current = self.combo_source.currentText()
 
@@ -552,10 +584,32 @@ class EventLogWidget(QWidget):
         self.combo_source.insertSeparator(2)
 
         self._known_device_names = set()
+        self._device_details.clear()
+        
         for dev in devices:
-            name = dev.config.name if hasattr(dev, 'config') else str(dev)
+            config = dev.config if hasattr(dev, 'config') else None
+            if not config:
+                continue
+                
+            name = config.name
             self._known_device_names.add(name)
-            self.combo_source.addItem(name)
+            
+            # Build display string with device details
+            display_text = self._format_device_display(config)
+            
+            # Store device config for later reference
+            self._device_details[name] = {
+                'config': config,
+                'display_text': display_text
+            }
+            
+            self.combo_source.addItem(display_text)
+
+        # Debug output
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.debug(f"Event log: Updated device list with {len(self._known_device_names)} devices")
+        logger.debug(f"Event log: Known device names: {self._known_device_names}")
 
         # restore selection if possible
         idx = self.combo_source.findText(current)
@@ -565,6 +619,39 @@ class EventLogWidget(QWidget):
             self.combo_source.setCurrentIndex(0)
 
         self.combo_source.blockSignals(False)
+
+    def _format_device_display(self, config) -> str:
+        """Format device display string with connection details.
+        
+        Examples:
+        - "Device1 (IEC61850 | 192.168.1.100:102)"
+        - "ModbusRTU (Serial | /dev/ttyUSB0@9600)"
+        - "ModbusTCP (TCP | 192.168.1.50:502)"
+        """
+        name = config.name if hasattr(config, 'name') else "Unknown"
+        device_type = config.device_type.value if hasattr(config, 'device_type') else "Unknown"
+        
+        # Build connection detail based on device type and configuration
+        detail = ""
+        
+        # Check for serial-based connections (Modbus RTU, IEC104)
+        if hasattr(config, 'serial_port') and config.serial_port:
+            baudrate = getattr(config, 'serial_baudrate', 9600)
+            detail = f"{config.serial_port}@{baudrate}"
+        # Check for network-based connections
+        elif hasattr(config, 'ip_address') and config.ip_address:
+            ip = config.ip_address
+            port = getattr(config, 'port', None)
+            if port:
+                detail = f"{ip}:{port}"
+            else:
+                detail = ip
+        
+        # Format final display string
+        if detail:
+            return f"{name} ({device_type} | {detail})"
+        else:
+            return f"{name} ({device_type})"
 
     def update_font(self, font_family="Consolas", font_size=9):
         """Update the console font for the event log."""
@@ -576,9 +663,127 @@ class EventLogWidget(QWidget):
         self.is_paused = self.btn_pause.isChecked()
         self.btn_pause.setText("Resume" if self.is_paused else "Pause")
 
-    def _apply_source_filter(self, text):
-        self.source_filter = text
+    def _on_filter_text_changed(self, text):
+        """Handle filter text box changes (Wireshark-style filter)."""
+        self.text_filter = text.strip()
         self._refresh_log_view()
+
+    def _apply_filter_expression(self, event) -> bool:
+        """Parse and apply text filter expression to an event.
+        
+        Supports syntax like:
+        - "error" - case-insensitive keyword search in message
+        - "level:ERROR" - filter by log level
+        - "source:DeviceName" - filter by source
+        - "connection" - search in message
+        - Multiple terms: "error connection" (AND logic)
+        
+        Returns True if event passes filter, False otherwise.
+        """
+        if not self.text_filter:
+            return True  # No filter applied
+        
+        level = event.get('level', '')
+        source = event.get('source', '')
+        message = event.get('message', '')
+        
+        # Parse filter expression
+        terms = self.text_filter.split()
+        
+        for term in terms:
+            term_lower = term.lower()
+            
+            # Parse special filter formats
+            if ':' in term:
+                key, value = term.split(':', 1)
+                key_lower = key.lower()
+                value_lower = value.lower()
+                
+                if key_lower == 'level':
+                    # Filter by level: level:ERROR, level:WARNING, etc.
+                    if level.lower() != value_lower:
+                        return False
+                elif key_lower == 'source':
+                    # Filter by source: source:DeviceName
+                    if value_lower not in source.lower():
+                        return False
+                elif key_lower == 'msg':
+                    # Filter by message content: msg:keyword
+                    if value_lower not in message.lower():
+                        return False
+            else:
+                # Plain text search in all fields (message, source)
+                message_lower = message.lower() if message else ""
+                source_lower = source.lower() if source else ""
+                
+                # Match if term appears in message OR source
+                if not (term_lower in message_lower or term_lower in source_lower):
+                    return False
+        
+        return True
+
+    def _apply_source_filter(self, text):
+        # Extract device name from display text
+        # Display format: "DeviceName (Type | Details)" or "DeviceName (Type)"
+        # If it's one of the special items (All Sources, Application), use as-is
+        if text in ("All Sources", "Application"):
+            self.source_filter = text
+            self.lbl_device_details.setText("")
+        else:
+            # Extract device name: everything before the first " ("
+            if " (" in text:
+                device_name = text.split(" (")[0]
+                self.source_filter = device_name
+            else:
+                self.source_filter = text
+                device_name = text
+            
+            # Update device details label
+            if device_name in self._device_details:
+                detail_info = self._device_details[device_name]
+                config = detail_info['config']
+                detail_text = self._build_device_detail_text(config)
+                self.lbl_device_details.setText(detail_text)
+                # Debug: show what we're filtering for
+                import logging
+                logging.getLogger(__name__).debug(f"Filter set to device: {device_name}")
+            else:
+                self.lbl_device_details.setText("")
+                import logging
+                logging.getLogger(__name__).warning(f"Device '{device_name}' not found in device_details. Known devices: {list(self._device_details.keys())}")
+        
+        self._refresh_log_view()
+
+    def _build_device_detail_text(self, config) -> str:
+        """Build detailed connection information text for display.
+        
+        Returns a formatted string like:
+        "IP: 192.168.1.100, Port: 102, Type: IEC61850"
+        """
+        details = []
+        
+        # Device type
+        if hasattr(config, 'device_type'):
+            details.append(f"Type: {config.device_type.value}")
+        
+        # IP and port for network devices
+        if hasattr(config, 'ip_address') and config.ip_address:
+            details.append(f"IP: {config.ip_address}")
+            if hasattr(config, 'port') and config.port:
+                details.append(f"Port: {config.port}")
+        
+        # Serial port info for serial devices
+        if hasattr(config, 'serial_port') and config.serial_port:
+            baudrate = getattr(config, 'serial_baudrate', 9600)
+            parity = getattr(config, 'serial_parity', 'N')
+            stopbits = getattr(config, 'serial_stopbits', 1)
+            details.append(f"Port: {config.serial_port}@{baudrate},{parity},{int(stopbits)}")
+        
+        # Description if available
+        if hasattr(config, 'description') and config.description:
+            details.append(f"Desc: {config.description}")
+        
+        return " | ".join(details)
 
     def set_event_logger(self, logger: EventLogger):
         """Connects the widget to a core event logger."""
@@ -655,13 +860,33 @@ class EventLogWidget(QWidget):
                 return
 
         else:
-            # Specific device selected — exact match on source
-            if source != self.source_filter:
+            # Specific device selected
+            # Match if source equals device name or contains it in some way
+            device_name = self.source_filter
+            source_str = source if source else ""
+            
+            # Exact match on device name
+            is_match = (source_str == device_name)
+            
+            # Also match if source contains device name (case-insensitive substring match)
+            if not is_match and device_name:
+                source_lower = source_str.lower()
+                device_lower = device_name.lower()
+                # Use substring matching for flexibility
+                is_match = (device_lower in source_lower or source_lower in device_lower)
+            
+            # Skip if no match
+            if not is_match:
                 return
+        
+        # Text filter (Wireshark-style)
+        if not self._apply_filter_expression(event):
+            return
+                
         if level == "ERROR":
             color = "#f48771"  # Red
         elif level == "WARNING":
-            color = "#dcdcaa"  # Yellow
+            color = "#dcdcaa"  # Yellow  
         elif level == "INFO":
             color = "#4fc1ff"  # Bright Cyan - More visible for success messages
         elif level == "DEBUG":

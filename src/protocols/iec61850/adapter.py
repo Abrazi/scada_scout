@@ -151,15 +151,28 @@ class IEC61850Adapter(BaseProtocol):
             
             self.connected = True
             
-            # Set request timeout to 5 seconds (5000ms) to prevent indefinite blocking
+            # Set request timeout appropriately:
+            # - Local connections (same host): 5000ms
+            # - Remote connections: 15000ms (accounts for network latency + processing)
+            # - Can be overridden via IEC61850_REQUEST_TIMEOUT_MS env var
+            is_local = self.config.ip_address in ("127.0.0.1", "localhost", "::1", "[::1]")
+            default_timeout = 5000 if is_local else 15000
+            request_timeout_ms = int(os.environ.get("IEC61850_REQUEST_TIMEOUT_MS", default_timeout))
+            
             try:
-                iec61850.IedConnection_setRequestTimeout(self.connection, 5000)
+                iec61850.IedConnection_setRequestTimeout(self.connection, request_timeout_ms)
                 if self.event_logger:
-                    self.event_logger.debug("IEC61850", "Set request timeout to 5000ms")
+                    connection_type = "local" if is_local else "remote"
+                    self.event_logger.debug(
+                        "IEC61850", 
+                        f"Set request timeout to {request_timeout_ms}ms ({connection_type} connection)"
+                    )
+                logger.info(f"IEC61850 request timeout: {request_timeout_ms}ms (connection type: {'local' if is_local else 'remote'})")
             except Exception as e:
                 # If setRequestTimeout not available, continue anyway
                 if self.event_logger:
                     self.event_logger.warning("IEC61850", f"Could not set timeout: {e}")
+                logger.warning(f"IedConnection_setRequestTimeout not available: {e}")
             
             if self.event_logger:
                 self.event_logger.transaction("IEC61850", f"← Connection SUCCESS")
@@ -1838,6 +1851,8 @@ class IEC61850Adapter(BaseProtocol):
                 if self.event_logger: self.event_logger.transaction("IEC61850", "← SELECT SUCCESS")
                 if ctx:
                     ctx.state = ControlState.SELECTED
+                    # Record timestamp for SBO timeout tracking
+                    ctx._select_timestamp = time.time()
                     # Capture ctlNum from SBOw or Oper after successful SELECT so OPERATE can use it
                     try:
                         sbo_ref = ctx.sbo_reference if getattr(ctx, 'sbo_reference', None) else f"{object_ref}.SBOw"
@@ -2136,6 +2151,17 @@ class IEC61850Adapter(BaseProtocol):
                 if self.event_logger:
                     self.event_logger.error("IEC61850", f"SELECT FAILED: Error {err} ({err_name})")
                     self.event_logger.error("IEC61850", f"  → {interpretation}")
+                    # For remote connections, provide additional diagnostics
+                    is_remote = self.config.ip_address not in ("127.0.0.1", "localhost", "::1", "[::1]")
+                    if is_remote:
+                        self.event_logger.error(
+                            "IEC61850",
+                            f"🌐 REMOTE CONNECTION HINT:\n"
+                            f"   • Check network connectivity to {self.config.ip_address}:{self.config.port}\n"
+                            f"   • Ensure server is configured for remote access (bind 0.0.0.0)\n"
+                            f"   • Try increasing timeout: IEC61850_REQUEST_TIMEOUT_MS=30000\n"
+                            f"   • Check firewall rules on both sides"
+                        )
                 
                 self._last_control_error = f"SELECT Failed: {err_name}\n{interpretation}"
                 return False

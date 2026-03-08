@@ -1430,8 +1430,7 @@ QTabBar::tab {{ padding: {widget_padding + 2}px {button_padding + 8}px; font-siz
         
     def _update_event_log_devices(self):
         """Updates the device filtering list in Event Log."""
-        devices = [d.config.name for d in self.device_manager.get_all_devices()]
-        devices.sort()
+        devices = self.device_manager.get_all_devices()
         self.event_log_widget.update_device_list(devices)
 
     def _show_scd_import_dialog(self):
